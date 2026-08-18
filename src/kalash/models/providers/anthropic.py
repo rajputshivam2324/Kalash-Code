@@ -199,6 +199,7 @@ class AnthropicProvider:
         base_url: str | None = None,
         thinking: bool = False,
         thinking_budget: int | None = None,
+        cache_prompt: bool = True,
     ) -> None:
         self._api_key = api_key
         self._model = model
@@ -206,6 +207,10 @@ class AnthropicProvider:
         self._base_url = base_url
         self._thinking = thinking
         self._thinking_budget = thinking_budget
+        # On by default: the system prompt and tool schemas are stable within a
+        # session, so caching them is a straight cost reduction with no
+        # behavioural change.
+        self._cache_prompt = cache_prompt
         self._client: Any = None
 
     def _get_client(self) -> Any:
@@ -272,11 +277,34 @@ class AnthropicProvider:
             "max_tokens": max_tokens or self._default_max_tokens,
         }
 
+        # Prompt caching. Anthropic caches a stable prefix only when a
+        # breakpoint is declared explicitly — it never happens implicitly — and
+        # this was previously never set, so every turn paid full input price for
+        # the whole system prompt and tool schema block. Cache reads bill at a
+        # fraction of input, and both of these are byte-stable within a session,
+        # which makes them the two highest-value breakpoints available.
         if system:
-            request["system"] = system
+            request["system"] = (
+                [
+                    {
+                        "type": "text",
+                        "text": system,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+                if self._cache_prompt
+                else system
+            )
 
         if tools:
-            request["tools"] = tools
+            if self._cache_prompt:
+                # The breakpoint goes on the final tool, so the whole tool block
+                # is covered by one marker.
+                cached = [dict(tool) for tool in tools]
+                cached[-1]["cache_control"] = {"type": "ephemeral"}
+                request["tools"] = cached
+            else:
+                request["tools"] = tools
 
         if temperature is not None:
             request["temperature"] = temperature

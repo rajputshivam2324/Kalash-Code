@@ -74,6 +74,15 @@ class SkillLoader:
         Only parses frontmatter (name+description) for catalog.
         Body is not loaded until explicitly requested.
         """
+        return self.discover_now()
+
+    def discover_now(self) -> dict[str, SkillEntry]:
+        """Synchronous discovery.
+
+        Discovery is directory globbing and frontmatter parsing with no I/O
+        concurrency, so it needs no event loop. Exposing it synchronously lets
+        agent assembly build the catalog without one.
+        """
         self._loaded.clear()
 
         # Priority order: user > project > plugins
@@ -153,6 +162,28 @@ class SkillLoader:
     def list_names(self) -> list[str]:
         """List all discovered skill names."""
         return list(self._loaded.keys())
+
+    def validate_skill(self, skill_dir: Path) -> list[str]:
+        """Return validation errors for a skill directory, or [] if valid."""
+        errors: list[str] = []
+        skill_md = skill_dir / "SKILL.md"
+        if not skill_md.is_file():
+            return [f"missing SKILL.md in {skill_dir}"]
+
+        entry = self._parse_frontmatter(skill_md, "project")
+        if entry is None:
+            return ["could not parse SKILL.md frontmatter"]
+
+        name = entry.metadata.name
+        if not re.fullmatch(r"[a-z0-9-]{1,64}", name):
+            errors.append(f"name {name!r} must match [a-z0-9-] (1–64 chars)")
+        if skill_dir.name != name:
+            errors.append(f"directory {skill_dir.name!r} must match skill name {name!r}")
+        if not entry.metadata.description.strip():
+            errors.append("description is required (1–1024 chars)")
+        elif len(entry.metadata.description) > 1024:
+            errors.append("description exceeds 1024 characters")
+        return errors
 
     def _parse_frontmatter(self, path: Path, source: str) -> SkillEntry | None:
         """Parse YAML frontmatter from a skill file.

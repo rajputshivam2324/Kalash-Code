@@ -7,6 +7,8 @@ Writes are atomic (temp + fsync + os.replace) and require digest for overwrites 
 
 from __future__ import annotations
 
+import contextlib
+import fnmatch
 import hashlib
 import os
 import stat
@@ -16,6 +18,9 @@ from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
+
+from kalash.core.diff import make_diff
+from kalash.sandbox.policy import DEFAULT_PROTECTED_PATHS
 
 from kalash.tools.base import (
     SideEffect,
@@ -78,21 +83,75 @@ def _check_readable(path: Path, ctx: ToolContext) -> ToolEnvelope | None:
     return None
 
 
+def _is_protected(path: Path) -> str:
+    """Return the matching protected pattern, or empty string if none (I-010).
+
+    The pattern list lives in ``sandbox/policy.py`` and was never consulted from
+    the write path, which meant ``.env``, ``~/.ssh/*``, and ``.git/hooks/*`` were
+    writable by any tool call.
+
+    Patterns are relative by nature (``.git/config``, ``**/*.pem``) while the
+    paths reaching here are absolute, so matching only the full path misses
+    almost everything. Every path suffix is tested, which is what makes
+    ``/home/u/proj/.git/config`` match the pattern ``.git/config``.
+    """
+    text = str(path)
+    home = str(Path.home())
+    parts = path.parts
+
+    # Every trailing sub-path: "a/b/c.py" -> {"a/b/c.py", "b/c.py", "c.py"}
+    suffixes = {"/".join(parts[index:]) for index in range(len(parts))}
+
+    for pattern in DEFAULT_PROTECTED_PATHS:
+        expanded = pattern.replace("~", home)
+        if fnmatch.fnmatch(text, expanded):
+            return pattern
+        if any(fnmatch.fnmatch(suffix, pattern) for suffix in suffixes):
+            return pattern
+    return ""
+
+
 def _check_writable(path: Path, ctx: ToolContext) -> ToolEnvelope | None:
-    """Return an error envelope if path is outside writable roots, else None."""
+    """Return an error envelope if the path may not be written, else None.
+
+    Fails **closed**: an unconfigured context denies every write rather than
+    permitting them. ``ToolContext.writable_roots`` defaults to ``()``, so the
+    previous "no restrictions configured" short-circuit meant that any caller
+    which forgot to populate roots silently got unrestricted filesystem write
+    access — the opposite of the intended default.
+    """
+    if protected := _is_protected(path):
+        return ToolEnvelope.fail(
+            code="KALASH_SANDBOX_PATH_PROTECTED",
+            message=f"Refusing to write a protected path: {path} (matches {protected!r})",
+            recoverable=False,
+            remediation="Protected paths hold credentials or repository trust config.",
+        )
+
     if not ctx.writable_roots:
-        return None  # No restrictions configured
+        return ToolEnvelope.fail(
+            code="KALASH_SANDBOX_PATH_DENIED",
+            message=(
+                "No writable roots are configured for this session, so writing is "
+                "denied (fail-closed)."
+            ),
+            recoverable=False,
+            remediation="The session must declare writable roots before tools can write.",
+        )
+
     for root in ctx.writable_roots:
         try:
             path.relative_to(root)
             return None
         except ValueError:
             continue
+
+    roots = ", ".join(str(r) for r in ctx.writable_roots)
     return ToolEnvelope.fail(
         code="KALASH_SANDBOX_PATH_DENIED",
         message=f"Path outside writable roots: {path}",
         recoverable=False,
-        remediation="The file must be within an allowed directory.",
+        remediation=f"The file must be within: {roots}",
     )
 
 
@@ -328,7 +387,12 @@ class WriteTool:
 
         # Digest check for overwrites (I-012)
         existing_mode: int | None = None
+        previous_text = ""
         if path.exists():
+            # Captured before the write so a diff can be shown. Read failures are
+            # non-fatal: the diff is a display nicety, the write is the contract.
+            with contextlib.suppress(OSError, UnicodeDecodeError):
+                previous_text = path.read_text(encoding="utf-8", errors="replace")
             if not args.digest:
                 return ToolEnvelope.fail(
                     code="KALASH_TOOL_STALE_READ",
@@ -388,12 +452,21 @@ class WriteTool:
         new_digest = _content_digest(content_bytes)
         kind = "modified" if existing_mode is not None else "created"
 
+        diff = make_diff(str(path), previous_text, args.content)
+
         return ToolEnvelope.success(
-            content=f"Wrote {len(content_bytes)} bytes to {path}",
+            content=f"Wrote {len(content_bytes)} bytes to {path} ({diff.stat.render()})",
             metadata={
                 "path": str(path),
                 "content_digest": new_digest,
                 "bytes_written": len(content_bytes),
+                # Consumed by the UI to render the change inline. Reporting only a
+                # byte count gave the user no way to review what happened.
+                "diff": diff.text,
+                "diff_stat": diff.stat.render(),
+                "lines_added": diff.stat.added,
+                "lines_removed": diff.stat.removed,
+                "operation": kind,
             },
             side_effects=(SideEffectRecord(kind=kind, path=str(path), digest=new_digest),),
         )
@@ -524,9 +597,18 @@ class EditTool:
             )
 
         new_digest = _content_digest(new_bytes)
+        diff = make_diff(str(path), text, new_text)
         return ToolEnvelope.success(
-            content=f"Edited {path}",
-            metadata={"path": str(path), "content_digest": new_digest},
+            content=f"Edited {path} ({diff.stat.render()})",
+            metadata={
+                "path": str(path),
+                "content_digest": new_digest,
+                "diff": diff.text,
+                "diff_stat": diff.stat.render(),
+                "lines_added": diff.stat.added,
+                "lines_removed": diff.stat.removed,
+                "operation": "modified",
+            },
             side_effects=(SideEffectRecord(kind="modified", path=str(path), digest=new_digest),),
         )
 

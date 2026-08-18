@@ -105,8 +105,14 @@ class ApprovalPrompt:
     event_bus: EventBus
     ui: UIAdapter | None = None
 
-    # Configuration
-    timeout_seconds: float = 300.0  # 5 minutes
+    # Configuration.
+    #
+    # 300s was long enough that an approval which could not be *rendered* looked
+    # exactly like a frozen application: no output, no tool line, five minutes of
+    # nothing. 60s is still ample for a human who can see the prompt, and short
+    # enough that a broken prompt surfaces as a denial with a reason instead of a
+    # hang. Timing out always denies — never approves.
+    timeout_seconds: float = 60.0
     non_interactive: bool = False  # If True, deny all (never auto-approve)
 
     # ------------------------------------------------------------------
@@ -162,11 +168,24 @@ class ApprovalPrompt:
                 timeout=self.timeout_seconds,
             )
         except asyncio.TimeoutError:
-            # Timeout: DENY (never auto-approve)
+            # Timeout: DENY (never auto-approve). The reason names the likely
+            # cause, because the usual explanation is that the prompt never
+            # became visible rather than that the user ignored it.
             logger.warning("Approval timeout for %s — denying", context.tool_name)
             return PromptResult(
                 response=ApprovalResponse.DENY,
-                reason="Approval timed out (never auto-approves)",
+                reason=(
+                    f"no answer within {self.timeout_seconds:.0f}s — if no prompt "
+                    f"appeared, the approval UI could not be shown"
+                ),
+            )
+        except Exception as exc:
+            # A UI that raises must not take the turn down, and must not be read
+            # as consent.
+            logger.warning("Approval UI failed for %s: %s", context.tool_name, exc)
+            return PromptResult(
+                response=ApprovalResponse.DENY,
+                reason=f"the approval prompt could not be shown ({exc})",
             )
 
         # Log decision

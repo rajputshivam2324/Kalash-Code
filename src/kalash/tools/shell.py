@@ -13,6 +13,7 @@ Runs commands in platform shell (bash -c) with:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import signal
 import sys
@@ -37,6 +38,24 @@ from kalash.tools.base import (
 _MAX_OUTPUT_BYTES = 131_072  # 128 KiB per stream
 _DEFAULT_TIMEOUT_S = 120.0
 _GRACE_PERIOD_S = 5.0
+
+# Background processes keyed by session → pid → process handle.
+_BACKGROUND: dict[str, dict[int, asyncio.subprocess.Process]] = {}
+
+
+async def terminate_session_backgrounds(session_id: str) -> list[int]:
+    """Kill tracked background shell processes for a session."""
+    procs = _BACKGROUND.pop(session_id, {})
+    killed: list[int] = []
+    for pid, process in procs.items():
+        await _terminate_process(process)
+        killed.append(pid)
+    return killed
+
+
+def list_background_pids(session_id: str) -> list[int]:
+    """Return PIDs of background shells still running for a session."""
+    return list(_BACKGROUND.get(session_id, {}).keys())
 
 # Environment variables stripped for safety
 _STRIPPED_ENV_VARS = frozenset({
@@ -90,6 +109,34 @@ def _safe_env() -> dict[str, str]:
     for var in _STRIPPED_ENV_VARS:
         env.pop(var, None)
     return env
+
+
+def _wrap_sandboxed(
+    argv: list[str], ctx: ToolContext, cwd: Path
+) -> tuple[list[str], bool, str | None]:
+    """Wrap argv in the platform sandbox if one is usable.
+
+    Returns ``(argv, wrapped, warning)``. Never raises.
+    """
+    if not ctx.writable_roots:
+        return argv, False, None
+    try:
+        from kalash.sandbox.manager import get_sandbox_manager
+
+        manager = get_sandbox_manager(
+            workspace_root=ctx.cwd,
+            writable_roots=tuple({*ctx.writable_roots, cwd}),
+            allow_network=ctx.allow_network,
+        )
+        argv, wrapped = manager.wrap(argv, cwd=str(cwd))
+        if wrapped:
+            return argv, True, None
+        status = manager.status()
+        if status.available:
+            return argv, False, "sandbox preflight failed — command runs unwrapped"
+        return argv, False, f"OS sandbox unavailable ({status.detail}) — command runs unwrapped"
+    except Exception:
+        return argv, False, "sandbox backend error — command runs unwrapped"
 
 
 # ---------------------------------------------------------------------------
@@ -166,6 +213,14 @@ class ShellTool:
             cwd = ctx.cwd / cwd
         cwd = cwd.resolve()
 
+        if ctx.writable_roots and not _cwd_allowed(cwd, ctx):
+            return ToolEnvelope.fail(
+                code="KALASH_TOOL_ERROR",
+                message=f"Working directory outside allowed roots: {cwd}",
+                recoverable=True,
+                remediation="Use a path inside the workspace.",
+            )
+
         if not cwd.is_dir():
             return ToolEnvelope.fail(
                 code="KALASH_TOOL_ERROR",
@@ -180,6 +235,8 @@ class ShellTool:
 
         env = _safe_env()
         env["KALASH_TOOL"] = "1"  # Signal to child that it's inside Kalash
+        sandboxed = False
+        sandbox_warning: str | None = None
 
         try:
             # Use setsid for process group isolation on Unix
@@ -198,39 +255,59 @@ class ShellTool:
                     args.command, **kwargs
                 )
             else:
-                process = await asyncio.create_subprocess_exec(
-                    shell, "-c", args.command, **kwargs
+                # Wrap in the platform sandbox when one is available. This is
+                # defence in depth behind the permission gate, not a substitute
+                # for it: an unavailable backend returns the argv unchanged and
+                # the degradation shows up in `kalash doctor` rather than being
+                # silently assumed.
+                argv, wrapped, sandbox_warning = _wrap_sandboxed(
+                    [shell, "-c", args.command], ctx, cwd
                 )
+                sandboxed = wrapped
+                process = await asyncio.create_subprocess_exec(*argv, **kwargs)
 
             # Background mode: return immediately
             if args.background:
+                meta: dict[str, Any] = {
+                    "pid": process.pid,
+                    "command": args.command,
+                    "background": True,
+                }
+                if sandbox_warning:
+                    meta["sandbox_warning"] = sandbox_warning
+                if process.pid is not None:
+                    _BACKGROUND.setdefault(ctx.session_id, {})[process.pid] = process
                 return ToolEnvelope.success(
-                    content=f"Background process started (PID: {process.pid})",
-                    metadata={
-                        "pid": process.pid,
-                        "command": args.command,
-                        "background": True,
-                    },
+                    content=(
+                        f"Background process started (PID: {process.pid}). "
+                        "Use `shell` foreground commands to check output; "
+                        "background jobs stop when the session is interrupted."
+                    ),
+                    metadata=meta,
                     side_effects=(
                         SideEffectRecord(kind="executed", path=args.command),
                     ),
                 )
 
-            # Wait with timeout
-            stdout_data, stderr_data = await asyncio.wait_for(
-                process.communicate(),
-                timeout=args.timeout,
-            )
+            # Wait with timeout — stream output live to the TUI / headless sink
+            try:
+                stdout_data, stderr_data, stdout_truncated, stderr_truncated = (
+                    await _run_with_timeout(process, ctx=ctx, timeout=args.timeout)
+                )
+            except _ShellCancelled:
+                return ToolEnvelope.fail(
+                    code="KALASH_CANCELLED",
+                    message=f"Command cancelled: {args.command}",
+                    recoverable=True,
+                )
+            except asyncio.TimeoutError:
+                return ToolEnvelope.fail(
+                    code="KALASH_TOOL_TIMEOUT",
+                    message=f"Command timed out after {args.timeout}s: {args.command}",
+                    recoverable=True,
+                    remediation="Increase timeout or use background mode.",
+                )
 
-        except asyncio.TimeoutError:
-            # SIGTERM -> grace period -> SIGKILL
-            await _terminate_process(process)
-            return ToolEnvelope.fail(
-                code="KALASH_TOOL_TIMEOUT",
-                message=f"Command timed out after {args.timeout}s: {args.command}",
-                recoverable=True,
-                remediation="Increase timeout or use background mode.",
-            )
         except OSError as exc:
             return ToolEnvelope.fail(
                 code="KALASH_TOOL_ERROR",
@@ -238,11 +315,9 @@ class ShellTool:
                 recoverable=True,
             )
 
-        # Cap output
-        stdout_truncated = len(stdout_data) > _MAX_OUTPUT_BYTES
-        stderr_truncated = len(stderr_data) > _MAX_OUTPUT_BYTES
-        stdout_str = stdout_data[:_MAX_OUTPUT_BYTES].decode("utf-8", errors="replace")
-        stderr_str = stderr_data[:_MAX_OUTPUT_BYTES].decode("utf-8", errors="replace")
+        # Cap output (live stream already truncated at source)
+        stdout_str = stdout_data.decode("utf-8", errors="replace")
+        stderr_str = stderr_data.decode("utf-8", errors="replace")
 
         truncated = stdout_truncated or stderr_truncated
         truncation = (
@@ -266,16 +341,21 @@ class ShellTool:
         content = "\n".join(parts)
         exit_code = process.returncode or 0
 
+        metadata: dict[str, Any] = {
+            "exit_code": exit_code,
+            "command": args.command,
+            "cwd": str(cwd),
+            "stdout_bytes": len(stdout_data),
+            "stderr_bytes": len(stderr_data),
+            "sandboxed": sandboxed,
+        }
+        if sandbox_warning:
+            metadata["sandbox_warning"] = sandbox_warning
+
         return ToolEnvelope(
             ok=exit_code == 0,
             content=content,
-            metadata={
-                "exit_code": exit_code,
-                "command": args.command,
-                "cwd": str(cwd),
-                "stdout_bytes": len(stdout_data),
-                "stderr_bytes": len(stderr_data),
-            },
+            metadata=metadata,
             truncated=truncated,
             truncation=truncation,
             error=(
@@ -291,14 +371,119 @@ class ShellTool:
         )
 
 
+class _ShellCancelled(Exception):
+    """Raised when a shell command is aborted via cancel_event."""
+
+
+def _cwd_allowed(cwd: Path, ctx: ToolContext) -> bool:
+    """True when cwd is under one of the writable roots."""
+    for root in ctx.writable_roots:
+        try:
+            cwd.relative_to(root.resolve())
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+async def _emit_stream_chunk(ctx: ToolContext, stream: str, chunk: str) -> None:
+    if not chunk or ctx.event_bus is None:
+        return
+    from kalash.core.events import Event, EventType
+
+    await ctx.event_bus.emit(
+        Event(
+            type=EventType.TOOL_OUTPUT,
+            session_id=ctx.session_id,
+            data={
+                "tool_use_id": ctx.tool_use_id,
+                "stream": stream,
+                "chunk": chunk,
+            },
+        )
+    )
+
+
+async def _collect_stream(
+    reader: asyncio.StreamReader | None,
+    *,
+    stream: str,
+    ctx: ToolContext,
+    limit: int,
+) -> tuple[bytes, bool]:
+    """Read a subprocess stream, emitting live chunks to the event bus."""
+    if reader is None:
+        return b"", False
+    chunks: list[bytes] = []
+    total = 0
+    truncated = False
+    while True:
+        if ctx.cancel_event is not None and ctx.cancel_event.is_set():
+            truncated = True
+            break
+        try:
+            data = await asyncio.wait_for(reader.read(4096), timeout=0.25)
+        except asyncio.TimeoutError:
+            continue
+        if not data:
+            break
+        total += len(data)
+        if total <= limit:
+            chunks.append(data)
+            await _emit_stream_chunk(
+                ctx, stream, data.decode("utf-8", errors="replace")
+            )
+        else:
+            truncated = True
+    return b"".join(chunks), truncated
+
+
+async def _run_with_timeout(
+    process: asyncio.subprocess.Process,
+    *,
+    ctx: ToolContext,
+    timeout: float,
+) -> tuple[bytes, bytes, bool, bool]:
+    """Wait for a process, streaming stdout/stderr as they arrive."""
+    stdout_task = asyncio.create_task(
+        _collect_stream(process.stdout, stream="stdout", ctx=ctx, limit=_MAX_OUTPUT_BYTES)
+    )
+    stderr_task = asyncio.create_task(
+        _collect_stream(process.stderr, stream="stderr", ctx=ctx, limit=_MAX_OUTPUT_BYTES)
+    )
+    deadline = asyncio.get_running_loop().time() + timeout
+    try:
+        while process.returncode is None:
+            if ctx.cancel_event is not None and ctx.cancel_event.is_set():
+                await _terminate_process(process)
+                raise _ShellCancelled()
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                await _terminate_process(process)
+                raise asyncio.TimeoutError()
+            try:
+                await asyncio.wait_for(process.wait(), timeout=min(0.2, remaining))
+            except asyncio.TimeoutError:
+                continue
+    except (asyncio.TimeoutError, _ShellCancelled):
+        stdout_task.cancel()
+        stderr_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await stdout_task
+            await stderr_task
+        raise
+    stdout_data, stdout_trunc = await stdout_task
+    stderr_data, stderr_trunc = await stderr_task
+    return stdout_data, stderr_data, stdout_trunc, stderr_trunc
+
+
 async def _terminate_process(process: asyncio.subprocess.Process) -> None:
     """Graceful termination: SIGTERM -> 5s -> SIGKILL."""
     if process.returncode is not None:
-        return  # Already exited
+        return
 
     try:
         if sys.platform != "win32":
-            # Kill entire process group
             pgid = os.getpgid(process.pid)
             os.killpg(pgid, signal.SIGTERM)
         else:
@@ -306,7 +491,6 @@ async def _terminate_process(process: asyncio.subprocess.Process) -> None:
     except (ProcessLookupError, OSError):
         return
 
-    # Grace period
     try:
         await asyncio.wait_for(process.wait(), timeout=_GRACE_PERIOD_S)
     except asyncio.TimeoutError:

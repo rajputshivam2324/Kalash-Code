@@ -11,11 +11,17 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from kalash.runtime.scratchpad import get_scratchpad
 from kalash.tools.base import (
     SideEffect,
     ToolContext,
     ToolEnvelope,
     TruncationInfo,
+)
+from kalash.tools.search_providers import (
+    SearchProviderError,
+    configuration_hint,
+    run_search,
 )
 
 
@@ -267,13 +273,33 @@ class WebSearchParams(BaseModel):
 
     query: str = Field(description="Search query (max 200 characters)", max_length=200)
     max_results: int = Field(default=5, ge=1, le=10, description="Maximum results to return")
+    provider: str = Field(
+        default="",
+        description="Force a provider: 'tavily', 'brave', or 'exa'. Default: auto-detect.",
+    )
 
 
 class WebSearchTool:
-    """External web search with untrusted results.
+    """External web search whose result bodies never enter the context window.
 
-    This is a placeholder that delegates to configured search providers.
-    Results are always marked as untrusted external content.
+    A conventional search tool inlines every title, URL, snippet, and date as
+    JSON, which runs to roughly 800 tokens for five results — and most of it is
+    snippet text the agent skims once and then pays for on every subsequent
+    request for the rest of the session.
+
+    This one writes each snippet to the scratchpad and returns an index: one
+    line per hit carrying the ref, title, URL, and date. That is around 145
+    tokens for the same five results, and the full snippet is still one
+    ``expand(#w2)`` away. The URL stays inline deliberately — it is the only
+    genuinely actionable field, and making the agent expand a ref just to learn
+    where to ``fetch`` would cost a round trip and more than it saved.
+
+    Because scratchpad bodies are content-addressed, the same hit appearing in
+    two related searches resolves to the ref already issued and adds nothing.
+
+    Results are untrusted external content (I-033). The marking is applied here,
+    once, rather than in each provider adapter, and it is re-applied by
+    ``expand`` when a stored body is pulled back.
     """
 
     @property
@@ -322,12 +348,81 @@ class WebSearchTool:
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:
         assert isinstance(args, WebSearchParams)
 
-        # This is a framework hook — actual search provider is injected at runtime.
-        # For now, return a not-configured error that the orchestration layer
-        # would override with a real search provider.
-        return ToolEnvelope.fail(
-            code="KALASH_TOOL_ERROR",
-            message="Web search provider not configured.",
-            recoverable=True,
-            remediation="Configure a search provider in settings.",
+        try:
+            response = await run_search(
+                args.query,
+                max_results=args.max_results,
+                provider=args.provider,
+            )
+        except SearchProviderError as exc:
+            return ToolEnvelope.fail(
+                code="KALASH_TOOL_ERROR",
+                message=str(exc),
+                recoverable=True,
+                remediation=configuration_hint(),
+            )
+
+        if not response.results:
+            return ToolEnvelope.success(
+                content=f'No results for "{args.query}" via {response.provider}.',
+                metadata={
+                    "query": args.query,
+                    "provider": response.provider,
+                    "result_count": 0,
+                    "untrusted": True,
+                },
+            )
+
+        pad = get_scratchpad(ctx.session_id)
+        lines: list[str] = []
+        refs: list[str] = []
+        reused = 0
+
+        for result in response.results:
+            # The stored body is what expand() returns, so it has to be
+            # self-describing on its own — the index line will be long gone from
+            # context by the time anyone expands it.
+            body_parts = [result.title, result.url]
+            if result.published:
+                body_parts.append(f"published: {result.published}")
+            body_parts.extend(("", result.snippet))
+            body = "\n".join(body_parts).strip()
+
+            stored = pad.put(
+                "web",
+                f"{result.title} · {result.display_url}",
+                body,
+                metadata={
+                    "url": result.url,
+                    "title": result.title,
+                    "provider": response.provider,
+                    "query": args.query,
+                },
+            )
+            refs.append(stored.ref)
+            if stored.deduped:
+                reused += 1
+
+            row = f"{stored.ref} {result.title} · {result.display_url}"
+            if result.published:
+                row += f" · {result.published}"
+            lines.append(row)
+
+        header = (
+            f'web_search "{args.query}" · {len(response.results)} results '
+            f"· {response.provider}"
+        )
+        footer = "expand(ref) for the stored snippet · fetch(url) for the live page"
+        content = "[UNTRUSTED EXTERNAL CONTENT]\n" + "\n".join([header, *lines, footer])
+
+        return ToolEnvelope.success(
+            content=content,
+            metadata={
+                "query": args.query,
+                "provider": response.provider,
+                "result_count": len(response.results),
+                "refs": refs,
+                "deduped_refs": reused,
+                "untrusted": True,
+            },
         )

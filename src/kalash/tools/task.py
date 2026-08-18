@@ -151,29 +151,68 @@ class TaskTool:
                     recoverable=True,
                 )
 
-        # The actual subagent execution is handled by the orchestration layer.
-        # This tool validates inputs and returns a handle; the orchestrator
-        # creates the child run, manages its lifecycle, and captures results.
-        #
-        # In production, this would:
-        # 1. Create a new Run with isolated context
-        # 2. Inject context_files into the child's context
-        # 3. Set capability/budget boundaries
-        # 4. Execute the child run asynchronously
-        # 5. Await completion or timeout
-        # 6. Return TaskResult
+        # Depth is carried in the context and checked here rather than in a
+        # global, so a child that spawns a grandchild is bounded on the way down.
+        if not ctx.can_spawn:
+            return ToolEnvelope.fail(
+                code="KALASH_SUBAGENT_DEPTH_EXCEEDED",
+                message=(
+                    f"Spawn depth limit reached ({ctx.max_spawn_depth}). "
+                    f"Do this work directly instead of delegating further."
+                ),
+                recoverable=True,
+            )
 
-        # Placeholder response indicating the orchestration layer should handle this
+        import asyncio
+
+        from kalash.runtime.agent import run_isolated
+
+        try:
+            outcome = await asyncio.wait_for(
+                run_isolated(
+                    args.prompt,
+                    cwd=ctx.cwd,
+                    max_turns=args.max_turns,
+                    spawn_depth=ctx.spawn_depth,
+                    max_spawn_depth=ctx.max_spawn_depth,
+                    model_id=ctx.model_id or None,
+                    context_files=tuple(args.context_files),
+                ),
+                timeout=args.timeout_s,
+            )
+        except asyncio.TimeoutError:
+            return ToolEnvelope.fail(
+                code="KALASH_TOOL_TIMEOUT",
+                message=f"Subagent exceeded its {args.timeout_s}s budget.",
+                recoverable=True,
+                remediation="Narrow the brief, or raise timeout_s.",
+            )
+        except Exception as exc:
+            return ToolEnvelope.fail(
+                code="KALASH_TOOL_ERROR",
+                message=f"Subagent failed: {exc}",
+                recoverable=True,
+            )
+
+        if outcome.get("status") != "completed":
+            return ToolEnvelope.fail(
+                code="KALASH_TOOL_ERROR",
+                message=f"Subagent did not complete: {outcome.get('error') or 'unknown'}",
+                recoverable=True,
+            )
+
+        output = str(outcome.get("output") or "").strip()
+        usage = outcome.get("usage")
+        child_tokens = getattr(usage, "total_tokens", 0)
+
         return ToolEnvelope.success(
-            content=f"Task {task_id} queued for execution.",
+            content=output or "(the subagent returned no findings)",
             metadata={
                 "task_id": task_id,
-                "prompt_preview": args.prompt[:100],
-                "context_files": args.context_files,
-                "capabilities": list(requested_caps),
-                "timeout_s": args.timeout_s,
-                "max_turns": args.max_turns,
-                "status": "queued",
+                "turns": outcome.get("turns", 0),
+                "child_tokens": child_tokens,
+                "termination": outcome.get("termination", ""),
+                "status": "completed",
             },
             side_effects=(
                 SideEffectRecord(kind="executed", path=f"task:{task_id}"),

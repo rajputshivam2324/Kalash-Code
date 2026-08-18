@@ -43,7 +43,7 @@ def search(
         typer.Option("--scope", "-s", help="Filter by scope"),
     ] = None,
 ) -> None:
-    """Search memories by semantic similarity."""
+    """Search memories by keyword (FTS) across configured providers."""
     from kalash.memory.manager import MemoryManager
 
     manager = MemoryManager()

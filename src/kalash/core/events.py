@@ -29,6 +29,7 @@ class EventType(StrEnum):
 
     # Tool lifecycle
     TOOL_START = "tool.start"
+    TOOL_OUTPUT = "tool.output"
     TOOL_COMPLETE = "tool.complete"
     TOOL_DENIED = "tool.denied"
 

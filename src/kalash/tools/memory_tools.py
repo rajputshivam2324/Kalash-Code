@@ -1,12 +1,8 @@
-"""Memory tools: recall, remember, forget.
-
-- RecallTool: explicit memory query (semantic search)
-- RememberTool: explicit memory write (queued, non-blocking)
-- ForgetTool: targeted deletion by ID or content
-"""
+"""Memory tools: recall, remember, forget — wired to the local provider."""
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -18,24 +14,14 @@ from kalash.tools.base import (
 )
 
 
-# ---------------------------------------------------------------------------
-# RecallTool
-# ---------------------------------------------------------------------------
-
-
 class RecallParams(BaseModel):
-    """Parameters for memory recall."""
-
     query: str = Field(description="Natural language query to search memories")
-    limit: int = Field(default=10, ge=1, le=50, description="Maximum memories to return")
-    scope: str = Field(
-        default="all",
-        description="Scope filter: 'all', 'session', 'project', 'user'",
-    )
+    limit: int = Field(default=10, ge=1, le=50)
+    scope: str = Field(default="all", description="all, session, project, or user")
 
 
 class RecallTool:
-    """Query stored memories via semantic search."""
+    """Query stored memories via keyword search."""
 
     @property
     def name(self) -> str:
@@ -47,7 +33,7 @@ class RecallTool:
 
     @property
     def description(self) -> str:
-        return "Search stored memories using natural language. Returns relevant past context."
+        return "Search stored memories using natural language."
 
     @property
     def params(self) -> type[BaseModel]:
@@ -82,42 +68,27 @@ class RecallTool:
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:
         assert isinstance(args, RecallParams)
+        from kalash.memory.session import get_session_memory
 
-        # Memory provider is injected at runtime via the orchestration layer.
-        # This is the tool interface — actual recall delegates to memory.provider.
-        try:
-            from kalash.memory.protocol import RecallQuery, MemoryProvider
-        except ImportError:
-            pass
-
-        # Placeholder: the orchestration layer injects the actual memory backend.
-        # This tool exposes the interface; the registry wires it to the provider.
-        return ToolEnvelope.fail(
-            code="KALASH_TOOL_ERROR",
-            message="Memory provider not initialized.",
-            recoverable=True,
-            remediation="Memory system initializes during session setup.",
-        )
-
-
-# ---------------------------------------------------------------------------
-# RememberTool
-# ---------------------------------------------------------------------------
+        mem = get_session_memory(ctx.session_id, ctx.cwd)
+        hits = await mem.recall_tool(args.query, limit=args.limit, scope=args.scope)
+        if not hits:
+            return ToolEnvelope.success(content="No matching memories found.")
+        lines = [
+            f"- [{h['id']}] (score {h['score']:.2f}) {h['content'][:300]}"
+            for h in hits
+        ]
+        return ToolEnvelope.success(content="\n".join(lines), metadata={"count": len(hits)})
 
 
 class RememberParams(BaseModel):
-    """Parameters for storing a memory."""
-
     content: str = Field(description="Content to remember")
-    scope: str = Field(
-        default="project",
-        description="Storage scope: 'session', 'project', or 'user'",
-    )
-    tags: list[str] = Field(default_factory=list, description="Optional tags for organization")
+    scope: str = Field(default="project", description="session, project, or user")
+    tags: list[str] = Field(default_factory=list)
 
 
 class RememberTool:
-    """Store a memory (queued, non-blocking write)."""
+    """Store a memory for future recall."""
 
     @property
     def name(self) -> str:
@@ -129,7 +100,7 @@ class RememberTool:
 
     @property
     def description(self) -> str:
-        return "Store information in memory for future recall. Queued and non-blocking."
+        return "Store information in memory for future recall."
 
     @property
     def params(self) -> type[BaseModel]:
@@ -164,49 +135,34 @@ class RememberTool:
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:
         assert isinstance(args, RememberParams)
-
         if not args.content.strip():
             return ToolEnvelope.fail(
                 code="KALASH_TOOL_INVALID_ARGS",
                 message="Content cannot be empty.",
                 recoverable=True,
             )
+        from kalash.memory.session import get_session_memory
 
-        # The orchestration layer handles the actual write via memory provider.
-        # This tool queues the write (non-blocking) and returns immediately.
-        # In the real implementation, this would:
-        # 1. Validate content
-        # 2. Queue a MemoryWrite to the pipeline
-        # 3. Return a receipt ID
-
-        return ToolEnvelope.fail(
-            code="KALASH_TOOL_ERROR",
-            message="Memory provider not initialized.",
-            recoverable=True,
-            remediation="Memory system initializes during session setup.",
+        mem = get_session_memory(ctx.session_id, ctx.cwd)
+        mem_id = await mem.remember(
+            args.content.strip(),
+            scope=args.scope,
+            tags=args.tags,
+        )
+        return ToolEnvelope.success(
+            content=f"Stored memory {mem_id}",
+            metadata={"memory_id": mem_id},
         )
 
 
-# ---------------------------------------------------------------------------
-# ForgetTool
-# ---------------------------------------------------------------------------
-
-
 class ForgetParams(BaseModel):
-    """Parameters for targeted memory deletion."""
-
     memory_id: str = Field(default="", description="Specific memory ID to delete")
-    content_match: str = Field(
-        default="", description="Delete memories matching this content (substring)"
-    )
-    scope: str = Field(
-        default="project",
-        description="Scope to delete from: 'session', 'project', or 'user'",
-    )
+    content_match: str = Field(default="", description="Delete memories matching this text")
+    scope: str = Field(default="project")
 
 
 class ForgetTool:
-    """Targeted memory deletion by ID or content match."""
+    """Delete memories by ID or content match."""
 
     @property
     def name(self) -> str:
@@ -242,7 +198,7 @@ class ForgetTool:
 
     @property
     def idempotent(self) -> bool:
-        return True  # Deleting same thing twice is safe
+        return True
 
     @property
     def cancellable(self) -> bool:
@@ -253,18 +209,19 @@ class ForgetTool:
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:
         assert isinstance(args, ForgetParams)
-
         if not args.memory_id and not args.content_match:
             return ToolEnvelope.fail(
                 code="KALASH_TOOL_INVALID_ARGS",
-                message="Provide either memory_id or content_match.",
+                message="Provide memory_id or content_match.",
                 recoverable=True,
             )
+        from kalash.memory.session import get_session_memory
 
-        # The orchestration layer handles actual deletion via memory provider.
-        return ToolEnvelope.fail(
-            code="KALASH_TOOL_ERROR",
-            message="Memory provider not initialized.",
-            recoverable=True,
-            remediation="Memory system initializes during session setup.",
+        mem = get_session_memory(ctx.session_id, ctx.cwd)
+        count = await mem.forget(
+            memory_id=args.memory_id,
+            content_match=args.content_match,
         )
+        if count == 0:
+            return ToolEnvelope.success(content="No memories matched.")
+        return ToolEnvelope.success(content=f"Forgot {count} memory record(s).")

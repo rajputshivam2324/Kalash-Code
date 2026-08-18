@@ -113,6 +113,19 @@ class SessionRepository:
         )
         return msg_id
 
+    async def next_turn_seq(self, session_id: str) -> int:
+        """Next free turn sequence for a session.
+
+        ``turns`` has UNIQUE(session_id, seq), so a caller that derives seq from
+        a per-run counter collides both with its own earlier turns and with the
+        turns already stored when a session is resumed.
+        """
+        rows = await self._engine.execute_read_async(
+            "SELECT COALESCE(MAX(seq), -1) AS max_seq FROM turns WHERE session_id = ?",
+            (session_id,),
+        )
+        return int(rows[0]["max_seq"]) + 1 if rows else 0
+
     async def get_messages(self, turn_id: str) -> list[dict[str, Any]]:
         """Get all messages for a turn, ordered by seq."""
         rows = await self._engine.execute_read_async(

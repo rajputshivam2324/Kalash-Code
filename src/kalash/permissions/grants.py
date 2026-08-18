@@ -19,6 +19,8 @@ from kalash.storage.engine import StorageEngine
 
 logger = logging.getLogger(__name__)
 
+_GRANTS_TABLE = "kalash_grants"
+
 
 # ---------------------------------------------------------------------------
 # Grant lifetime
@@ -117,7 +119,7 @@ class GrantStore:
         )
 
         await self.engine.execute_write(
-            """INSERT INTO permission_grants
+            f"""INSERT INTO {_GRANTS_TABLE}
                (id, tool_pattern, path_pattern, host_pattern, lifetime,
                 session_id, decision, reason, created_at, consumed, metadata)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -149,6 +151,7 @@ class GrantStore:
         tool_name: str,
         paths: list[str] | None = None,
         hosts: list[str] | None = None,
+        grant_signature: str | None = None,
     ) -> dict[str, Any] | None:
         """Find a matching grant for the given action.
 
@@ -176,6 +179,11 @@ class GrantStore:
             elif grant["host_pattern"] and not hosts:
                 continue
 
+            meta = _json_loads(grant.get("metadata"))
+            stored_sig = meta.get("signature")
+            if stored_sig and grant_signature and stored_sig != grant_signature:
+                continue
+
             return grant
 
         return None
@@ -183,7 +191,7 @@ class GrantStore:
     async def get(self, grant_id: str) -> dict[str, Any] | None:
         """Get a grant by ID."""
         rows = await self.engine.execute_read_async(
-            "SELECT * FROM permission_grants WHERE id = ?", (grant_id,)
+            f"SELECT * FROM {_GRANTS_TABLE} WHERE id = ?", (grant_id,)
         )
         return dict(rows[0]) if rows else None
 
@@ -209,7 +217,7 @@ class GrantStore:
         if not include_consumed:
             conditions.append("consumed = 0")
 
-        sql = "SELECT * FROM permission_grants"
+        sql = f"SELECT * FROM {_GRANTS_TABLE}"
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY created_at DESC"
@@ -224,7 +232,7 @@ class GrantStore:
     async def consume(self, grant_id: str) -> None:
         """Mark a 'once' grant as consumed (used up)."""
         await self.engine.execute_write(
-            "UPDATE permission_grants SET consumed = 1 WHERE id = ? AND lifetime = 'once'",
+            f"UPDATE {_GRANTS_TABLE} SET consumed = 1 WHERE id = ? AND lifetime = 'once'",
             (grant_id,),
         )
         logger.debug("Grant consumed: %s", grant_id)
@@ -236,13 +244,13 @@ class GrantStore:
     async def revoke(self, grant_id: str) -> bool:
         """Revoke (delete) a grant. Returns True if it existed."""
         rows = await self.engine.execute_read_async(
-            "SELECT id FROM permission_grants WHERE id = ?", (grant_id,)
+            f"SELECT id FROM {_GRANTS_TABLE} WHERE id = ?", (grant_id,)
         )
         if not rows:
             return False
 
         await self.engine.execute_write(
-            "DELETE FROM permission_grants WHERE id = ?", (grant_id,)
+            f"DELETE FROM {_GRANTS_TABLE} WHERE id = ?", (grant_id,)
         )
         logger.info("Grant revoked: %s", grant_id)
         return True
@@ -254,13 +262,13 @@ class GrantStore:
         """
         sid = session_id or self.session_id
         rows = await self.engine.execute_read_async(
-            "SELECT COUNT(*) as cnt FROM permission_grants WHERE session_id = ?",
+            f"SELECT COUNT(*) as cnt FROM {_GRANTS_TABLE} WHERE session_id = ?",
             (sid,),
         )
         count = rows[0]["cnt"] if rows else 0
 
         await self.engine.execute_write(
-            "DELETE FROM permission_grants WHERE session_id = ?", (sid,)
+            f"DELETE FROM {_GRANTS_TABLE} WHERE session_id = ?", (sid,)
         )
         logger.info("Revoked %d session grants for %s", count, sid)
         return count
@@ -271,13 +279,13 @@ class GrantStore:
         Returns number of grants removed.
         """
         rows = await self.engine.execute_read_async(
-            "SELECT COUNT(*) as cnt FROM permission_grants WHERE consumed = 1",
+            f"SELECT COUNT(*) as cnt FROM {_GRANTS_TABLE} WHERE consumed = 1",
             (),
         )
         count = rows[0]["cnt"] if rows else 0
 
         await self.engine.execute_write(
-            "DELETE FROM permission_grants WHERE consumed = 1", ()
+            f"DELETE FROM {_GRANTS_TABLE} WHERE consumed = 1", ()
         )
         return count
 
@@ -288,7 +296,7 @@ class GrantStore:
     async def _get_active_grants(self) -> list[dict[str, Any]]:
         """Get all active (non-consumed) grants for the current context."""
         rows = await self.engine.execute_read_async(
-            """SELECT * FROM permission_grants
+            f"""SELECT * FROM {_GRANTS_TABLE}
                WHERE consumed = 0
                AND (lifetime = 'always'
                     OR (lifetime = 'session' AND session_id = ?)
@@ -309,3 +317,17 @@ def _json_dumps(data: Any) -> str | None:
         return None
     import json
     return json.dumps(data)
+
+
+def _json_loads(raw: Any) -> dict[str, Any]:
+    if not raw:
+        return {}
+    import json
+
+    if isinstance(raw, dict):
+        return raw
+    try:
+        parsed = json.loads(str(raw))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}

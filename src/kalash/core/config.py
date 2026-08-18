@@ -61,6 +61,7 @@ class MemoryConfig:
     read_policy: str = "fanout_merge"
     write_policy: str = "primary"
     recall_budget: float = 0.08
+    provider_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
 @dataclass
@@ -237,6 +238,7 @@ def _build_config(data: dict[str, Any], project_dir: Path) -> KalashConfig:
         read_policy=memory_data.get("read_policy", "fanout_merge"),
         write_policy=memory_data.get("write_policy", "primary"),
         recall_budget=memory_data.get("recall_budget", 0.08),
+        provider_configs=memory_data.get("provider_configs", {}),
     )
 
     permissions = PermissionsConfig(

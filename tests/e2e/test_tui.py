@@ -263,3 +263,346 @@ class TestPickerUnit:
         picker.close()
         assert not picker.is_open
         assert picker.selected() is None
+
+
+# ---------------------------------------------------------------------------
+# Agent integration
+# ---------------------------------------------------------------------------
+#
+# The TUI shipped as a one-shot text client: `_stream` attached no tools and
+# rebuilt a single-message history on every send, so the model told users it
+# "cannot access your filesystem" while sitting in their repository. It also
+# crashed on session resume, because `_current_mode` was shadowed by a Textual
+# instance attribute. These cover both.
+
+import json
+
+import pytest
+
+from kalash.models.normalize import (
+    BlockDelta,
+    BlockStart,
+    BlockStop,
+    MessageStart,
+    MessageStop,
+    StopReason,
+    UsageUpdate,
+)
+from kalash.runtime.scratchpad import reset_cache
+
+
+class _FakeProvider:
+    name = "fake/model-1"
+    context_window = 200_000
+
+    def __init__(self, turns):
+        self.turns = list(turns)
+        self.requests = []
+
+    async def stream(self, messages, *, system=None, tools=None, **kwargs):
+        self.requests.append({"system": system, "tools": tools, "messages": messages})
+        events = self.turns.pop(0) if self.turns else [MessageStop(StopReason.END_TURN)]
+        for event in events:
+            yield event
+
+
+class _FakeResolution:
+    def __init__(self, provider):
+        self.ok = True
+        self.provider = provider
+        self.reason = ""
+
+
+def _text_turn(text):
+    return [
+        MessageStart(id="m", model="fake/model-1"),
+        BlockStart(index=0, block_type="text"),
+        BlockDelta(index=0, delta=text),
+        BlockStop(index=0),
+        UsageUpdate(input_tokens=200, output_tokens=20),
+        MessageStop(StopReason.END_TURN),
+    ]
+
+
+def _tool_turn(name, args):
+    return [
+        MessageStart(id="m", model="fake/model-1"),
+        BlockStart(index=0, block_type="tool_use", tool_use_id="tu_1", tool_name=name),
+        BlockDelta(index=0, delta=json.dumps(args)),
+        BlockStop(index=0),
+        UsageUpdate(input_tokens=200, output_tokens=30),
+        MessageStop(StopReason.TOOL_USE),
+    ]
+
+
+@pytest.fixture
+def tui_env(tmp_path, monkeypatch):
+    """Isolated home and cwd, with a connected fake provider."""
+    monkeypatch.setenv("KALASH_HOME", str(tmp_path / "home"))
+    project = tmp_path / "project"
+    project.mkdir()
+    monkeypatch.chdir(project)
+    reset_cache()
+    yield project
+    reset_cache()
+
+
+def _connect(monkeypatch, app, turns):
+    provider = _FakeProvider(turns)
+    monkeypatch.setattr(
+        "kalash.models.resolve.build_provider",
+        lambda *a, **k: _FakeResolution(provider),
+    )
+    app.provider_id = "anthropic"
+    app.model_id = "fake/model-1"
+    return provider
+
+
+class TestAgentIntegration:
+    async def test_send_writes_a_real_file(self, tui_env, monkeypatch):
+        app = KalashApp()
+        provider = _connect(
+            monkeypatch,
+            app,
+            [
+                _tool_turn("write", {"path": "made.txt", "content": "hello\n"}),
+                _text_turn("Created made.txt."),
+            ],
+        )
+        async with app.run_test(size=(100, 30)) as pilot:
+            await submit(pilot, app, "create made.txt")
+            for _ in range(30):
+                await pilot.pause()
+                if (tui_env / "made.txt").exists():
+                    break
+
+        assert (tui_env / "made.txt").exists()
+        assert provider.requests[0]["tools"], "the TUI must attach tools"
+
+    async def test_history_persists_between_sends(self, tui_env, monkeypatch):
+        app = KalashApp()
+        provider = _connect(
+            monkeypatch, app, [_text_turn("first"), _text_turn("second")]
+        )
+        async with app.run_test(size=(100, 30)) as pilot:
+            await submit(pilot, app, "one")
+            for _ in range(20):
+                await pilot.pause()
+                if provider.requests:
+                    break
+            await submit(pilot, app, "two")
+            for _ in range(20):
+                await pilot.pause()
+                if len(provider.requests) >= 2:
+                    break
+
+        assert len(provider.requests) >= 2
+        # Turn two must see turn one; the old code rebuilt a 1-message history.
+        assert len(provider.requests[1]["messages"]) > len(
+            provider.requests[0]["messages"]
+        )
+
+    async def test_agent_mode_helper_is_callable(self):
+        """Regression: shadowed by Textual's App._current_mode instance attr."""
+        app = KalashApp()
+        assert callable(app._agent_mode)
+        assert app._agent_mode() == "build"
+
+    async def test_plan_mode_toggle_reaches_the_agent(self, tui_env, monkeypatch):
+        app = KalashApp()
+        _connect(monkeypatch, app, [_text_turn("plan only")])
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.press("tab")
+            await pilot.pause()
+            assert app._agent_mode() == "plan"
+            agent = await app._ensure_agent()
+            assert agent is not None
+            names = {s["name"] for s in agent.host.schemas()}
+            assert "write" not in names
+
+
+class TestSessionResume:
+    async def test_sessions_command_does_not_crash(self, tui_env, monkeypatch):
+        """`/sessions` then picking one raised TypeError before the rename."""
+        app = KalashApp()
+        _connect(monkeypatch, app, [_text_turn("hi"), _text_turn("resumed")])
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await submit(pilot, app, "hello")
+            for _ in range(20):
+                await pilot.pause()
+                if app._agent is not None:
+                    break
+            session_id = app._agent.session_id
+
+            await app._session_chosen(session_id)
+            await pilot.pause()
+
+        assert app._agent is not None
+        assert app._agent.session_id == session_id
+
+    async def test_status_reports_agent_state(self, tui_env, monkeypatch):
+        app = KalashApp()
+        _connect(monkeypatch, app, [_text_turn("hi")])
+        async with app.run_test(size=(100, 30)) as pilot:
+            await submit(pilot, app, "hello")
+            for _ in range(20):
+                await pilot.pause()
+                if app._agent is not None:
+                    break
+            lines = app._status_lines()
+
+        joined = "\n".join(lines)
+        assert "session" in joined
+        assert "tools" in joined
+
+
+class TestNewSlashCommands:
+    @pytest.mark.parametrize(
+        "command",
+        ["/tools", "/notes", "/scratch", "/cost", "/status", "/mode", "/sessions", "/mcp", "/skills"],
+    )
+    async def test_command_runs_without_error(self, tui_env, monkeypatch, command):
+        app = KalashApp()
+        _connect(monkeypatch, app, [_text_turn("hi")])
+        async with app.run_test(size=(100, 30)) as pilot:
+            await submit(pilot, app, command)
+            await pilot.pause()
+            errors = [
+                w for w in app.query(SystemMessage) if "unknown command" in str(w.renderable)
+            ]
+            assert not errors, f"{command} was not handled"
+
+    async def test_init_writes_a_starter_file(self, tui_env, monkeypatch):
+        app = KalashApp()
+        _connect(monkeypatch, app, [_text_turn("hi")])
+        async with app.run_test(size=(100, 30)) as pilot:
+            await submit(pilot, app, "/init")
+            await pilot.pause()
+
+        assert (tui_env / "KALASH.md").exists()
+
+
+# ---------------------------------------------------------------------------
+# Getting text out, and seeing the work
+# ---------------------------------------------------------------------------
+#
+# Textual puts the terminal into mouse-reporting mode, so a drag is delivered to
+# the app rather than to the terminal's own selection — which is why transcript
+# text could not be copied and looked "rendered as an image". OSC 52 and a file
+# export are the two ways out that do not require abandoning the TUI.
+
+
+class TestCopyAndExport:
+    async def test_copy_reports_when_there_is_nothing_yet(self, tui_env, monkeypatch):
+        app = KalashApp()
+        _connect(monkeypatch, app, [_text_turn("hi")])
+        async with app.run_test(size=(100, 30)) as pilot:
+            await submit(pilot, app, "/copy")
+            await pilot.pause()
+            assert "nothing to copy" in app._copy_last_reply()
+
+    async def test_copy_captures_the_last_reply(self, tui_env, monkeypatch):
+        app = KalashApp()
+        _connect(monkeypatch, app, [_text_turn("the answer is 42")])
+        async with app.run_test(size=(100, 30)) as pilot:
+            await submit(pilot, app, "question")
+            for _ in range(30):
+                await pilot.pause()
+                if app._last_reply_text():
+                    break
+            assert "42" in app._last_reply_text()
+
+    async def test_export_writes_a_readable_file(self, tui_env, monkeypatch):
+        app = KalashApp()
+        _connect(monkeypatch, app, [_text_turn("exported content here")])
+        async with app.run_test(size=(100, 30)) as pilot:
+            await submit(pilot, app, "hello")
+            for _ in range(30):
+                await pilot.pause()
+                if app._last_reply_text():
+                    break
+            message = app._export_transcript()
+
+        assert "wrote" in message
+        written = list(tui_env.glob("kalash-transcript-*.txt"))
+        assert written, "an export file must exist"
+        body = written[0].read_text()
+        assert "hello" in body
+        assert "exported content here" in body
+
+    async def test_export_declines_when_empty(self, tui_env, monkeypatch):
+        app = KalashApp()
+        _connect(monkeypatch, app, [_text_turn("x")])
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            assert "nothing to export" in app._export_transcript()
+
+    async def test_copy_binding_exists(self):
+        app = KalashApp()
+        keys = {binding.key for binding in app.BINDINGS}
+        assert "ctrl+y" in keys
+        assert "ctrl+o" in keys
+        assert callable(app.action_copy_reply)
+        assert callable(app.action_toggle_output)
+
+
+class TestWebSearchIsAvailable:
+    """Regression: the agent answered "I don't have a web search tool".
+
+    True at the time — `web_search` was excluded from the reduced tool profile a
+    throughput-limited model receives.
+    """
+
+    async def test_small_model_still_gets_web_search(self, tui_env, monkeypatch):
+        app = KalashApp()
+        _connect(monkeypatch, app, [_text_turn("ok")])
+        app.model_id = "openai/gpt-oss-20b"
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            agent = await app._ensure_agent()
+            assert agent is not None
+            names = {schema["name"] for schema in agent.host.schemas()}
+
+        assert "web_search" in names
+        assert "fetch" in names
+
+    async def test_tools_command_lists_web_search(self, tui_env, monkeypatch):
+        app = KalashApp()
+        _connect(monkeypatch, app, [_text_turn("ok")])
+        app.model_id = "openai/gpt-oss-20b"
+
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            await app._ensure_agent()
+            lines = "\n".join(app._tool_lines())
+
+        assert "web_search" in lines
+
+
+class TestDiffsAppearInTheTranscript:
+    async def test_a_write_renders_a_diff(self, tui_env, monkeypatch):
+        from kalash.tui.messages import ToolCallLine
+
+        app = KalashApp()
+        _connect(
+            monkeypatch,
+            app,
+            [
+                _tool_turn("write", {"path": "made.py", "content": "print(1)\n"}),
+                _text_turn("done"),
+            ],
+        )
+        async with app.run_test(size=(100, 30)) as pilot:
+            await submit(pilot, app, "create made.py")
+            for _ in range(40):
+                await pilot.pause()
+                lines = list(app.query(ToolCallLine))
+                if any("+" in line.renderable.plain for line in lines):
+                    break
+            lines = list(app.query(ToolCallLine))
+            assert lines
+            plain = "\n".join(line.renderable.plain for line in lines)
+            assert "made.py" in plain or "Wrote" in plain
+            assert "+" in plain or "print" in plain

@@ -7,20 +7,34 @@ from typing import Annotated, Optional
 import typer
 from rich.console import Console
 
+from kalash.core.logging import configure_logging
+
+configure_logging()
+
 app = typer.Typer(name="kalash", help="Terminal-native agentic coding assistant")
 console = Console()
 
 
-def _launch_tui(pipe_mode: bool = False) -> None:
+def _launch_tui(
+    pipe_mode: bool = False,
+    *,
+    resume_session: str | None = None,
+    rewind_steps: int = 0,
+    mode: str = "build",
+) -> None:
     """Launch the interactive TUI or pipe mode."""
     if pipe_mode:
         from kalash.cli._pipe import run_pipe_mode
 
-        run_pipe_mode()
+        run_pipe_mode(mode=mode, resume_session=resume_session)
     else:
         from kalash.tui.app import KalashApp
 
-        tui = KalashApp()
+        tui = KalashApp(
+            resume_session=resume_session,
+            rewind_steps=rewind_steps,
+            mode=mode,
+        )
         tui.run()
 
 
@@ -33,6 +47,55 @@ def main(
             "-p",
             "--print",
             help="Run one prompt headlessly and print the result to stdout.",
+        ),
+    ] = None,
+    resume_id: Annotated[
+        Optional[str],
+        typer.Option(
+            "--resume",
+            "-r",
+            help="Resume a session by id, restoring its conversation.",
+        ),
+    ] = None,
+    continue_last: Annotated[
+        bool,
+        typer.Option(
+            "--continue",
+            "-c",
+            help="Continue the most recent session in this directory.",
+        ),
+    ] = False,
+    plan: Annotated[
+        bool,
+        typer.Option("--plan", help="Start in plan mode: read-only, no edits."),
+    ] = False,
+    output_format: Annotated[
+        str,
+        typer.Option(
+            "--output-format",
+            help="Headless output: text, json, or stream-json.",
+        ),
+    ] = "text",
+    model: Annotated[
+        Optional[str],
+        typer.Option(
+            "--model",
+            "-m",
+            help="Model override (provider/model-id).",
+        ),
+    ] = None,
+    sandbox: Annotated[
+        Optional[str],
+        typer.Option(
+            "--sandbox",
+            help="Sandbox mode: read-only, workspace-write, danger-full-access.",
+        ),
+    ] = None,
+    approval: Annotated[
+        Optional[str],
+        typer.Option(
+            "--approval",
+            help="Approval policy: untrusted, on-request, on-failure, never.",
         ),
     ] = None,
 ) -> None:
@@ -49,16 +112,45 @@ def main(
 
     from kalash.cli._pipe import run_pipe_mode
 
+    mode = "plan" if plan else "build"
+    session = resume_id if resume_id else None
+    if continue_last and session is None:
+        session = _most_recent_session()
+
+    pipe_kwargs = {
+        "mode": mode,
+        "resume_session": session,
+        "output_format": output_format,
+        "model": model,
+        "sandbox": sandbox,
+        "approval": approval,
+    }
+
     if prompt is not None:
-        run_pipe_mode(prompt)
+        run_pipe_mode(prompt, **pipe_kwargs)
         return
 
     # Piped input means there is no terminal to draw a TUI into.
     if not sys.stdin.isatty():
-        run_pipe_mode()
+        run_pipe_mode(**pipe_kwargs)
         return
 
-    _launch_tui(pipe_mode=False)
+    _launch_tui(
+        pipe_mode=False,
+        resume_session=session if (resume_id or continue_last) else None,
+        mode=mode,
+    )
+
+
+def _most_recent_session() -> str | None:
+    """Id of the newest session, or None when there are none."""
+    from kalash.runtime.session import SessionManager
+
+    try:
+        recent = SessionManager().list_sessions(limit=1)
+    except Exception:
+        return None
+    return str(recent[0]["id"]) if recent else None
 
 
 @app.command()
@@ -69,10 +161,7 @@ def resume(
     ] = None,
 ) -> None:
     """Resume the most recent (or specified) session."""
-    from kalash.tui.app import KalashApp
-
-    tui = KalashApp(resume_session=session_id)
-    tui.run()
+    _launch_tui(resume_session=session_id or "")
 
 
 @app.command()
@@ -87,10 +176,7 @@ def rewind(
     ] = None,
 ) -> None:
     """Rewind the conversation by N turns and re-enter the TUI."""
-    from kalash.tui.app import KalashApp
-
-    tui = KalashApp(resume_session=session_id, rewind_steps=steps)
-    tui.run()
+    _launch_tui(resume_session=session_id or "", rewind_steps=steps)
 
 
 # ---------------------------------------------------------------------------
@@ -109,25 +195,77 @@ app.add_typer(config_app, name="config", help="Configuration management")
 app.add_typer(cron_app, name="cron", help="Scheduled task management")
 app.add_typer(mcp_app, name="mcp", help="MCP server management")
 
-# Placeholder sub-apps for future implementation
-provider_app = typer.Typer(help="Model provider management")
-agents_app = typer.Typer(help="Agent management")
-skills_app = typer.Typer(help="Skills management")
-hooks_app = typer.Typer(help="Hook management")
-plugin_app = typer.Typer(help="Plugin management")
-serve_app = typer.Typer(help="Serve Kalash as API")
+# Additional CLI command groups
+from kalash.cli.agents_cmd import agents_app  # noqa: E402
+from kalash.cli.hooks_cmd import hooks_app  # noqa: E402
+from kalash.cli.provider_cmd import provider_app  # noqa: E402
+from kalash.cli.skills_cmd import skills_app  # noqa: E402
+
+plugin_app = typer.Typer(help="Plugin management (coming soon)")
+
+
+@plugin_app.command("ls")
+def plugin_ls() -> None:
+    """List installed plugins."""
+    console.print(
+        "[dim]Plugin loading is not enabled yet. Built-in tools, skills, hooks, "
+        "and MCP servers are available today.[/dim]"
+    )
+
+from kalash.cli.serve_cmd import serve_app  # noqa: E402
+from kalash.cli.status_cmd import status_app  # noqa: E402
+
+app.add_typer(status_app, name="status", help="Project and session status")
 
 app.add_typer(provider_app, name="provider", help="Model provider management")
 app.add_typer(agents_app, name="agents", help="Agent management")
 app.add_typer(skills_app, name="skills", help="Skills management")
 app.add_typer(hooks_app, name="hooks", help="Hook management")
 app.add_typer(plugin_app, name="plugin", help="Plugin management")
-app.add_typer(serve_app, name="serve", help="Serve Kalash as API")
+app.add_typer(serve_app, name="serve", help="Run the schedule daemon")
 
 # Doctor is a standalone command, not a sub-app
 from kalash.cli.doctor import doctor  # noqa: E402
 
 app.command(name="doctor")(doctor)
+
+
+@app.command("version")
+def version_cmd() -> None:
+    """Print the Kalash version."""
+    from kalash import __version__
+
+    console.print(f"kalash {__version__}")
+
+
+@app.command("init")
+def init() -> None:
+    """Scaffold .kalash/ and a starter KALASH.md for this project."""
+    from pathlib import Path
+
+    root = Path.cwd()
+    kalash_dir = root / ".kalash"
+    kalash_dir.mkdir(exist_ok=True)
+    (kalash_dir / "settings.json").touch(exist_ok=True)
+
+    agents_dir = kalash_dir / "agents"
+    agents_dir.mkdir(exist_ok=True)
+    skills_dir = kalash_dir / "skills"
+    skills_dir.mkdir(exist_ok=True)
+
+    kalash_md = root / "KALASH.md"
+    if not kalash_md.exists():
+        kalash_md.write_text(
+            "# Project instructions for Kalash\n\n"
+            "- Describe stack, conventions, and commands here.\n"
+            "- The agent reads this file hierarchy on every turn.\n",
+            encoding="utf-8",
+        )
+        console.print(f"[green]Created[/green] {kalash_md}")
+    else:
+        console.print(f"[dim]Already exists:[/dim] {kalash_md}")
+
+    console.print(f"[green]Initialized[/green] {kalash_dir}/")
 
 
 if __name__ == "__main__":

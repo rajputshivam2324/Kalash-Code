@@ -18,7 +18,6 @@ from kalash.core.ids import generate_id
 from kalash.storage.engine import StorageEngine
 
 from kalash.scheduler.cron import CronExpression, IntervalSpec, OnceSpec
-from kalash.scheduler.runs import ScheduleRun, RunState
 
 
 class OverlapPolicy(StrEnum):
@@ -238,73 +237,80 @@ class SchedulerDaemon:
         if overlap_policy == OverlapPolicy.SKIP:
             active = await self._engine.execute_read_async(
                 """SELECT 1 FROM schedule_runs
-                   WHERE schedule_id = ? AND state = 'RUNNING' LIMIT 1""",
+                   WHERE schedule_id = ? AND status = 'running' LIMIT 1""",
                 (schedule_id,),
             )
             if active:
-                # Skip this fire, just advance next_fire
                 await self._advance_next_fire(schedule)
                 return
 
         elif overlap_policy == OverlapPolicy.CANCEL_PREVIOUS:
             await self._engine.execute_write(
-                """UPDATE schedule_runs SET state = 'CANCELLED'
-                   WHERE schedule_id = ? AND state = 'RUNNING'""",
-                (schedule_id,),
+                """UPDATE schedule_runs SET status = 'cancelled', finished_at = ?
+                   WHERE schedule_id = ? AND status = 'running'""",
+                (datetime.now(timezone.utc).isoformat(), schedule_id),
             )
 
-        # Create a run record
-        run = ScheduleRun(
-            id=generate_id("sr_"),
-            schedule_id=schedule_id,
-            state=RunState.DUE,
+        run_id = generate_id("sr_")
+        started = datetime.now(timezone.utc).isoformat()
+        await self._engine.execute_write(
+            """INSERT INTO schedule_runs
+               (id, schedule_id, status, started_at, trigger_source)
+               VALUES (?, ?, 'running', ?, 'scheduler')""",
+            (run_id, schedule_id, started),
         )
-        await run.save(self._engine)
 
-        # Transition to QUEUED → RUNNING
-        run.transition(RunState.QUEUED)
-        await run.save(self._engine)
-        run.transition(RunState.RUNNING)
-        await run.save(self._engine)
-
-        # Create headless agent session
         try:
-            # Fire event
             bus = get_event_bus()
             await bus.emit(Event(
                 type=EventType.SCHEDULE_FIRE,
                 data={
                     "schedule_id": schedule_id,
-                    "run_id": run.id,
+                    "run_id": run_id,
                     "agent": schedule.get("agent", "default"),
                 },
             ))
 
-            # Placeholder: actual headless session creation would happen here
-            # via the runtime layer. The scheduler only records and fires.
+            prompt = str(schedule.get("prompt", "")).strip()
+            if not prompt:
+                raise RuntimeError("schedule has no prompt")
 
-            run.transition(RunState.SUCCEEDED)
-            await run.save(self._engine)
+            from kalash.runtime.agent import build_agent
+            from kalash.runtime.bootstrap import prepare_agent
 
-            # Reset failure counter
+            sandbox_mode = str(schedule.get("sandbox_mode", "read-only"))
+            agent, reason = build_agent(
+                mode="plan" if sandbox_mode == "read-only" else "build",
+                interactive=False,
+            )
+            if agent is None:
+                raise RuntimeError(reason or "could not build agent")
+
+            await prepare_agent(agent)
+
+            result = await agent.send(prompt)
+            finished = datetime.now(timezone.utc).isoformat()
+            await self._engine.execute_write(
+                """UPDATE schedule_runs SET status = 'succeeded', finished_at = ?,
+                   tokens_used = ? WHERE id = ?""",
+                (finished, result.total_tokens, run_id),
+            )
+
             await self._engine.execute_write(
                 "UPDATE schedules SET consecutive_failures = 0 WHERE id = ?",
                 (schedule_id,),
             )
-
-            # Notify success
-            await self._notify("success", schedule_id, {"run_id": run.id})
+            await self._notify("success", schedule_id, {"run_id": run_id})
 
         except Exception as e:
-            run.transition(RunState.FAILED)
-            run.error = str(e)
-            await run.save(self._engine)
-
-            # Increment failure counter and auto-disable
+            finished = datetime.now(timezone.utc).isoformat()
+            await self._engine.execute_write(
+                """UPDATE schedule_runs SET status = 'failed', finished_at = ?,
+                   error_code = ? WHERE id = ?""",
+                (finished, str(e)[:200], run_id),
+            )
             await self._increment_failure_counter(schedule)
-
-            # Notify failure
-            await self._notify("failure", schedule_id, {"run_id": run.id, "error": str(e)})
+            await self._notify("failure", schedule_id, {"run_id": run_id, "error": str(e)})
 
         # Advance next fire time
         await self._advance_next_fire(schedule)

@@ -122,9 +122,10 @@ class ContextAssembler:
         compacted_summary: str | None = None,
         recent_turns: list[Message],
         current_message: Message,
+        estimated_prompt_tokens: int | None = None,
     ) -> list[Message]:
         """Assemble context in slot order. Returns normalized Message list."""
-        self._compute_pressure()
+        self._compute_pressure(estimated_prompt_tokens=estimated_prompt_tokens)
         self._allocate_budgets()
 
         # Slot 0: System identity + contract (static)
@@ -196,9 +197,12 @@ class ContextAssembler:
     # Pressure and budget
     # ------------------------------------------------------------------
 
-    def _compute_pressure(self) -> None:
-        """Determine pressure level from current budget usage ratio."""
-        ratio = self.budget.tokens_used / max(self.budget.max_tokens, 1)
+    def _compute_pressure(self, *, estimated_prompt_tokens: int | None = None) -> None:
+        """Determine pressure level from context fill or session budget usage."""
+        if estimated_prompt_tokens is not None and self.context_window > 0:
+            ratio = estimated_prompt_tokens / self.context_window
+        else:
+            ratio = self.budget.tokens_used / max(self.budget.max_tokens, 1)
         level = PressureLevel.L0
         for i, threshold in enumerate(PRESSURE_THRESHOLDS):
             if ratio >= threshold:
@@ -207,7 +211,7 @@ class ContextAssembler:
 
     def _allocate_budgets(self) -> None:
         """Distribute token budget across slots based on pressure level."""
-        available = self.context_window - self.budget.tokens_used
+        available = self.context_window
 
         # Fixed allocations for static slots
         static_pct = {
@@ -275,7 +279,10 @@ class ContextAssembler:
         if not blocks or self._pressure >= PressureLevel.L4:
             return []
         combined = "\n".join(blocks)
-        text = f"<memory>\n{combined}\n</memory>"
+        if combined.lstrip().startswith("<memory>"):
+            text = combined
+        else:
+            text = f"<memory>\n{combined}\n</memory>"
         return [Message(role=Role.SYSTEM, content=[TextBlock(text=text)])]
 
     def _build_compacted_history(self, summary: str | None) -> list[Message]:

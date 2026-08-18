@@ -12,7 +12,9 @@ Output is structured for UI rendering.
 
 from __future__ import annotations
 
+import logging
 import time
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -24,9 +26,11 @@ from kalash.tools.base import (
     ToolEnvelope,
 )
 
+logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------------------
-# In-memory task store (per-session, managed by orchestration layer)
+# Durable task store (per-session, managed by orchestration layer)
 # ---------------------------------------------------------------------------
 
 
@@ -76,8 +80,105 @@ class TaskList:
         }
 
 
-# Session-scoped task lists: session_id -> TaskList
+# Session-scoped task lists: session_id -> TaskList.
+#
+# This is a read-through cache over durable state, not the state itself. The list
+# is persisted to the scratchpad on every mutation, so a plan survives a crash,
+# a restart, and `kalash --resume`. An in-memory-only plan is worse than no plan:
+# the user is invited to rely on it and then loses it exactly when a long build
+# gets interrupted.
 _session_lists: dict[str, TaskList] = {}
+
+# Filename inside the session's scratchpad directory.
+_TODO_STATE = "todo.json"
+
+
+def _todo_path(session_id: str) -> "Path":
+    from kalash.runtime.scratchpad import get_scratchpad
+
+    pad = get_scratchpad(session_id)
+    return pad.index_path.parent / f"{pad.index_path.stem}.{_TODO_STATE}"
+
+
+def _save_list(session_id: str, task_list: TaskList) -> None:
+    """Persist a task list. Failures are non-fatal — the plan still works."""
+    import json
+
+    try:
+        path = _todo_path(session_id)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        payload = {
+            "id": task_list.id,
+            "description": task_list.description,
+            "created_at": task_list.created_at,
+            "tasks": [t.to_dict() for t in task_list.tasks],
+        }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        logger.debug("could not persist the task list", exc_info=True)
+
+
+def _load_list(session_id: str) -> TaskList | None:
+    """Restore a persisted task list, or None."""
+    import json
+
+    try:
+        path = _todo_path(session_id)
+        if not path.exists():
+            return None
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+    try:
+        restored = TaskList(str(payload.get("description", "")))
+        restored.id = str(payload.get("id") or restored.id)
+        restored.created_at = float(payload.get("created_at") or restored.created_at)
+        for raw in payload.get("tasks") or []:
+            item = TaskItem(
+                str(raw.get("description", "")), str(raw.get("details", "") or "")
+            )
+            item.id = str(raw.get("id") or item.id)
+            item.completed = bool(raw.get("completed", False))
+            item.created_at = float(raw.get("created_at") or item.created_at)
+            item.completed_at = raw.get("completed_at")
+            restored.tasks.append(item)
+        return restored
+    except (TypeError, ValueError):
+        return None
+
+
+def get_task_list(session_id: str) -> TaskList | None:
+    """Current task list for a session, loading from disk on first access."""
+    if session_id in _session_lists:
+        return _session_lists[session_id]
+    restored = _load_list(session_id)
+    if restored is not None:
+        _session_lists[session_id] = restored
+    return restored
+
+
+def set_task_list(session_id: str, task_list: TaskList) -> None:
+    """Replace and persist a session's task list."""
+    _session_lists[session_id] = task_list
+    _save_list(session_id, task_list)
+
+
+def render_task_list(session_id: str) -> str:
+    """Render the plan for the context window and for `/status`."""
+    task_list = get_task_list(session_id)
+    if task_list is None or not task_list.tasks:
+        return ""
+    lines = [f"<plan>{task_list.description}"]
+    for index, task in enumerate(task_list.tasks, start=1):
+        mark = "x" if task.completed else " "
+        lines.append(f"[{mark}] {index}. {task.description}")
+    done = sum(1 for t in task_list.tasks if t.completed)
+    lines.append(f"({done}/{len(task_list.tasks)} complete)")
+    lines.append("</plan>")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +300,7 @@ class TodoTool:
             item = TaskItem(description=task_def.task_description, details=task_def.details)
             task_list.tasks.append(item)
 
-        _session_lists[ctx.session_id] = task_list
+        set_task_list(ctx.session_id, task_list)
 
         import json
 
@@ -209,7 +310,7 @@ class TodoTool:
         )
 
     def _add(self, args: TodoParams, ctx: ToolContext) -> ToolEnvelope:
-        task_list = _session_lists.get(ctx.session_id)
+        task_list = get_task_list(ctx.session_id)
         if not task_list:
             return ToolEnvelope.fail(
                 code="KALASH_TOOL_ERROR",
@@ -221,6 +322,7 @@ class TodoTool:
             item = TaskItem(description=task_def.task_description, details=task_def.details)
             task_list.tasks.append(item)
 
+        _save_list(ctx.session_id, task_list)
         import json
 
         return ToolEnvelope.success(
@@ -229,7 +331,7 @@ class TodoTool:
         )
 
     def _complete(self, args: TodoParams, ctx: ToolContext) -> ToolEnvelope:
-        task_list = _session_lists.get(ctx.session_id)
+        task_list = get_task_list(ctx.session_id)
         if not task_list:
             return ToolEnvelope.fail(
                 code="KALASH_TOOL_ERROR",
@@ -246,6 +348,7 @@ class TodoTool:
                     completed_count += 1
                     break
 
+        _save_list(ctx.session_id, task_list)
         import json
 
         return ToolEnvelope.success(
@@ -257,7 +360,7 @@ class TodoTool:
         )
 
     def _remove(self, args: TodoParams, ctx: ToolContext) -> ToolEnvelope:
-        task_list = _session_lists.get(ctx.session_id)
+        task_list = get_task_list(ctx.session_id)
         if not task_list:
             return ToolEnvelope.fail(
                 code="KALASH_TOOL_ERROR",
@@ -270,6 +373,7 @@ class TodoTool:
         task_list.tasks = [t for t in task_list.tasks if t.id not in remove_set]
         removed = before - len(task_list.tasks)
 
+        _save_list(ctx.session_id, task_list)
         import json
 
         return ToolEnvelope.success(
@@ -278,7 +382,7 @@ class TodoTool:
         )
 
     def _list(self, ctx: ToolContext) -> ToolEnvelope:
-        task_list = _session_lists.get(ctx.session_id)
+        task_list = get_task_list(ctx.session_id)
         if not task_list:
             return ToolEnvelope.success(
                 content="No task list exists for this session.",

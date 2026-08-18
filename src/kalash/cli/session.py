@@ -28,23 +28,28 @@ def ls(
     manager = SessionManager()
     sessions = manager.list_sessions(limit=limit, status=status)
 
+    if not sessions:
+        console.print("[dim]No sessions yet.[/dim]")
+        return
+
     table = Table(title="Sessions")
     table.add_column("ID", style="cyan", no_wrap=True)
-    table.add_column("Started", style="green")
-    table.add_column("Status", style="yellow")
+    table.add_column("Updated", style="green")
+    table.add_column("State", style="yellow")
     table.add_column("Turns", justify="right")
-    table.add_column("Summary")
+    table.add_column("Project")
 
     for s in sessions:
         table.add_row(
-            s.id[:12],
-            s.started_at.strftime("%Y-%m-%d %H:%M"),
-            s.status,
-            str(s.turn_count),
-            s.summary or "—",
+            str(s.get("id", ""))[:20],
+            str(s.get("updated_at", ""))[:16],
+            str(s.get("state", "")),
+            str(s.get("turn_count", 0)),
+            str(s.get("project_dir", "")) or "—",
         )
 
     console.print(table)
+    console.print("[dim]Resume with: kalash --resume <id>[/dim]")
 
 
 @session_app.command("show")
@@ -65,20 +70,28 @@ def show(
         console.print(f"[red]Session {session_id!r} not found.[/red]")
         raise typer.Exit(code=1)
 
-    console.print(f"[bold]Session:[/bold] {session.id}")
-    console.print(f"[bold]Started:[/bold] {session.started_at}")
-    console.print(f"[bold]Status:[/bold] {session.status}")
-    console.print(f"[bold]Turns:[/bold] {session.turn_count}")
-    console.print(f"[bold]Model:[/bold] {session.model}")
-    console.print(f"[bold]Tokens:[/bold] {session.total_tokens:,}")
+    console.print(f"[bold]Session:[/bold] {session.get('id')}")
+    console.print(f"[bold]Project:[/bold] {session.get('project_dir', '—')}")
+    console.print(f"[bold]Created:[/bold] {session.get('created_at', '—')}")
+    console.print(f"[bold]Updated:[/bold] {session.get('updated_at', '—')}")
+    console.print(f"[bold]State:[/bold]   {session.get('state', '—')}")
+    console.print(f"[bold]Turns:[/bold]   {session.get('turn_count', 0)}")
+    console.print(f"[bold]Tokens:[/bold]  {int(session.get('total_tokens') or 0):,}")
 
     if turns:
-        console.print(f"\n[bold]Last {turns} turns:[/bold]")
-        for turn in session.get_turns(limit=turns):
-            role_color = {"user": "blue", "assistant": "green", "system": "yellow"}.get(
-                turn.role, "white"
-            )
-            console.print(f"  [{role_color}]{turn.role}:[/{role_color}] {turn.content[:120]}")
+        from kalash.models.normalize import TextBlock
+        from kalash.runtime.serialize import deserialize_blocks
+
+        transcript = manager.get_transcript(session_id)[-turns:]
+        console.print(f"\n[bold]Last {len(transcript)} message(s):[/bold]")
+        for row in transcript:
+            role = str(row.get("role", "?"))
+            color = {"user": "blue", "assistant": "green"}.get(role, "yellow")
+            blocks = deserialize_blocks(row.get("content"))
+            text = " ".join(
+                b.text for b in blocks if isinstance(b, TextBlock)
+            ).strip() or f"({len(blocks)} non-text block(s))"
+            console.print(f"  [{color}]{role}:[/{color}] {text[:160]}")
 
 
 @session_app.command("export")

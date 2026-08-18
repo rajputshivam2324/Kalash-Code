@@ -218,15 +218,19 @@ class SubagentRunner:
             max_wallclock_s=config.max_wallclock_s,
         )
 
-        # Subagent execution needs the agent loop, which is not wired yet.
-        # Raising rather than returning an empty result is deliberate: a
-        # success-shaped return made spawn() report status="completed" with a
-        # None result, so callers could not tell a finished run from an
-        # unimplemented one.
-        raise NotImplementedError(
-            "subagent execution requires the agent loop; "
-            f"child budget would be {child_budget.max_tokens} tokens / "
-            f"{child_budget.max_turns} turns"
+        # Imported lazily: the runtime imports the orchestration layer, so a
+        # module-level import here would close a cycle.
+        from kalash.runtime.agent import run_isolated
+
+        depth = await self._get_depth(child_run_id)
+
+        return await run_isolated(
+            config.prompt,
+            max_turns=child_budget.max_turns,
+            max_tokens=child_budget.max_tokens,
+            spawn_depth=depth,
+            max_spawn_depth=self._max_depth,
+            context_files=tuple(config.context_files),
         )
 
     async def _get_depth(self, run_id: str) -> int:

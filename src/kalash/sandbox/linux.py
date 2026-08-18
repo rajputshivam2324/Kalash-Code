@@ -280,7 +280,9 @@ class LinuxSandbox:
     # Bubblewrap command wrapping
     # ------------------------------------------------------------------
 
-    def wrap_command(self, cmd: list[str], *, network: bool = False) -> list[str]:
+    def wrap_command(
+        self, cmd: list[str], *, network: bool = False, cwd: str | None = None
+    ) -> list[str]:
         """Wrap a command with Bubblewrap isolation.
 
         Args:
@@ -299,26 +301,74 @@ class LinuxSandbox:
 
         args: list[str] = [bwrap]
 
-        # Read-only bind mounts for system
-        for sys_path in ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/proc", "/dev"):
+        # Read-only bind mounts for system libraries and configuration.
+        for sys_path in ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/opt"):
             if Path(sys_path).exists():
                 args.extend(["--ro-bind", sys_path, sys_path])
 
-        # Writable bind mounts
+        # /dev must be a fresh devtmpfs, not a read-only bind. A read-only /dev
+        # makes `/dev/null` unwritable, so any command containing `>/dev/null`
+        # fails with a cryptic bash error — and that redirect appears in most
+        # build scripts.
+        args.extend(["--dev", "/dev"])
+
+        # Likewise /proc: a bind of the host's proc does not work inside a new
+        # PID namespace.
+        args.extend(["--proc", "/proc"])
+
+        # A fresh /tmp must be mounted BEFORE the writable binds. bwrap applies
+        # operations in order, so a tmpfs mounted afterwards masks any writable
+        # root beneath it — and workspaces under /tmp are common enough (tests,
+        # scratch checkouts) that getting this backwards silently hides the
+        # project from every command.
+        if not any(str(root).startswith("/tmp") for root in self.policy.writable_roots):
+            args.extend(["--tmpfs", "/tmp"])
+
+        # Writable bind mounts, at their real paths so absolute paths still work.
         for root in self.policy.writable_roots:
             root_str = str(root)
-            args.extend(["--bind", root_str, root_str])
-
-        # Temp directory
-        args.extend(["--tmpfs", "/tmp"])
+            if Path(root_str).exists():
+                args.extend(["--bind", root_str, root_str])
 
         # Network isolation
         if not network and not self.policy.network_allowed():
             args.append("--unshare-net")
+        else:
+            # DNS resolution needs whatever /etc/resolv.conf points at. On
+            # systemd-resolved hosts that is a symlink into /run, which is not
+            # bound by anything above — so without this, name lookups fail
+            # inside the sandbox even though the network is reachable.
+            for resolver_path in (
+                "/run/systemd/resolve",
+                "/run/resolvconf",
+                "/run/NetworkManager",
+            ):
+                if Path(resolver_path).exists():
+                    args.extend(["--ro-bind", resolver_path, resolver_path])
 
         # User namespace
         args.append("--unshare-user")
         args.append("--die-with-parent")
+
+        # Without --chdir the process starts at / inside the namespace, so every
+        # relative path and every bare `ls` silently resolves against the sandbox
+        # root instead of the workspace. That is worse than not sandboxing: the
+        # command succeeds while operating somewhere unintended.
+        target = cwd or (
+            str(self.policy.writable_roots[0])
+            if self.policy.writable_roots
+            else None
+        )
+        if not target:
+            msg = "cannot wrap without a working directory — refusing to run at /"
+            raise RuntimeError(msg)
+        if not Path(target).exists():
+            # Skipping --chdir would put the process back at /, which is the
+            # failure this guard exists to prevent. Refusing lets the caller fall
+            # back to an unwrapped run in the correct directory.
+            msg = f"cannot wrap: working directory does not exist: {target}"
+            raise RuntimeError(msg)
+        args.extend(["--chdir", str(target)])
 
         # The actual command
         args.extend(cmd)

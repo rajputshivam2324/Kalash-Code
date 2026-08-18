@@ -110,3 +110,16 @@ class TestBuildProvider:
         result = resolve.build_provider("groq", None)
         assert result.ok, result.reason
         assert result.model_id is not None
+
+
+class TestAuthEncryption:
+    def test_credentials_are_not_stored_in_plaintext(self, isolated_store, tmp_path, monkeypatch):
+        from kalash.core.paths import kalash_home
+        from kalash.tui import auth_store
+
+        monkeypatch.setattr(auth_store, "kalash_home", lambda: tmp_path)
+        auth_store.save_credential("groq", "gsk-secret-key")
+
+        raw = (tmp_path / "auth.json").read_text(encoding="utf-8")
+        assert "gsk-secret-key" not in raw
+        assert auth_store.get_credential("groq") == "gsk-secret-key"

@@ -62,7 +62,8 @@ dev = [
 kalash = "kalash.cli.main:app"
 
 [project.entry-points."kalash.memory_providers"]
-local = "kalash.memory.providers.local:LocalProvider"
+local = "kalash.memory.providers.local:create_local_provider"
+mem0 = "kalash.memory.providers.mem0:create_mem0_provider"
 
 [project.entry-points."kalash.model_providers"]
 anthropic = "kalash.models.providers.anthropic:AnthropicProvider"

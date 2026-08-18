@@ -210,16 +210,17 @@ class LocalProvider:
         if self._initialized:
             return
 
-        async with self._engine.write() as conn:
+        # executescript() issues implicit commits, which breaks the engine's
+        # explicit BEGIN/COMMIT wrapper — run DDL on the raw connection instead.
+        def _init_schema() -> None:
+            conn = self._engine._get_connection()  # noqa: SLF001
             conn.executescript(SCHEMA_DDL)
+
+        await asyncio.to_thread(_init_schema)
 
         # Check for sqlite-vec extension
         self._vector_available = await self._check_vector_extension()
         self._initialized = True
-        logger.info(
-            "local_provider_initialized",
-            vector_available=self._vector_available,
-        )
 
     async def _check_vector_extension(self) -> bool:
         """Report whether sqlite-vec is loadable.

@@ -377,6 +377,24 @@ CREATE TABLE IF NOT EXISTS audit_log (
     hash        TEXT NOT NULL
 );
 """),
+    (2, "0002_kalash_grants", """
+-- Durable permission grants (aligned with permissions/grants.py)
+CREATE TABLE IF NOT EXISTS kalash_grants (
+    id              TEXT PRIMARY KEY,
+    tool_pattern    TEXT NOT NULL,
+    path_pattern    TEXT,
+    host_pattern    TEXT,
+    lifetime        TEXT NOT NULL,
+    session_id      TEXT,
+    decision        TEXT NOT NULL DEFAULT 'allow',
+    reason          TEXT,
+    created_at      TEXT NOT NULL,
+    consumed        INTEGER NOT NULL DEFAULT 0,
+    metadata        TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_kalash_grants_session
+    ON kalash_grants(session_id) WHERE session_id IS NOT NULL;
+"""),
 ]
 
 

@@ -98,6 +98,7 @@ class PolicyRequest:
     command: str = ""
     arguments: dict[str, Any] = field(default_factory=dict)
     confirmation_classes: list[ConfirmationClass] = field(default_factory=list)
+    grant_signature: str = ""
 
 
 @dataclass
@@ -165,7 +166,8 @@ class PermissionPolicy:
             await self._emit_decision(request, result)
             return result
 
-        # Stage 3: Existing grants
+        # Stage 3: Existing grants. A grant is the user having already answered
+        # this exact question, so it is not re-litigated by stage 6.
         result = await self._stage_3_grants(request)
         if result:
             await self._emit_decision(request, result)
@@ -173,14 +175,15 @@ class PermissionPolicy:
 
         # Stage 4: Sandbox-mode defaults
         result = self._stage_4_sandbox_defaults(request)
-        if result:
-            await self._emit_decision(request, result)
-            return result
 
-        # Stage 5: Approval policy (risk-class mapping)
-        result = self._stage_5_approval_policy(request)
+        # Stage 5: Approval policy (risk-class mapping), when 4 did not decide
+        if result is None:
+            result = self._stage_5_approval_policy(request)
 
-        # Stage 6: Confirmation classes (can only ADD prompt)
+        # Stage 6: Confirmation classes. This must run even when stage 4 already
+        # said ALLOW — a blanket "workspace-write allows writes" is exactly the
+        # case that needs a boundary-crossing or destructive-git prompt layered
+        # on top. It can only escalate to ASK, never relax a decision.
         result = self._stage_6_confirmation_classes(request, result)
 
         await self._emit_decision(request, result)
@@ -242,6 +245,7 @@ class PermissionPolicy:
             tool_name=request.tool_name,
             paths=request.paths,
             hosts=request.hosts,
+            grant_signature=request.grant_signature or None,
         )
 
         if grant is None:
@@ -251,10 +255,17 @@ class PermissionPolicy:
         if grant.get("lifetime") == "once":
             await self._grant_store.consume(grant["id"])
 
+        # Honour the grant's own decision. Grants can be stored with
+        # decision="deny", and returning ALLOW for one of those would turn a
+        # standing prohibition into a standing permission.
+        recorded = str(grant.get("decision", "allow")).lower()
+        decision = Decision.DENY if recorded == "deny" else Decision.ALLOW
+        verb = "Denied" if decision is Decision.DENY else "Allowed"
+
         return PolicyResult(
-            decision=Decision.ALLOW,
+            decision=decision,
             stage=3,
-            reason=f"Allowed by grant: {grant['id']}",
+            reason=f"{verb} by grant: {grant['id']}",
             grant_id=grant["id"],
         )
 

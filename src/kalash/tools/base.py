@@ -72,6 +72,35 @@ class ToolContext:
     writable_roots: tuple[Path, ...] = ()
     capabilities: frozenset[str] = frozenset()
 
+    # Delegation bounds. An agent that can spawn agents can spend money
+    # exponentially, so depth is carried in the context and decremented on the
+    # way down rather than tracked in a global.
+    spawn_depth: int = 0
+    max_spawn_depth: int = 3
+    model_id: str = ""
+    """Model the parent is running on, so a child can inherit it."""
+
+    allow_network: bool = False
+    """Whether this specific call may reach the network.
+
+    Set per-call from the risk classification and the user's answer, not
+    globally. A sandbox that denies network unconditionally makes every package
+    manager hang until timeout, which is indistinguishable from a freeze."""
+
+    tool_use_id: str = ""
+    """Provider tool-use id for correlating live output events."""
+
+    event_bus: Any | None = None
+    """Optional bus for streaming tool output to the TUI / headless sink."""
+
+    cancel_event: Any | None = None
+    """When set, cooperative tools should abort in-flight work."""
+
+    @property
+    def can_spawn(self) -> bool:
+        """Whether this context is allowed to create another child."""
+        return self.spawn_depth < self.max_spawn_depth
+
 
 # ---------------------------------------------------------------------------
 # Result envelope

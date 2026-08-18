@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -230,12 +231,27 @@ class HookRunner:
             "data": payload.data,
         }).encode()
 
-        proc = await asyncio.create_subprocess_shell(
-            config.command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        # Command comes from the user's hook config (trusted), not from the
+        # payload. Pass it as a single `-c` argument so runtime data never
+        # undergoes shell interpolation.
+        if sys.platform == "win32":
+            proc = await asyncio.create_subprocess_exec(
+                "cmd.exe",
+                "/c",
+                config.command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        else:
+            proc = await asyncio.create_subprocess_exec(
+                "/bin/sh",
+                "-c",
+                config.command,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
 
         try:
             stdout, stderr = await asyncio.wait_for(

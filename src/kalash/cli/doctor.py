@@ -32,29 +32,18 @@ def doctor() -> None:
     # Sandbox backend
     checks.append(_check_sandbox())
 
-    # Provider health
-    checks.extend(_check_providers())
-
-    # Model registry
-    checks.append(_check_model_registry())
-
-    # Memory subsystem
-    checks.append(_check_memory())
-
-    # MCP servers
-    checks.append(_check_mcp())
-
-    # Database
+    checks.append(_check_provider())
+    checks.append(_check_tools())
+    checks.append(_check_permissions())
     checks.append(_check_database())
-
-    # Disk space
+    checks.append(_check_scratchpad())
+    checks.append(_check_search())
+    checks.append(_check_ripgrep())
+    checks.append(_check_hooks())
+    checks.append(_check_skills())
+    checks.append(_check_instructions())
     checks.append(_check_disk())
-
-    # Config
     checks.append(_check_config())
-
-    # Secrets
-    checks.append(_check_secrets())
 
     # Report results
     table = Table(title="Diagnostic Results")
@@ -118,181 +107,208 @@ def _check_platform() -> _CheckResult:
 
 
 def _check_sandbox() -> _CheckResult:
-    """Check sandbox backend availability."""
+    """Report which OS sandbox backend is usable."""
     try:
-        from kalash.sandbox.manager import SandboxManager
+        from kalash.sandbox.manager import get_sandbox_manager
 
-        manager = SandboxManager()
-        info = manager.get_info()
-        detail = (
-            f"Mode: {info.mode}, Backend: {info.backend}, "
-            f"Enforcement: {info.enforcement_level}"
-        )
-        return _CheckResult("Sandbox", "pass", detail)
-    except ImportError:
-        return _CheckResult("Sandbox", "warn", "Sandbox module not available")
-    except Exception as e:
-        return _CheckResult("Sandbox", "fail", f"Error: {e}")
+        status = get_sandbox_manager().status()
+    except Exception as exc:
+        return _CheckResult("Sandbox", "fail", f"Error: {exc}")
+
+    if status.available:
+        return _CheckResult("Sandbox", "pass", status.describe())
+    # Not fatal: the permission gate and path checks still apply. This reduces
+    # defence in depth rather than removing enforcement.
+    return _CheckResult("Sandbox", "warn", status.describe())
 
 
-def _check_providers() -> list[_CheckResult]:
-    """Check all configured model providers."""
-    results: list[_CheckResult] = []
+def _check_provider() -> _CheckResult:
+    """Check that a model provider resolves."""
     try:
-        from kalash.models.registry import ModelRegistry
+        from kalash.models.resolve import build_provider
 
-        registry = ModelRegistry()
-        providers = registry.list_providers()
+        resolution = build_provider()
+    except Exception as exc:
+        return _CheckResult("Provider", "fail", f"Error: {exc}")
 
-        if not providers:
-            results.append(_CheckResult("Providers", "warn", "No providers configured"))
-            return results
-
-        for provider in providers:
-            try:
-                health = provider.health_check()
-                if health.healthy:
-                    results.append(
-                        _CheckResult(f"Provider: {provider.name}", "pass", "Reachable")
-                    )
-                else:
-                    results.append(
-                        _CheckResult(
-                            f"Provider: {provider.name}", "warn", health.message
-                        )
-                    )
-            except Exception as e:
-                results.append(
-                    _CheckResult(f"Provider: {provider.name}", "fail", str(e))
-                )
-    except ImportError:
-        results.append(_CheckResult("Providers", "warn", "Provider module not available"))
-    except Exception as e:
-        results.append(_CheckResult("Providers", "fail", f"Error: {e}"))
-
-    return results
-
-
-def _check_model_registry() -> _CheckResult:
-    """Check model registry status."""
-    try:
-        from kalash.models.registry import ModelRegistry
-
-        registry = ModelRegistry()
-        count = registry.model_count()
-        return _CheckResult("Model Registry", "pass", f"{count} models registered")
-    except ImportError:
-        return _CheckResult("Model Registry", "warn", "Registry module not available")
-    except Exception as e:
-        return _CheckResult("Model Registry", "fail", f"Error: {e}")
-
-
-def _check_memory() -> _CheckResult:
-    """Check memory subsystem."""
-    try:
-        from kalash.memory.manager import MemoryManager
-
-        manager = MemoryManager()
-        info = manager.get_info()
+    if not resolution.ok:
         return _CheckResult(
-            "Memory", "pass", f"Provider: {info.provider}, Entries: {info.count}"
+            "Provider", "fail", resolution.reason or "no provider configured"
         )
-    except ImportError:
-        return _CheckResult("Memory", "warn", "Memory module not available")
-    except Exception as e:
-        return _CheckResult("Memory", "fail", f"Error: {e}")
+
+    name = getattr(resolution.provider, "name", "unknown")
+    return _CheckResult("Provider", "pass", f"resolved: {name}")
 
 
-def _check_mcp() -> _CheckResult:
-    """Check MCP server connections."""
+def _check_tools() -> _CheckResult:
+    """Check the built-in tool registry populates and produces schemas."""
     try:
-        from kalash.mcp.registry import MCPRegistry
+        from kalash.tools.builtins import default_registry
 
-        registry = MCPRegistry()
-        servers = registry.list_servers()
+        registry = default_registry()
+        schemas = registry.list_schemas()
+    except Exception as exc:
+        return _CheckResult("Tools", "fail", f"Error: {exc}")
 
-        if not servers:
-            return _CheckResult("MCP", "pass", "No MCP servers configured")
+    if not schemas:
+        return _CheckResult("Tools", "fail", "no tools registered")
+    names = ", ".join(sorted(t.name for t in registry.list_tools())[:6])
+    return _CheckResult("Tools", "pass", f"{len(schemas)} registered ({names}, …)")
 
-        healthy = sum(1 for s in servers if s.is_healthy)
-        total = len(servers)
 
-        if healthy == total:
-            return _CheckResult("MCP", "pass", f"{total} servers, all healthy")
-        elif healthy > 0:
-            return _CheckResult("MCP", "warn", f"{healthy}/{total} servers healthy")
-        else:
-            return _CheckResult("MCP", "fail", f"0/{total} servers reachable")
-    except ImportError:
-        return _CheckResult("MCP", "warn", "MCP module not available")
-    except Exception as e:
-        return _CheckResult("MCP", "fail", f"Error: {e}")
+def _check_permissions() -> _CheckResult:
+    """Check the permission gate is constructible and an approval path exists."""
+    try:
+        from kalash.core.config import load_config
+        from kalash.permissions.console import is_interactive
+        from kalash.runtime.toolhost import normalize_sandbox_mode
+
+        mode = normalize_sandbox_mode(load_config().permissions.sandbox)
+        channel = "terminal prompt" if is_interactive() else "non-interactive (denies)"
+    except Exception as exc:
+        return _CheckResult("Permissions", "fail", f"Error: {exc}")
+
+    return _CheckResult("Permissions", "pass", f"sandbox={mode}, approvals={channel}")
 
 
 def _check_database() -> _CheckResult:
-    """Check database connectivity."""
+    """Check the SQLite store opens and has been migrated."""
     try:
-        from kalash.storage.db import Database
+        from kalash.core.paths import kalash_db_path
+        from kalash.storage.engine import get_engine
 
-        db = Database()
-        db.ping()
-        return _CheckResult("Database", "pass", f"Connected ({db.backend})")
-    except ImportError:
-        return _CheckResult("Database", "warn", "Database module not available")
-    except Exception as e:
-        return _CheckResult("Database", "fail", f"Error: {e}")
+        engine = get_engine()
+        rows = engine.execute_read(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
+        )
+    except Exception as exc:
+        return _CheckResult("Database", "fail", f"Error: {exc}")
+
+    location = kalash_db_path()
+    if not rows:
+        return _CheckResult(
+            "Database", "warn", f"{location} — not migrated yet (runs on first session)"
+        )
+    return _CheckResult("Database", "pass", f"{location} — schema present")
+
+
+def _check_scratchpad() -> _CheckResult:
+    """Check the blob store and scratchpad directory are writable."""
+    try:
+        from kalash.storage.blobs import read_blob, store_blob
+
+        digest = store_blob(b"kalash doctor probe")
+        recovered = read_blob(digest)
+    except Exception as exc:
+        return _CheckResult("Scratchpad", "fail", f"Error: {exc}")
+
+    if recovered != b"kalash doctor probe":
+        return _CheckResult("Scratchpad", "fail", "blob round trip mismatch")
+    return _CheckResult("Scratchpad", "pass", "blob store round trip verified")
+
+
+def _check_search() -> _CheckResult:
+    """Check whether a web search provider is configured."""
+    try:
+        from kalash.tools.search_providers import available_providers, configuration_hint
+
+        configured = available_providers()
+    except Exception as exc:
+        return _CheckResult("Web search", "fail", f"Error: {exc}")
+
+    if configured:
+        return _CheckResult("Web search", "pass", f"configured: {', '.join(configured)}")
+    return _CheckResult("Web search", "warn", configuration_hint())
+
+
+def _check_ripgrep() -> _CheckResult:
+    """The search tool shells out to ripgrep."""
+    import shutil
+
+    if shutil.which("rg"):
+        return _CheckResult("ripgrep", "pass", "rg found on PATH")
+    return _CheckResult(
+        "ripgrep", "warn", "rg not on PATH — the `search` tool will be unavailable"
+    )
+
+
+def _check_hooks() -> _CheckResult:
+    """Report discovered project hooks."""
+    try:
+        from kalash.hooks.load import discover_hooks
+
+        hooks = discover_hooks()
+    except Exception as exc:
+        return _CheckResult("Hooks", "fail", f"Error: {exc}")
+
+    if not hooks:
+        return _CheckResult("Hooks", "pass", "none configured")
+    triggers = ", ".join(sorted({h.event.value for h in hooks}))
+    return _CheckResult("Hooks", "pass", f"{len(hooks)} hook(s): {triggers}")
+
+
+def _check_skills() -> _CheckResult:
+    """Report discovered skills."""
+    try:
+        from kalash.skills.loader import SkillLoader
+
+        entries = SkillLoader().discover_now()
+    except Exception as exc:
+        return _CheckResult("Skills", "fail", f"Error: {exc}")
+
+    if not entries:
+        return _CheckResult("Skills", "pass", "none installed")
+    return _CheckResult("Skills", "pass", f"{len(entries)} installed")
+
+
+def _check_instructions() -> _CheckResult:
+    """Report discovered KALASH.md / AGENTS.md files."""
+    try:
+        from kalash.runtime.prompt import discover_project_instructions
+
+        found = discover_project_instructions()
+    except Exception as exc:
+        return _CheckResult("Instructions", "fail", f"Error: {exc}")
+
+    if not found.sources:
+        return _CheckResult(
+            "Instructions", "pass", "no KALASH.md found (run /init to create one)"
+        )
+    names = ", ".join(str(p) for p in found.sources)
+    return _CheckResult("Instructions", "pass", names)
 
 
 def _check_disk() -> _CheckResult:
-    """Check available disk space."""
+    """Check available disk space where Kalash stores data."""
     import shutil
 
-    from kalash.config.paths import data_dir
-
     try:
-        usage = shutil.disk_usage(data_dir())
-        free_gb = usage.free / (1024**3)
+        from kalash.core.paths import kalash_home
 
-        if free_gb < 0.5:
-            return _CheckResult("Disk", "fail", f"{free_gb:.1f} GB free (< 500MB)")
-        elif free_gb < 2.0:
-            return _CheckResult("Disk", "warn", f"{free_gb:.1f} GB free (< 2GB)")
-        else:
-            return _CheckResult("Disk", "pass", f"{free_gb:.1f} GB free")
-    except Exception as e:
-        return _CheckResult("Disk", "fail", f"Error: {e}")
+        usage = shutil.disk_usage(kalash_home())
+    except Exception as exc:
+        return _CheckResult("Disk", "warn", f"Could not determine: {exc}")
+
+    free_gb = usage.free / (1024**3)
+    detail = f"{free_gb:.1f} GiB free"
+    if free_gb < 1:
+        return _CheckResult("Disk", "fail", f"{detail} — too little to operate safely")
+    if free_gb < 5:
+        return _CheckResult("Disk", "warn", detail)
+    return _CheckResult("Disk", "pass", detail)
 
 
 def _check_config() -> _CheckResult:
-    """Check configuration validity."""
+    """Check configuration loads."""
     try:
-        from kalash.config.manager import ConfigManager
+        from kalash.core.config import load_config
 
-        manager = ConfigManager()
-        errors = manager.validate()
+        config = load_config()
+    except Exception as exc:
+        return _CheckResult("Config", "fail", f"Could not load: {exc}")
 
-        if not errors:
-            return _CheckResult("Config", "pass", "Valid")
-        else:
-            return _CheckResult("Config", "warn", f"{len(errors)} issue(s): {errors[0]}")
-    except ImportError:
-        return _CheckResult("Config", "warn", "Config module not available")
-    except Exception as e:
-        return _CheckResult("Config", "fail", f"Error: {e}")
-
-
-def _check_secrets() -> _CheckResult:
-    """Check secrets/API key availability."""
-    try:
-        from kalash.config.secrets import SecretsManager
-
-        secrets = SecretsManager()
-        available = secrets.list_available()
-
-        if not available:
-            return _CheckResult("Secrets", "warn", "No API keys configured")
-        return _CheckResult("Secrets", "pass", f"{len(available)} key(s) available")
-    except ImportError:
-        return _CheckResult("Secrets", "warn", "Secrets module not available")
-    except Exception as e:
-        return _CheckResult("Secrets", "fail", f"Error: {e}")
+    return _CheckResult(
+        "Config",
+        "pass",
+        f"model={config.model.primary}, sandbox={config.permissions.sandbox}",
+    )

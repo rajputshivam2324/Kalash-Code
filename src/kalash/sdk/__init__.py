@@ -7,11 +7,6 @@ Usage:
         response = await sess.complete("Explain this error")
         print(response.text)
 
-    # Streaming
-    async with KalashClient().session() as sess:
-        async for chunk in sess.stream("Refactor this function"):
-            print(chunk.text, end="")
-
     # Single-shot (outside session context)
     client = KalashClient()
     response = await client.complete("What does this code do?")
@@ -21,7 +16,10 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, AsyncGenerator, AsyncIterator, Optional
+
+from kalash.runtime.agent import Agent, build_agent
 
 
 @dataclass
@@ -56,19 +54,15 @@ class SessionInfo:
 
 
 class KalashSession:
-    """An active session context for multi-turn conversations.
+    """An active session context for multi-turn conversations."""
 
-    Use as an async context manager via KalashClient.session().
-    """
-
-    def __init__(self, session_id: str, client: "KalashClient") -> None:
-        self._session_id = session_id
+    def __init__(self, agent: Agent, client: "KalashClient") -> None:
+        self._agent = agent
         self._client = client
 
     @property
     def session_id(self) -> str:
-        """The session's unique identifier."""
-        return self._session_id
+        return self._agent.session_id
 
     async def complete(
         self,
@@ -78,31 +72,18 @@ class KalashSession:
         max_turns: Optional[int] = None,
         tools: Optional[list[str]] = None,
     ) -> CompletionResponse:
-        """Run a single-shot completion within this session.
+        """Run a single-shot completion within this session."""
+        del model, tools  # model is fixed at session creation for now
+        if max_turns is not None:
+            self._agent.loop.max_iterations = max_turns
 
-        Args:
-            prompt: The user message to process.
-            model: Override the default model for this request.
-            max_turns: Maximum agentic turns (tool use loops).
-            tools: Restrict available tools to this list.
-
-        Returns:
-            CompletionResponse with the assistant's reply.
-        """
-        from kalash.runtime.loop import AgentLoop
-
-        loop = AgentLoop(session_id=self._session_id)
-        result = await loop.run_to_completion(
-            prompt, model=model, max_turns=max_turns, tools=tools
-        )
-
+        result = await self._agent.send(prompt)
         return CompletionResponse(
-            text=result.text,
-            model=result.model,
-            tokens_used=result.tokens_used,
-            cost_usd=result.cost_usd,
-            tool_calls=result.tool_calls,
-            session_id=self._session_id,
+            text=result.final_response,
+            model=self._agent.loop.model_id,
+            tokens_used=result.total_tokens,
+            cost_usd=float(self._agent.budget.cost_used),
+            session_id=self._agent.session_id,
         )
 
     async def stream(
@@ -113,82 +94,67 @@ class KalashSession:
         max_turns: Optional[int] = None,
         tools: Optional[list[str]] = None,
     ) -> AsyncIterator[StreamChunk]:
-        """Stream a response within this session.
+        """Stream a response within this session."""
+        del model, tools
+        if max_turns is not None:
+            self._agent.loop.max_iterations = max_turns
 
-        Args:
-            prompt: The user message to process.
-            model: Override the default model for this request.
-            max_turns: Maximum agentic turns (tool use loops).
-            tools: Restrict available tools to this list.
+        buffer: list[str] = []
 
-        Yields:
-            StreamChunk objects as they arrive.
-        """
-        from kalash.runtime.loop import AgentLoop
+        def on_delta(text: str) -> None:
+            buffer.append(text)
 
-        loop = AgentLoop(session_id=self._session_id)
-
-        async for event in loop.run(
-            prompt, model=model, max_turns=max_turns, tools=tools
-        ):
-            match event.type:
-                case "chunk":
-                    yield StreamChunk(text=event.content)
-                case "tool_call_end":
-                    yield StreamChunk(
-                        text="",
-                        tool_call={
-                            "name": event.tool_name,
-                            "result": event.result,
-                            "success": event.success,
-                        },
-                    )
-                case "done":
-                    yield StreamChunk(text="", done=True)
+        result = await self._agent.send(prompt, on_text_delta=on_delta)
+        yield StreamChunk(text="".join(buffer))
+        yield StreamChunk(text="", done=True)
+        if result.error:
+            yield StreamChunk(text=f"\n[error: {result.error}]")
 
     async def info(self) -> SessionInfo:
-        """Get current session information."""
         from kalash.runtime.session import SessionManager
 
-        manager = SessionManager()
-        session = manager.get_session(self._session_id)
-
+        row = SessionManager().get_session(self._agent.session_id)
+        if row is None:
+            return SessionInfo(
+                id=self._agent.session_id,
+                model=self._agent.loop.model_id,
+                turn_count=len(self._agent.history),
+                tokens_used=self._agent.budget.tokens_used,
+            )
         return SessionInfo(
-            id=session.id,
-            model=session.model,
-            turn_count=session.turn_count,
-            tokens_used=session.total_tokens,
+            id=str(row["id"]),
+            model=self._agent.loop.model_id,
+            turn_count=int(row.get("turn_count", 0)),
+            tokens_used=int(row.get("total_tokens", 0)),
         )
 
     async def close(self) -> None:
-        """Close this session."""
         from kalash.runtime.session import SessionManager
 
-        manager = SessionManager()
-        manager.close_session(self._session_id)
+        SessionManager().close_session(self._agent.session_id)
 
 
 class KalashClient:
-    """Public Python API for embedding Kalash programmatically.
-
-    Provides both single-shot and session-based interaction patterns.
-    All operations delegate to the Kalash runtime layer.
-    """
+    """Public Python API for embedding Kalash programmatically."""
 
     def __init__(
         self,
         *,
         model: Optional[str] = None,
         config_overrides: Optional[dict[str, Any]] = None,
+        cwd: Path | None = None,
     ) -> None:
-        """Initialize the Kalash client.
-
-        Args:
-            model: Default model to use for completions.
-            config_overrides: Override configuration values for this client instance.
-        """
         self._default_model = model
         self._config_overrides = config_overrides or {}
+        self._cwd = cwd
+
+    def _parse_model(self, model: str | None) -> tuple[str | None, str | None]:
+        if not model:
+            return None, None
+        if "/" in model:
+            provider_id, model_id = model.split("/", 1)
+            return provider_id, model_id
+        return None, model
 
     @asynccontextmanager
     async def session(
@@ -197,29 +163,25 @@ class KalashClient:
         resume: Optional[str] = None,
         model: Optional[str] = None,
     ) -> AsyncGenerator[KalashSession, None]:
-        """Create or resume a session as an async context manager.
+        from kalash.core.logging import configure_logging
+        from kalash.runtime.bootstrap import prepare_agent
 
-        Args:
-            resume: Session ID to resume. Creates a new session if None.
-            model: Model override for this session.
+        configure_logging()
+        provider_id, model_id = self._parse_model(model or self._default_model)
+        agent, reason = build_agent(
+            cwd=self._cwd,
+            provider_id=provider_id,
+            model_id=model_id,
+            session_id=resume,
+            resume=bool(resume),
+            interactive=False,
+        )
+        if agent is None:
+            raise RuntimeError(reason or "could not build agent")
 
-        Yields:
-            A KalashSession instance for multi-turn interaction.
-        """
-        from kalash.runtime.session import SessionManager
+        await prepare_agent(agent)
 
-        manager = SessionManager()
-
-        if resume:
-            session = manager.resume(resume)
-        else:
-            session = manager.create(
-                model=model or self._default_model,
-                config_overrides=self._config_overrides,
-            )
-
-        kalash_session = KalashSession(session_id=session.id, client=self)
-
+        kalash_session = KalashSession(agent, self)
         try:
             yield kalash_session
         finally:
@@ -233,17 +195,6 @@ class KalashClient:
         max_turns: Optional[int] = None,
         tools: Optional[list[str]] = None,
     ) -> CompletionResponse:
-        """Run a single-shot completion (creates a temporary session).
-
-        Args:
-            prompt: The user message to process.
-            model: Override the default model.
-            max_turns: Maximum agentic turns.
-            tools: Restrict available tools.
-
-        Returns:
-            CompletionResponse with the assistant's reply.
-        """
         async with self.session(model=model) as sess:
             return await sess.complete(
                 prompt, model=model, max_turns=max_turns, tools=tools
@@ -257,17 +208,6 @@ class KalashClient:
         max_turns: Optional[int] = None,
         tools: Optional[list[str]] = None,
     ) -> AsyncIterator[StreamChunk]:
-        """Stream a single-shot response (creates a temporary session).
-
-        Args:
-            prompt: The user message to process.
-            model: Override the default model.
-            max_turns: Maximum agentic turns.
-            tools: Restrict available tools.
-
-        Yields:
-            StreamChunk objects as they arrive.
-        """
         async with self.session(model=model) as sess:
             async for chunk in sess.stream(
                 prompt, model=model, max_turns=max_turns, tools=tools
