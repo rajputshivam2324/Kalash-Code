@@ -416,6 +416,21 @@ class WriteTool:
         if args.create_dirs:
             path.parent.mkdir(parents=True, exist_ok=True)
 
+        if ctx.hooks:
+            from kalash.hooks.events import HookEvent, FileEditPayload
+            from kalash.core.errors import HookDeniedError
+            try:
+                await ctx.hooks.dispatch(FileEditPayload(
+                    event=HookEvent.PRE_FILE_EDIT,
+                    session_id=ctx.session_id,
+                    run_id=ctx.run_id,
+                    path=str(path),
+                    operation="edit" if existing_mode is not None else "create",
+                    content_preview=args.content[:100],
+                ))
+            except HookDeniedError as e:
+                return ToolEnvelope.fail(code="KALASH_TOOL_DENIED", message=str(e), recoverable=True)
+        
         # Atomic write: temp -> fsync -> replace
         content_bytes = args.content.encode("utf-8")
         try:
@@ -451,6 +466,20 @@ class WriteTool:
 
         new_digest = _content_digest(content_bytes)
         kind = "modified" if existing_mode is not None else "created"
+
+        if ctx.hooks:
+            from kalash.hooks.events import HookEvent, FileEditPayload
+            try:
+                await ctx.hooks.dispatch(FileEditPayload(
+                    event=HookEvent.POST_FILE_EDIT,
+                    session_id=ctx.session_id,
+                    run_id=ctx.run_id,
+                    path=str(path),
+                    operation="edit" if existing_mode is not None else "create",
+                    content_preview=args.content[:100],
+                ))
+            except Exception:
+                pass
 
         diff = make_diff(str(path), previous_text, args.content)
 
@@ -575,6 +604,21 @@ class EditTool:
         new_text = text.replace(args.old_str, args.new_str, 1)
         new_bytes = new_text.encode(encoding)
 
+        if ctx.hooks:
+            from kalash.hooks.events import HookEvent, FileEditPayload
+            from kalash.core.errors import HookDeniedError
+            try:
+                await ctx.hooks.dispatch(FileEditPayload(
+                    event=HookEvent.PRE_FILE_EDIT,
+                    session_id=ctx.session_id,
+                    run_id=ctx.run_id,
+                    path=str(path),
+                    operation="edit",
+                    content_preview=args.new_str[:100],
+                ))
+            except HookDeniedError as e:
+                return ToolEnvelope.fail(code="KALASH_TOOL_DENIED", message=str(e), recoverable=True)
+
         # Atomic write
         existing_mode = stat.S_IMODE(path.stat().st_mode)
         fd = tempfile.NamedTemporaryFile(
@@ -597,6 +641,21 @@ class EditTool:
             )
 
         new_digest = _content_digest(new_bytes)
+
+        if ctx.hooks:
+            from kalash.hooks.events import HookEvent, FileEditPayload
+            try:
+                await ctx.hooks.dispatch(FileEditPayload(
+                    event=HookEvent.POST_FILE_EDIT,
+                    session_id=ctx.session_id,
+                    run_id=ctx.run_id,
+                    path=str(path),
+                    operation="edit",
+                    content_preview=args.new_str[:100],
+                ))
+            except Exception:
+                pass
+
         diff = make_diff(str(path), text, new_text)
         return ToolEnvelope.success(
             content=f"Edited {path} ({diff.stat.render()})",
@@ -722,6 +781,21 @@ class MultiEditTool:
 
         new_bytes = text.encode(encoding)
 
+        if ctx.hooks:
+            from kalash.hooks.events import HookEvent, FileEditPayload
+            from kalash.core.errors import HookDeniedError
+            try:
+                await ctx.hooks.dispatch(FileEditPayload(
+                    event=HookEvent.PRE_FILE_EDIT,
+                    session_id=ctx.session_id,
+                    run_id=ctx.run_id,
+                    path=str(path),
+                    operation="edit",
+                    content_preview=text[:100],
+                ))
+            except HookDeniedError as e:
+                return ToolEnvelope.fail(code="KALASH_TOOL_DENIED", message=str(e), recoverable=True)
+
         # Atomic write
         existing_mode = stat.S_IMODE(path.stat().st_mode)
         fd = tempfile.NamedTemporaryFile(
@@ -744,6 +818,20 @@ class MultiEditTool:
             )
 
         new_digest = _content_digest(new_bytes)
+
+        if ctx.hooks:
+            from kalash.hooks.events import HookEvent, FileEditPayload
+            try:
+                await ctx.hooks.dispatch(FileEditPayload(
+                    event=HookEvent.POST_FILE_EDIT,
+                    session_id=ctx.session_id,
+                    run_id=ctx.run_id,
+                    path=str(path),
+                    operation="edit",
+                    content_preview=text[:100],
+                ))
+            except Exception:
+                pass
         return ToolEnvelope.success(
             content=f"Applied {len(args.edits)} edits to {path}",
             metadata={

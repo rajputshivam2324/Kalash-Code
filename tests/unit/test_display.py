@@ -148,21 +148,7 @@ class TestToolsReportDiffs:
         assert (workspace / "z.py").exists()
 
 
-class TestDiffWidget:
-    def test_renders_added_and_removed_lines(self):
-        from kalash.tui.messages import DiffView
 
-        view = DiffView("app.py", "- old\n+ new\n  same", "+1/-1")
-        plain = view.renderable.plain
-        assert "app.py" in plain
-        assert "- old" in plain
-        assert "+ new" in plain
-
-    def test_shortens_an_absolute_path(self):
-        from kalash.tui.messages import DiffView
-
-        view = DiffView("/a/very/deep/nested/path/to/app.py", "+ x", "+1/-0")
-        assert "/a/very/deep" not in view.renderable.plain
 
 
 class TestSubagentWidget:

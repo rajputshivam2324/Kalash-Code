@@ -220,9 +220,13 @@ def _deserialize_response(response: Any) -> tuple[list[ContentBlock], StopReason
 
     # Usage
     raw_usage = response.usage
+    prompt_details = getattr(raw_usage, "prompt_tokens_details", None) if raw_usage else None
+    cached_tokens = getattr(prompt_details, "cached_tokens", 0) if prompt_details else 0
+
     usage = Usage(
         input_tokens=raw_usage.prompt_tokens if raw_usage else 0,
         output_tokens=raw_usage.completion_tokens if raw_usage else 0,
+        cache_read_tokens=cached_tokens,
         reasoning_tokens=getattr(raw_usage, "completion_tokens_details", {}).get("reasoning_tokens", 0) if raw_usage else 0,
         source="provider_reported",
         provider_raw=raw_usage.model_dump() if raw_usage and hasattr(raw_usage, "model_dump") else {},
@@ -410,6 +414,9 @@ class OpenAIProvider:
                             yield BlockStop(index=current_block_index)
                             current_block_index += 1
                             text_started = False
+                        elif tool_call_started:
+                            yield BlockStop(index=current_block_index)
+                            current_block_index += 1
 
                         tool_call_started[tc_idx] = True
                         tool_call_args[tc_idx] = ""

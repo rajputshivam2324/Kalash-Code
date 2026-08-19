@@ -118,6 +118,10 @@ class OpenAICompatibleProvider(OpenAIProvider):
         """Send completion, stripping unsupported features."""
         # Don't send tools if provider doesn't support them
         effective_tools = tools if self._tool_use else None
+        
+        if tools and not self._tool_use:
+            note = "\n\n[NOTE: Tool calling is not available for this model. You must respond with plain text only and cannot execute functions.]"
+            system = (system or "") + note
 
         return await super().complete(
             messages,
@@ -193,6 +197,9 @@ class OpenAICompatibleProvider(OpenAIProvider):
 
         # Normal streaming
         effective_tools = tools if self._tool_use else None
+        if tools and not self._tool_use:
+            note = "\n\n[NOTE: Tool calling is not available for this model. You must respond with plain text only and cannot execute functions.]"
+            system = (system or "") + note
 
         async for event in super().stream(
             messages,

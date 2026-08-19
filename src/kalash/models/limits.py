@@ -194,6 +194,9 @@ _TABLE: tuple[tuple[str, ModelLimits], ...] = (
     ("gemini-2.5-pro", ModelLimits(65_536, 1_048_576, True, None, "google")),
     ("gemini-2.5-flash", ModelLimits(65_536, 1_048_576, True, None, "google")),
     ("gemini", ModelLimits(8_192, 1_048_576, True, None, "google-generic")),
+    # --- OpenRouter / Poolside ---
+    ("poolside", ModelLimits(8_192, 131_072, True, None, "openrouter")),
+    ("laguna", ModelLimits(8_192, 131_072, True, None, "openrouter")),
     # --- Local ---
     ("qwen3-coder", ModelLimits(8_192, 32_768, True, None, "local")),
     ("codellama", ModelLimits(4_096, 16_384, True, None, "local")),

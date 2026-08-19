@@ -254,6 +254,7 @@ class ToolHost:
             tool_use_id=tool_use_id,
             event_bus=self.event_bus,
             cancel_event=self.cancel_event,
+            hooks=self.hooks,
         )
 
     # -- loop-facing interface ----------------------------------------------

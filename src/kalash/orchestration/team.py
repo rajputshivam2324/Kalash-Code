@@ -17,7 +17,13 @@ from kalash.core.events import Event, EventType, get_event_bus
 from kalash.core.ids import generate_id
 from kalash.storage.engine import StorageEngine
 
-from kalash.orchestration.subagent import SubagentConfig, SubagentRunner, ResultEnvelope
+from kalash.orchestration.subagent import (
+    SubagentConfig,
+    SubagentRunner,
+    ResultEnvelope,
+    DepthLimitExceededError,
+    CycleDetectedError,
+)
 
 
 class ConcurrencyCapError(KalashError):
@@ -44,6 +50,7 @@ class TeamResult:
     merged_output: Any = None
     total_duration_ms: int = 0
     status: str = "completed"  # "completed" | "partial" | "failed"
+    error: str | None = None
 
 
 class TeamPattern(ABC):
@@ -149,7 +156,17 @@ class PipelinePattern(TeamPattern):
             if previous_output is not None:
                 agent.prompt = f"{agent.prompt}\n\n---\nPrevious step output:\n{previous_output}"
 
-            envelope = await self._spawn_with_cap(agent)
+            try:
+                envelope = await self._spawn_with_cap(agent)
+            except (BudgetError, DepthLimitExceededError, CycleDetectedError) as exc:
+                elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+                return TeamResult(
+                    pattern="pipeline",
+                    results=envelopes,
+                    total_duration_ms=elapsed_ms,
+                    status="failed",
+                    error=str(exc)
+                )
             envelopes.append(envelope)
 
             if envelope.status != "completed":
@@ -208,7 +225,17 @@ class CriticPattern(TeamPattern):
                     f"Round {round_num + 1} — incorporate reviewer feedback:\n{proposal}"
                 )
 
-            proposer_result = await self._spawn_with_cap(proposer_config)
+            try:
+                proposer_result = await self._spawn_with_cap(proposer_config)
+            except (BudgetError, DepthLimitExceededError, CycleDetectedError) as exc:
+                elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+                return TeamResult(
+                    pattern="critic",
+                    results=envelopes,
+                    total_duration_ms=elapsed_ms,
+                    status="failed",
+                    error=str(exc)
+                )
             envelopes.append(proposer_result)
 
             if proposer_result.status != "completed":
@@ -221,7 +248,17 @@ class CriticPattern(TeamPattern):
                 f"Respond with ACCEPT if satisfactory, or provide critique."
             )
 
-            reviewer_result = await self._spawn_with_cap(reviewer_config)
+            try:
+                reviewer_result = await self._spawn_with_cap(reviewer_config)
+            except (BudgetError, DepthLimitExceededError, CycleDetectedError) as exc:
+                elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+                return TeamResult(
+                    pattern="critic",
+                    results=envelopes,
+                    total_duration_ms=elapsed_ms,
+                    status="failed",
+                    error=str(exc)
+                )
             envelopes.append(reviewer_result)
 
             if reviewer_result.status != "completed":
@@ -287,8 +324,17 @@ class SupervisorPattern(TeamPattern):
         start = asyncio.get_event_loop().time()
         envelopes: list[ResultEnvelope] = []
 
-        # Run supervisor — it produces delegation instructions
-        supervisor_result = await self._spawn_with_cap(supervisor_config)
+        try:
+            supervisor_result = await self._spawn_with_cap(supervisor_config)
+        except (BudgetError, DepthLimitExceededError, CycleDetectedError) as exc:
+            elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+            return TeamResult(
+                pattern="supervisor",
+                results=envelopes,
+                total_duration_ms=elapsed_ms,
+                status="failed",
+                error=str(exc)
+            )
         envelopes.append(supervisor_result)
 
         if supervisor_result.status != "completed":
@@ -305,7 +351,17 @@ class SupervisorPattern(TeamPattern):
 
         # Execute delegations (up to cap)
         for delegation in delegations[: self._max_delegations]:
-            worker_result = await self._spawn_with_cap(delegation)
+            try:
+                worker_result = await self._spawn_with_cap(delegation)
+            except (BudgetError, DepthLimitExceededError, CycleDetectedError) as exc:
+                elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+                return TeamResult(
+                    pattern="supervisor",
+                    results=envelopes,
+                    total_duration_ms=elapsed_ms,
+                    status="failed",
+                    error=str(exc)
+                )
             envelopes.append(worker_result)
 
         elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
@@ -332,6 +388,19 @@ class SupervisorPattern(TeamPattern):
         Expected format from supervisor: list of {agent, prompt} dicts.
         Falls back to empty list if output is malformed.
         """
+        import json
+        if isinstance(supervisor_output, str):
+            try:
+                if "```json" in supervisor_output:
+                    text = supervisor_output.split("```json")[1].split("```")[0].strip()
+                elif "```" in supervisor_output:
+                    text = supervisor_output.split("```")[1].split("```")[0].strip()
+                else:
+                    text = supervisor_output.strip()
+                supervisor_output = json.loads(text)
+            except Exception:
+                pass
+
         if not isinstance(supervisor_output, list):
             return []
 

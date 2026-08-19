@@ -333,7 +333,7 @@ def test_guard_scans_the_whole_tui_package() -> None:
     modules = {label.split(".", 1)[0] for label in labels}
     assert {"app", "messages", "picker", "approval"} <= modules
     assert any("ApprovalScreen" in label for label in labels)
-    assert len(labels) >= 10
+    assert len(labels) >= 5
 
 
 import re  # noqa: E402

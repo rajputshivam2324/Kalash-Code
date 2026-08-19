@@ -1,0 +1,13 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "kvstore"
+version = "0.1.0"
+description = "Embedded persistent Key-Value store with TTL support"
+requires-python = ">=3.12"
+dependencies = ["typer>=0.12", "rich>=13.7"]
+
+[project.scripts]
+kvstore = "kvstore.cli:app"

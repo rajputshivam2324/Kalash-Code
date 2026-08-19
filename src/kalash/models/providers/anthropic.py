@@ -390,72 +390,75 @@ class AnthropicProvider:
             **kwargs,
         )
 
-        async with client.messages.stream(**request) as stream:
-            block_index = 0
+        try:
+            async with client.messages.stream(**request) as stream:
+                block_index = 0
 
-            async for event in stream:
-                match event.type:
-                    case "message_start":
-                        msg = event.message
-                        yield MessageStart(id=msg.id, model=msg.model)
-                        if hasattr(msg, "usage") and msg.usage:
-                            raw = msg.usage.model_dump() if hasattr(msg.usage, "model_dump") else {}
-                            if raw:
-                                yield UsageUpdate(
-                                    input_tokens=raw.get("input_tokens", 0),
-                                    cache_read_tokens=raw.get("cache_read_input_tokens", 0),
-                                    cache_write_tokens=raw.get("cache_creation_input_tokens", 0),
+                async for event in stream:
+                    match event.type:
+                        case "message_start":
+                            msg = event.message
+                            yield MessageStart(id=msg.id, model=msg.model)
+                            if hasattr(msg, "usage") and msg.usage:
+                                raw = msg.usage.model_dump() if hasattr(msg.usage, "model_dump") else {}
+                                if raw:
+                                    yield UsageUpdate(
+                                        input_tokens=raw.get("input_tokens", 0),
+                                        cache_read_tokens=raw.get("cache_read_input_tokens", 0),
+                                        cache_write_tokens=raw.get("cache_creation_input_tokens", 0),
+                                    )
+
+                        case "content_block_start":
+                            cb = event.content_block
+                            cb_type = cb.type if hasattr(cb, "type") else "text"
+
+                            if cb_type == "tool_use":
+                                yield BlockStart(
+                                    index=block_index,
+                                    block_type="tool_use",
+                                    tool_use_id=cb.id if hasattr(cb, "id") else None,
+                                    tool_name=cb.name if hasattr(cb, "name") else None,
                                 )
+                            elif cb_type == "thinking":
+                                yield BlockStart(index=block_index, block_type="thinking")
+                            else:
+                                yield BlockStart(index=block_index, block_type="text")
 
-                    case "content_block_start":
-                        cb = event.content_block
-                        cb_type = cb.type if hasattr(cb, "type") else "text"
+                        case "content_block_delta":
+                            delta = event.delta
+                            delta_type = delta.type if hasattr(delta, "type") else ""
 
-                        if cb_type == "tool_use":
-                            yield BlockStart(
-                                index=block_index,
-                                block_type="tool_use",
-                                tool_use_id=cb.id if hasattr(cb, "id") else None,
-                                tool_name=cb.name if hasattr(cb, "name") else None,
-                            )
-                        elif cb_type == "thinking":
-                            yield BlockStart(index=block_index, block_type="thinking")
-                        else:
-                            yield BlockStart(index=block_index, block_type="text")
+                            if delta_type == "text_delta":
+                                yield BlockDelta(index=block_index, delta=delta.text)
+                            elif delta_type == "input_json_delta":
+                                yield BlockDelta(
+                                    index=block_index,
+                                    delta=delta.partial_json,
+                                )
+                            elif delta_type == "thinking_delta":
+                                yield BlockDelta(index=block_index, delta=delta.thinking)
 
-                    case "content_block_delta":
-                        delta = event.delta
-                        delta_type = delta.type if hasattr(delta, "type") else ""
+                        case "content_block_stop":
+                            yield BlockStop(index=block_index)
+                            block_index += 1
 
-                        if delta_type == "text_delta":
-                            yield BlockDelta(index=block_index, delta=delta.text)
-                        elif delta_type == "input_json_delta":
-                            yield BlockDelta(
-                                index=block_index,
-                                delta=delta.partial_json,
-                            )
-                        elif delta_type == "thinking_delta":
-                            yield BlockDelta(index=block_index, delta=delta.thinking)
+                        case "message_delta":
+                            delta = event.delta
+                            if hasattr(delta, "stop_reason") and delta.stop_reason:
+                                yield MessageStop(
+                                    stop_reason=_map_stop_reason(delta.stop_reason)
+                                )
+                            if hasattr(event, "usage") and event.usage:
+                                raw = event.usage.model_dump() if hasattr(event.usage, "model_dump") else {}
+                                if raw.get("output_tokens"):
+                                    yield UsageUpdate(output_tokens=raw["output_tokens"])
 
-                    case "content_block_stop":
-                        yield BlockStop(index=block_index)
-                        block_index += 1
-
-                    case "message_delta":
-                        delta = event.delta
-                        if hasattr(delta, "stop_reason") and delta.stop_reason:
-                            yield MessageStop(
-                                stop_reason=_map_stop_reason(delta.stop_reason)
-                            )
-                        if hasattr(event, "usage") and event.usage:
-                            raw = event.usage.model_dump() if hasattr(event.usage, "model_dump") else {}
-                            if raw.get("output_tokens"):
-                                yield UsageUpdate(output_tokens=raw["output_tokens"])
-
-                    case "error":
-                        error_data = event.error if hasattr(event, "error") else {}
-                        msg = str(error_data) if error_data else "Unknown stream error"
-                        yield StreamError(error=msg, code="anthropic_stream_error")
+                        case "error":
+                            error_data = event.error if hasattr(event, "error") else {}
+                            msg = str(error_data) if error_data else "Unknown stream error"
+                            yield StreamError(error=msg, code="anthropic_stream_error")
+        except Exception as exc:
+            yield StreamError(error=str(exc), code="anthropic_stream_error", recoverable=True)
 
     async def close(self) -> None:
         """Close the HTTP client."""

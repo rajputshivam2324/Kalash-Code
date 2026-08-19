@@ -139,6 +139,10 @@ def build_provider(
             from kalash.models.providers.anthropic import AnthropicProvider
 
             provider = AnthropicProvider(api_key=api_key, model=model_id)
+        elif provider_id in ("google", "gemini"):
+            from kalash.models.providers.google import GeminiProvider
+
+            provider = GeminiProvider(api_key=api_key, model=model_id)
         elif provider_id == "openai":
             from kalash.models.providers.openai import OpenAIProvider
 
@@ -165,3 +169,46 @@ def build_provider(
         )
 
     return Resolution(provider=provider, provider_id=provider_id, model_id=model_id)
+
+def build_gateway(model_identifiers: list[str]) -> Resolution:
+    """Construct a ModelGateway with primary and fallback providers.
+    
+    Each identifier can be 'provider/model' or just 'provider'.
+    If an identifier is just 'provider', it uses the default model for that provider.
+    """
+    if not model_identifiers:
+        return build_provider()
+        
+    providers = []
+    
+    for identifier in model_identifiers:
+        if "/" in identifier:
+            provider_id, model_id = identifier.split("/", 1)
+        else:
+            provider_id, model_id = identifier, None
+            
+        res = build_provider(provider_id=provider_id, model_id=model_id)
+        if res.ok:
+            providers.append(res.provider)
+        else:
+            # If the primary provider fails to build, we fail the whole gateway
+            # If a fallback fails, we might just warn, but for now let's just fail
+            if not providers:
+                return res
+                
+    if not providers:
+        return Resolution(None, None, None, "No providers could be built")
+        
+    from kalash.models.gateway import ModelGateway
+    
+    gateway = ModelGateway(primary=providers[0], fallbacks=providers[1:])
+    
+    # Return resolution with the gateway as the provider
+    # provider_id and model_id are from the primary provider
+    primary_id = model_identifiers[0]
+    if "/" in primary_id:
+        p_id, m_id = primary_id.split("/", 1)
+    else:
+        p_id, m_id = primary_id, None
+        
+    return Resolution(provider=gateway, provider_id=p_id, model_id=m_id)

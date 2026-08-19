@@ -13,6 +13,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from evals.project_build import run_project_build_suite
 from evals.suites import (
     run_capability_suite,
     run_policy_suite,
@@ -27,6 +28,7 @@ THRESHOLDS: dict[str, float] = {
     "safety": 1.0,
     "policy": 1.0,
     "token efficiency": 1.0,
+    "project build": 1.0,
 }
 
 
@@ -69,6 +71,9 @@ async def main() -> int:
             patcher.setenv("KALASH_HOME", str(root / "token_home"))
             token_report, notes = run_token_suite(root)
             reports.append(token_report)
+
+        project_report = await run_project_build_suite(root, _monkeypatch)
+        reports.append(project_report)
 
         # -- report ------------------------------------------------------
         failed = False

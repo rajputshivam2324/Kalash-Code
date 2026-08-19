@@ -78,6 +78,9 @@ class MCPClient:
         self._reader_task: asyncio.Task[None] | None = None
         self._stdin: asyncio.StreamWriter | None = None
         self._stdout: asyncio.StreamReader | None = None
+        self._sse_client: Any = None
+        self._sse_endpoint: str = ""
+        self._post_endpoint: str = "" 
 
     @property
     def name(self) -> str:
@@ -162,6 +165,9 @@ class MCPClient:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
             except asyncio.TimeoutError:
                 self._process.kill()
+        if self._sse_client:
+            await self._sse_client.aclose()
+            self._sse_client = None
         self._connected = False
         self._tools.clear()
 
@@ -230,8 +236,100 @@ class MCPClient:
                 f"SSE transport requires a URL for server '{self._config.name}'",
                 recoverable=True,
             )
-        # Legacy SSE: establish event stream connection
+        import httpx
+        from kalash.mcp.auth import MCPAuth
+        self._sse_client = httpx.AsyncClient(timeout=self._config.timeout_s)
+        self._sse_endpoint = self._config.url
+        self._post_endpoint = self._config.url
+        
+        self._reader_task = asyncio.create_task(self._sse_read_loop())
         self._connected = True
+
+    async def _sse_read_loop(self) -> None:
+        import httpx
+        import json
+        from kalash.mcp.auth import MCPAuth
+        
+        while True:
+            try:
+                headers = {"Accept": "text/event-stream"}
+                auth_headers = MCPAuth.get_headers(self._config.name)
+                if auth_headers:
+                    headers.update(auth_headers)
+                    
+                async with self._sse_client.stream("GET", self._sse_endpoint, headers=headers) as response:
+                    response.raise_for_status()
+                    event_type = "message"
+                    buffer = []
+                    
+                    async for line in response.aiter_lines():
+                        line = line.strip()
+                        if not line:
+                            if buffer:
+                                data_str = "\n".join(buffer)
+                                buffer = []
+                                
+                                if event_type == "endpoint":
+                                    from urllib.parse import urljoin
+                                    # Post endpoint is relative to sse_endpoint or absolute
+                                    self._post_endpoint = urljoin(self._sse_endpoint, data_str)
+                                elif event_type == "message":
+                                    try:
+                                        msg = json.loads(data_str)
+                                        req_id = msg.get("id")
+                                        if req_id and req_id in self._pending:
+                                            future = self._pending.pop(req_id)
+                                            if "error" in msg:
+                                                future.set_exception(MCPSchemaError(str(msg["error"]), recoverable=True))
+                                            else:
+                                                future.set_result(msg.get("result"))
+                                    except json.JSONDecodeError:
+                                        pass
+                            event_type = "message"
+                            continue
+                            
+                        if line.startswith("event:"):
+                            event_type = line[6:].strip()
+                        elif line.startswith("data:"):
+                            buffer.append(line[5:].strip())
+                            
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                await asyncio.sleep(2.0)
+
+    async def _send_sse(self, message: dict[str, Any], req_id: int) -> Any:
+        import httpx
+        import json
+        from kalash.mcp.auth import MCPAuth
+        
+        if not self._sse_client:
+            raise MCPConnectionError("Not connected via SSE", recoverable=True)
+            
+        future: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
+        self._pending[req_id] = future
+        
+        headers = {"Content-Type": "application/json"}
+        auth_headers = MCPAuth.get_headers(self._config.name)
+        if auth_headers:
+            headers.update(auth_headers)
+            
+        try:
+            response = await self._sse_client.post(self._post_endpoint, json=message, headers=headers)
+            response.raise_for_status()
+            
+            result = await asyncio.wait_for(future, timeout=self._config.timeout_s)
+            return result
+        except asyncio.TimeoutError:
+            self._pending.pop(req_id, None)
+            raise ToolTimeoutError(
+                f"MCP request to '{self._config.name}' timed out after {self._config.timeout_s}s",
+                recoverable=True,
+            )
+        except Exception as e:
+            self._pending.pop(req_id, None)
+            raise MCPConnectionError(f"Failed to send SSE POST: {e}", recoverable=True)
+
 
     async def _discover_schema(self) -> None:
         """Discover available tools from the server."""
@@ -266,7 +364,7 @@ class MCPClient:
         elif self._config.transport == TransportType.HTTP:
             return await self._send_http(message)
         else:
-            return await self._send_http(message)
+            return await self._send_sse(message, req_id)
 
     async def _send_notification(self, method: str, params: dict[str, Any]) -> None:
         """Send a JSON-RPC notification (no response expected)."""
@@ -312,6 +410,9 @@ class MCPClient:
 
         # Add auth if available
         from kalash.mcp.auth import MCPAuth
+        auth_headers = MCPAuth.get_headers(self._config.name)
+        if auth_headers:
+            headers.update(auth_headers)
 
         req = urllib.request.Request(
             self._config.url,

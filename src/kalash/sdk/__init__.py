@@ -73,9 +73,15 @@ class KalashSession:
         tools: Optional[list[str]] = None,
     ) -> CompletionResponse:
         """Run a single-shot completion within this session."""
-        del model, tools  # model is fixed at session creation for now
         if max_turns is not None:
             self._agent.loop.max_iterations = max_turns
+        if model is not None:
+            self._agent.loop.model_id = model
+        if tools is not None:
+            registry = self._agent.host.registry
+            for tool in registry.list_tools():
+                if tool.name not in tools:
+                    registry.unregister(tool.name)
 
         result = await self._agent.send(prompt)
         return CompletionResponse(
@@ -95,9 +101,15 @@ class KalashSession:
         tools: Optional[list[str]] = None,
     ) -> AsyncIterator[StreamChunk]:
         """Stream a response within this session."""
-        del model, tools
         if max_turns is not None:
             self._agent.loop.max_iterations = max_turns
+        if model is not None:
+            self._agent.loop.model_id = model
+        if tools is not None:
+            registry = self._agent.host.registry
+            for tool in registry.list_tools():
+                if tool.name not in tools:
+                    registry.unregister(tool.name)
 
         buffer: list[str] = []
 
@@ -106,9 +118,10 @@ class KalashSession:
 
         result = await self._agent.send(prompt, on_text_delta=on_delta)
         yield StreamChunk(text="".join(buffer))
-        yield StreamChunk(text="", done=True)
         if result.error:
-            yield StreamChunk(text=f"\n[error: {result.error}]")
+            yield StreamChunk(text=f"\n[error: {result.error}]", done=True)
+        else:
+            yield StreamChunk(text="", done=True)
 
     async def info(self) -> SessionInfo:
         from kalash.runtime.session import SessionManager

@@ -96,6 +96,9 @@ class ToolContext:
     cancel_event: Any | None = None
     """When set, cooperative tools should abort in-flight work."""
 
+    hooks: Any | None = None
+    """Optional HookRunner for tools to dispatch fine-grained events."""
+
     @property
     def can_spawn(self) -> bool:
         """Whether this context is allowed to create another child."""

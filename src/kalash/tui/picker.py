@@ -22,6 +22,7 @@ class PickerMode(StrEnum):
     PROVIDER = "provider"
     MODEL = "model"
     SESSION = "session"
+    THEME = "theme"
 
 
 @dataclass(frozen=True, slots=True)

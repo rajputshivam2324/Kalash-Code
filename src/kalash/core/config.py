@@ -220,9 +220,22 @@ def _resolve_env_refs(data: dict[str, Any]) -> None:
 def _build_config(data: dict[str, Any], project_dir: Path) -> KalashConfig:
     """Build a KalashConfig from merged dict."""
     model_data = data.get("model", {})
+    if isinstance(model_data, str):
+        model_data = {"primary": model_data}
+    elif not isinstance(model_data, dict):
+        model_data = {}
+
     memory_data = data.get("memory", {})
+    if not isinstance(memory_data, dict):
+        memory_data = {}
+
     permissions_data = data.get("permissions", {})
+    if not isinstance(permissions_data, dict):
+        permissions_data = {}
+
     budget_data = data.get("budget", {})
+    if not isinstance(budget_data, dict):
+        budget_data = {}
 
     model = ModelConfig(
         primary=model_data.get("primary", "anthropic/claude-sonnet-4-5"),

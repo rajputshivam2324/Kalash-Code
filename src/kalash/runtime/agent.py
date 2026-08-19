@@ -338,6 +338,7 @@ def build_agent(
         model_id=resolved_model,
         provider_id=resolved_provider_id,
         max_iterations=max_iterations,
+        hooks=hooks,
     )
     host.cancel_event = loop.cancel_event
 

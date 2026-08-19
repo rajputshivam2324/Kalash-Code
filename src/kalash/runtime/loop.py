@@ -122,6 +122,7 @@ class AgentLoop:
     event_bus: EventBus
     budget: BudgetState
     assembler: ContextAssembler
+    hooks: Any | None = None
 
     # Configuration
     session_id: str = ""
@@ -237,6 +238,20 @@ class AgentLoop:
         self._conversation = list(recent_turns or [])
         self._conversation.append(user_message)
 
+        if self.hooks:
+            from kalash.hooks.events import HookEvent, SessionStartPayload
+            try:
+                project_dir = ""
+                if hasattr(self.tool_registry, "cwd"):
+                    project_dir = str(self.tool_registry.cwd)
+                await self.hooks.dispatch(SessionStartPayload(
+                    event=HookEvent.SESSION_START,
+                    session_id=self.session_id,
+                    project_dir=project_dir,
+                ))
+            except Exception:
+                pass
+
         try:
             while self._running and self._iteration < self.max_iterations:
                 self._iteration += 1
@@ -244,7 +259,7 @@ class AgentLoop:
                 # Check budget before each iteration
                 ceiling = self.budget.check_ceiling()
                 if ceiling is not None:
-                    return self._finish(
+                    return await self._finish(
                         TerminationReason.BUDGET_EXHAUSTED,
                         error=f"budget exhausted: {ceiling.value}",
                     )
@@ -264,7 +279,7 @@ class AgentLoop:
                         if stream_result and stream_result.error
                         else "The model request failed without a response."
                     )
-                    return self._finish(TerminationReason.ERROR, error=err)
+                    return await self._finish(TerminationReason.ERROR, error=err)
 
                 self.budget.turns_used += 1
 
@@ -292,7 +307,7 @@ class AgentLoop:
                         session_id=self.session_id,
                         data={"iteration": self._iteration},
                     ))
-                    return self._finish(
+                    return await self._finish(
                         TerminationReason.NO_TOOL_CALLS,
                         final=stream_result.text_content,
                     )
@@ -311,7 +326,7 @@ class AgentLoop:
                     self._rollup_for_next_iteration()
 
                 if self._cancelled:
-                    return self._finish(TerminationReason.USER_INTERRUPT)
+                    return await self._finish(TerminationReason.USER_INTERRUPT)
 
             if (
                 self._iteration_budget.phased
@@ -321,23 +336,23 @@ class AgentLoop:
                     on_text_delta=on_text_delta,
                 )
                 if final:
-                    return self._finish(
+                    return await self._finish(
                         TerminationReason.MAX_ITERATIONS,
                         final=final,
                         synthesized=True,
                     )
 
-            return self._finish(TerminationReason.MAX_ITERATIONS)
+            return await self._finish(TerminationReason.MAX_ITERATIONS)
 
         except asyncio.CancelledError:
-            return self._finish(TerminationReason.USER_INTERRUPT)
+            return await self._finish(TerminationReason.USER_INTERRUPT)
         except Exception as exc:
             logger.exception("Agent loop error")
-            return self._finish(TerminationReason.ERROR, error=str(exc))
+            return await self._finish(TerminationReason.ERROR, error=str(exc))
         finally:
             self._running = False
 
-    def _finish(
+    async def _finish(
         self,
         reason: TerminationReason,
         *,
@@ -345,6 +360,18 @@ class AgentLoop:
         error: str | None = None,
         synthesized: bool = False,
     ) -> LoopResult:
+        if self.hooks:
+            from kalash.hooks.events import HookEvent, SessionEndPayload
+            try:
+                await self.hooks.dispatch(SessionEndPayload(
+                    event=HookEvent.SESSION_END,
+                    session_id=self.session_id,
+                    reason=reason.value,
+                    duration_ms=0,
+                ))
+            except Exception:
+                pass
+        
         combined = "\n\n".join(part for part in self._response_parts if part)
         if final and final not in combined:
             combined = f"{combined}\n\n{final}".strip() if combined else final

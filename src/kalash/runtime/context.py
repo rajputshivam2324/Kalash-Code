@@ -348,6 +348,9 @@ class ContextAssembler:
         for block in msg.content:
             if hasattr(block, "text"):
                 total += estimate_tokens(block.text)  # type: ignore[attr-defined]
+            elif hasattr(block, "input") and isinstance(getattr(block, "input"), dict):
+                import json
+                total += estimate_tokens(json.dumps(getattr(block, "input")))
             elif hasattr(block, "content") and isinstance(block.content, str):  # type: ignore[union-attr]
                 total += estimate_tokens(block.content)  # type: ignore[union-attr]
             else:
