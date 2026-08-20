@@ -23,6 +23,7 @@ from kalash.models.normalize import (
     Message,
     Role,
     StopReason,
+    StreamError,
     StreamEvent,
     TextBlock,
     ToolResultBlock,
@@ -300,6 +301,28 @@ class AgentLoop:
                 )
                 self._conversation.append(assistant_msg)
                 await self._persist_turn(assistant_msg, usage)
+
+                # Handle tool calls truncated by max_tokens
+                if (
+                    stream_result.stop_reason == StopReason.MAX_TOKENS
+                    and stream_result.has_tool_calls
+                ):
+                    truncated = [
+                        t for t in stream_result.tool_calls
+                        if isinstance(t.input, dict) and "_raw" in t.input
+                    ]
+                    if truncated:
+                        logger.warning(
+                            "Tool call truncated by max_tokens (%d tokens). "
+                            "Increasing output budget and retrying.",
+                            max_output_tokens,
+                        )
+                        self.max_output_tokens = min(
+                            self.max_output_tokens * 2, 16_384
+                        )
+                        # Remove truncated assistant msg and retry the turn
+                        self._conversation.pop()
+                        continue
 
                 if not stream_result.has_tool_calls:
                     await self.event_bus.emit(Event(
@@ -888,15 +911,23 @@ class AgentLoop:
         """
         handler = StreamHandler(on_text_delta=on_text_delta)
 
-        async for event in self.gateway.stream(
-            messages,
-            system=system or None,
-            tools=tools or None,
-            max_tokens=max_output_tokens or self.max_output_tokens,
-        ):
-            handler.feed(event)
-            if handler.is_complete:
-                break
+        try:
+            async for event in self.gateway.stream(
+                messages,
+                system=system or None,
+                tools=tools or None,
+                max_tokens=max_output_tokens or self.max_output_tokens,
+            ):
+                handler.feed(event)
+                if handler.is_complete:
+                    break
+        except Exception as exc:
+            logger.error("Stream iteration error: %s", exc)
+            handler.feed(StreamError(
+                error=str(exc),
+                code="stream_exception",
+                recoverable=False,
+            ))
 
         return handler.result()
 

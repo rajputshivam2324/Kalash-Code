@@ -62,6 +62,22 @@ PROVIDERS: list[ProviderInfo] = [
         context_window=128_000,
     ),
     ProviderInfo(
+        id="google",
+        name="Google Gemini",
+        env_key="GEMINI_API_KEY",
+        base_url="https://generativelanguage.googleapis.com",
+        models=[
+            "gemini-3.7-flash",
+            "gemini-3.6-flash",
+            "gemini-2.5-flash",
+            "gemini-2.5-pro",
+            "gemini-2.5-flash-lite",
+            "gemini-flash-latest",
+            "gemini-pro-latest",
+        ],
+        context_window=1_048_576,
+    ),
+    ProviderInfo(
         id="openrouter",
         name="OpenRouter",
         env_key="OPENROUTER_API_KEY",

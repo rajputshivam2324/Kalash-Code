@@ -16,7 +16,7 @@ import asyncio
 from enum import StrEnum
 
 
-from textual import on, work
+from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Vertical, VerticalScroll
@@ -173,6 +173,16 @@ class KalashApp(App[None]):
         Binding("escape", "dismiss", "Dismiss", show=False, priority=True),
         Binding("up", "history_or_picker(-1)", "Up", show=False, priority=True),
         Binding("down", "history_or_picker(1)", "Down", show=False, priority=True),
+        Binding("pageup", "scroll_page_up", "Scroll up", show=False, priority=True),
+        Binding("pagedown", "scroll_page_down", "Scroll down", show=False, priority=True),
+        Binding("shift+pageup", "scroll_page_up", "Scroll up", show=False, priority=True),
+        Binding("shift+pagedown", "scroll_page_down", "Scroll down", show=False, priority=True),
+        Binding("shift+up", "scroll_line_up", "Scroll line up", show=False, priority=True),
+        Binding("shift+down", "scroll_line_down", "Scroll line down", show=False, priority=True),
+        Binding("ctrl+up", "scroll_line_up", "Scroll line up", show=False, priority=True),
+        Binding("ctrl+down", "scroll_line_down", "Scroll line down", show=False, priority=True),
+        Binding("home", "scroll_to_home", "Scroll top", show=False, priority=True),
+        Binding("end", "scroll_to_end", "Scroll bottom", show=False, priority=True),
         Binding("ctrl+y", "copy_reply", "Copy last reply", show=False),
         Binding("ctrl+k", "copy_code", "Copy code block", show=False),
         Binding("ctrl+t", "copy_transcript", "Copy transcript", show=False),
@@ -359,6 +369,7 @@ class KalashApp(App[None]):
         pairs = [
             ("tab", "mode"),
             ("/", "commands"),
+            ("pgup/dn", "scroll"),
             ("ctrl+y", "copy"),
             ("ctrl+k", "copy code"),
             ("ctrl+o", "expand"),
@@ -407,6 +418,62 @@ class KalashApp(App[None]):
         self.call_later(self._post, SystemMessage(lines, error=error))
 
     # -- actions -----------------------------------------------------------
+
+    def action_scroll_page_up(self) -> None:
+        """Scroll the transcript up by one page."""
+        try:
+            self._transcript().scroll_page_up(animate=False)
+        except NoMatches:
+            pass
+
+    def action_scroll_page_down(self) -> None:
+        """Scroll the transcript down by one page."""
+        try:
+            self._transcript().scroll_page_down(animate=False)
+        except NoMatches:
+            pass
+
+    def action_scroll_line_up(self) -> None:
+        """Scroll the transcript up by several lines."""
+        try:
+            self._transcript().scroll_relative(y=-4, animate=False)
+        except NoMatches:
+            pass
+
+    def action_scroll_line_down(self) -> None:
+        """Scroll the transcript down by several lines."""
+        try:
+            self._transcript().scroll_relative(y=4, animate=False)
+        except NoMatches:
+            pass
+
+    def action_scroll_to_home(self) -> None:
+        """Scroll the transcript to the very top."""
+        try:
+            self._transcript().scroll_home(animate=False)
+        except NoMatches:
+            pass
+
+    def action_scroll_to_end(self) -> None:
+        """Scroll the transcript to the very bottom."""
+        try:
+            self._transcript().scroll_end(animate=False)
+        except NoMatches:
+            pass
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        """Handle mouse scroll up anywhere on screen."""
+        try:
+            self._transcript().scroll_relative(y=-3, animate=False)
+        except NoMatches:
+            pass
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        """Handle mouse scroll down anywhere on screen."""
+        try:
+            self._transcript().scroll_relative(y=3, animate=False)
+        except NoMatches:
+            pass
 
     def action_toggle_mode(self) -> None:
         self.mode = Mode.PLAN.value if self.mode == Mode.BUILD.value else Mode.BUILD.value
@@ -1253,8 +1320,10 @@ class KalashApp(App[None]):
             if now - last_scroll >= 0.045:
                 last_scroll = now
                 try:
-                    self._transcript().scroll_end(animate=False)
-                except NoMatches:
+                    ts = self._transcript()
+                    if ts.scroll_y >= max(0, ts.max_scroll_y - 6):
+                        ts.scroll_end(animate=False)
+                except (NoMatches, AttributeError):
                     pass
 
         return emit

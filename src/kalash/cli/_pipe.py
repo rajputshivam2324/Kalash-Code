@@ -231,6 +231,13 @@ async def _run(
         )
 
     if not result.final_response and output_format is OutputFormat.TEXT:
+        if getattr(agent.loop, "_had_tool_work", False) or result.iterations > 1:
+            return sink.finish_success(
+                result_text="",
+                stop_reason=stop,
+                iterations=result.iterations,
+                total_tokens=result.total_tokens,
+            )
         print("kalash: model returned no output", file=sys.stderr)
         return EXIT_FAILURE
 

@@ -100,7 +100,14 @@ def _serialize_messages(
             if isinstance(block, TextBlock):
                 parts.append(types.Part.from_text(text=block.text))
             elif isinstance(block, ToolUseBlock):
-                parts.append(types.Part.from_function_call(name=block.name, args=block.input))
+                sig = getattr(block, "thought_signature", None)
+                if sig is not None:
+                    parts.append(types.Part(
+                        function_call=types.FunctionCall(name=block.name, args=block.input),
+                        thought_signature=sig,
+                    ))
+                else:
+                    parts.append(types.Part.from_function_call(name=block.name, args=block.input))
             elif isinstance(block, ToolResultBlock):
                 if isinstance(block.content, str):
                     try:
@@ -125,25 +132,69 @@ def _serialize_messages(
     return contents, system_instruction
 
 
+_GEMINI_ALLOWED_SCHEMA_KEYS = frozenset({
+    "type", "format", "description", "nullable", "enum",
+    "properties", "required", "items"
+})
+
+
+def _clean_gemini_schema_dict(d: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
+    """Clean a single JSON schema object for Gemini SDK."""
+    if "$ref" in d:
+        ref_path = d["$ref"]
+        def_name = ref_path.split("/")[-1]
+        if def_name in defs:
+            return _clean_gemini_schema_dict(dict(defs[def_name]), defs)
+
+    out: dict[str, Any] = {}
+    for k, v in d.items():
+        if k not in _GEMINI_ALLOWED_SCHEMA_KEYS:
+            continue
+        if k == "properties" and isinstance(v, dict):
+            out["properties"] = {
+                prop_name: _clean_gemini_schema_dict(prop_val, defs) if isinstance(prop_val, dict) else prop_val
+                for prop_name, prop_val in v.items()
+            }
+        elif k == "items" and isinstance(v, dict):
+            out["items"] = _clean_gemini_schema_dict(v, defs)
+        elif isinstance(v, dict):
+            out[k] = _clean_gemini_schema_dict(v, defs)
+        elif isinstance(v, list):
+            out[k] = [
+                _clean_gemini_schema_dict(item, defs) if isinstance(item, dict) else item
+                for item in v
+            ]
+        else:
+            out[k] = v
+    return out
+
+
+def _sanitize_gemini_schema(raw_schema: dict[str, Any]) -> dict[str, Any]:
+    """Sanitize schema for Google GenAI SDK (inlines $defs, strips forbidden keys)."""
+    defs = raw_schema.get("$defs", {})
+    return _clean_gemini_schema_dict(dict(raw_schema), defs)
+
+
 def _serialize_tools(tools: list[dict[str, Any]]) -> list[Any]:
     """Convert Kalash tool definitions to Gemini tool format."""
     from google.genai import types
-    
+
     gemini_tools = []
     function_declarations = []
-    
+
     for tool in tools:
         schema = tool.get("input_schema") or tool.get("parameters") or {}
+        sanitized_schema = _sanitize_gemini_schema(schema)
         func_decl = types.FunctionDeclaration(
             name=tool["name"],
             description=tool.get("description", ""),
-            parameters=schema,
+            parameters=sanitized_schema,
         )
         function_declarations.append(func_decl)
-        
+
     if function_declarations:
         gemini_tools.append(types.Tool(function_declarations=function_declarations))
-        
+
     return gemini_tools
 
 
@@ -225,6 +276,7 @@ class GeminiProvider:
             stop_sequences=stop_sequences,
             system_instruction=system_instruction,
             tools=_serialize_tools(tools) if tools else None,
+            thinking_config=types.ThinkingConfig(thinking_budget=0) if hasattr(types, "ThinkingConfig") else None,
         )
         return config
 
@@ -277,6 +329,7 @@ class GeminiProvider:
                         id=part.function_call.name,
                         name=part.function_call.name,
                         input=args or {},
+                        thought_signature=getattr(part, "thought_signature", None),
                     ))
 
         stop_reason = StopReason.UNKNOWN
@@ -365,6 +418,7 @@ class GeminiProvider:
                             block_type="tool_use",
                             tool_use_id=part.function_call.name,
                             tool_name=part.function_call.name,
+                            thought_signature=getattr(part, "thought_signature", None),
                         )
                         
                         args = part.function_call.args

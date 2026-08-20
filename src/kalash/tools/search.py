@@ -167,6 +167,8 @@ class SearchTool:
                 timeout=_SEARCH_TIMEOUT_S,
             )
         except asyncio.TimeoutError:
+            process.kill()
+            await process.wait()
             return ToolEnvelope.fail(
                 code="KALASH_TOOL_TIMEOUT",
                 message=f"Search timed out after {_SEARCH_TIMEOUT_S}s",

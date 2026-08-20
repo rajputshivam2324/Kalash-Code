@@ -30,6 +30,64 @@ from kalash.models.normalize import (
 logger = logging.getLogger(__name__)
 
 
+def _repair_tool_json(raw: str) -> dict[str, Any]:
+    """Multi-layer JSON repair for LLM tool call arguments.
+    
+    Layer 1: Strip markdown fences and surrounding noise.
+    Layer 2: Attempt standard json.loads.
+    Layer 3: Use json_repair library for syntax fixes.
+    Layer 4: Fall back to {"_raw": raw} as last resort.
+    """
+    if not raw or not raw.strip():
+        return {}
+    
+    # Layer 1: Strip markdown code fences
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.split("\n")
+        # Remove first line (```json) and last line (```)
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        cleaned = "\n".join(lines).strip()
+    
+    # Layer 2: Standard parse
+    try:
+        result = json.loads(cleaned)
+        if isinstance(result, dict):
+            return result
+        return {"_raw": raw}
+    except (json.JSONDecodeError, ValueError):
+        pass
+    
+    # Layer 3: json_repair
+    try:
+        from json_repair import loads as repair_loads
+        result = repair_loads(cleaned)
+        if isinstance(result, dict):
+            logger.info("Repaired malformed tool call JSON (len=%d)", len(raw))
+            return result
+    except Exception:
+        pass
+    
+    # Layer 4: Try closing unclosed braces manually
+    try:
+        patched = cleaned
+        open_braces = patched.count("{") - patched.count("}")
+        open_brackets = patched.count("[") - patched.count("]")
+        if open_braces > 0:
+            patched += "}" * open_braces
+        if open_brackets > 0:
+            patched += "]" * open_brackets
+        result = json.loads(patched)
+        if isinstance(result, dict):
+            logger.info("Repaired truncated tool call JSON by closing %d brace(s)", open_braces)
+            return result
+    except (json.JSONDecodeError, ValueError):
+        pass
+    
+    logger.warning("Could not repair tool call JSON (len=%d): %.100s...", len(raw), raw)
+    return {"_raw": raw}
+
+
 # ---------------------------------------------------------------------------
 # Accumulator for a single block
 # ---------------------------------------------------------------------------
@@ -43,6 +101,7 @@ class _BlockAccumulator:
     block_type: str
     tool_use_id: str | None = None
     tool_name: str | None = None
+    thought_signature: Any = None
     chunks: list[str] = field(default_factory=list)
     complete: bool = False
 
@@ -59,16 +118,14 @@ class _BlockAccumulator:
             case "text":
                 return TextBlock(text=self.text)
             case "tool_use":
-                # Parse accumulated JSON input
+                # Parse accumulated JSON input with repair pipeline
                 raw_input = self.text
-                try:
-                    parsed_input = json.loads(raw_input) if raw_input else {}
-                except json.JSONDecodeError:
-                    parsed_input = {"_raw": raw_input}
+                parsed_input = _repair_tool_json(raw_input)
                 return ToolUseBlock(
                     id=self.tool_use_id or "",
                     name=self.tool_name or "",
                     input=parsed_input,
+                    thought_signature=self.thought_signature,
                 )
             case "thinking":
                 return ThinkingBlock(thinking=self.text)
@@ -204,6 +261,7 @@ class StreamHandler:
             block_type=event.block_type,
             tool_use_id=event.tool_use_id,
             tool_name=event.tool_name,
+            thought_signature=event.thought_signature,
         )
         self._blocks[event.index] = acc
 

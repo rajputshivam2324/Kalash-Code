@@ -135,6 +135,21 @@ def diagnose(raw: str, model_id: str = "") -> Diagnosis:
             kind="no_tools",
         )
 
+    # Model failed to parse tool call arguments (Groq/OpenAI server-side validation)
+    if (
+        "failed to parse tool call" in lowered
+        or "parse tool call arguments" in lowered
+        or "failed to call a function" in lowered
+        or "failed_generation" in lowered
+        or "cutoff by max_tokens" in lowered
+    ):
+        return Diagnosis(
+            summary=f"{label} emitted malformed tool arguments or failed function calling format.",
+            remedy="Formatting tool arguments cleanly. Please emit one tool call at a time with properly escaped JSON.",
+            kind="invalid_tool",
+            adjust_max_output=4096,
+        )
+
     # Model hallucinated a tool name not present in the request schema.
     if "tool call validation failed" in lowered or "not in request.tools" in lowered:
         bad = "unknown"

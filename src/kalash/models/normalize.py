@@ -55,6 +55,7 @@ class ToolUseBlock:
     id: str
     name: str
     input: dict[str, Any]
+    thought_signature: Any = None
     type: str = field(default="tool_use", init=False)
 
 
@@ -183,6 +184,7 @@ class BlockStart:
     # For tool_use blocks, these are populated at start
     tool_use_id: str | None = None
     tool_name: str | None = None
+    thought_signature: Any = None
     type: str = field(default="block_start", init=False)
 
 

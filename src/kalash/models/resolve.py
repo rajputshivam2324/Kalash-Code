@@ -63,6 +63,11 @@ def credential_for(provider_id: str) -> str:
     saved = get_credential(provider_id)
     if saved:
         return saved
+    if provider_id in ("google", "gemini"):
+        gemini_saved = get_credential("gemini") or get_credential("google")
+        if gemini_saved:
+            return gemini_saved
+        return os.environ.get("GEMINI_API_KEY", "") or os.environ.get("GOOGLE_API_KEY", "")
     info = get_provider(provider_id)
     return os.environ.get(info.env_key, "") if info else ""
 

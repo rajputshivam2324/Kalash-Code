@@ -380,8 +380,9 @@ class OpenAIProvider:
 
         current_block_index = 0
         text_started = False
-        tool_call_started: dict[int, bool] = {}
-        tool_call_args: dict[int, str] = {}
+        thinking_started = False
+        tc_to_block_index: dict[int, int] = {}  # tc_delta.index -> block index
+        open_blocks: set[int] = set()
 
         async for chunk in stream:
             if not chunk.choices:
@@ -396,52 +397,77 @@ class OpenAIProvider:
             choice = chunk.choices[0]
             delta = choice.delta
 
+            # Reasoning / thinking content
+            reasoning = getattr(delta, "reasoning", None) or getattr(delta, "reasoning_content", None)
+            if reasoning:
+                if not thinking_started:
+                    yield BlockStart(index=current_block_index, block_type="thinking")
+                    open_blocks.add(current_block_index)
+                    thinking_started = True
+                yield BlockDelta(index=current_block_index, delta=reasoning)
+
             # Text content
             if delta and delta.content:
+                if thinking_started:
+                    yield BlockStop(index=current_block_index)
+                    open_blocks.discard(current_block_index)
+                    current_block_index += 1
+                    thinking_started = False
                 if not text_started:
                     yield BlockStart(index=current_block_index, block_type="text")
+                    open_blocks.add(current_block_index)
                     text_started = True
                 yield BlockDelta(index=current_block_index, delta=delta.content)
 
             # Tool calls
             if delta and delta.tool_calls:
+                if thinking_started:
+                    yield BlockStop(index=current_block_index)
+                    open_blocks.discard(current_block_index)
+                    current_block_index += 1
+                    thinking_started = False
+
                 for tc_delta in delta.tool_calls:
                     tc_idx = tc_delta.index
 
-                    if tc_idx not in tool_call_started:
+                    if tc_idx not in tc_to_block_index:
                         # Close text block if open
                         if text_started:
                             yield BlockStop(index=current_block_index)
+                            open_blocks.discard(current_block_index)
                             current_block_index += 1
                             text_started = False
-                        elif tool_call_started:
-                            yield BlockStop(index=current_block_index)
-                            current_block_index += 1
+                        elif open_blocks:
+                            # Start a new block index after previous tool
+                            current_block_index = max(open_blocks) + 1
 
-                        tool_call_started[tc_idx] = True
-                        tool_call_args[tc_idx] = ""
+                        tc_to_block_index[tc_idx] = current_block_index
+                        open_blocks.add(current_block_index)
                         yield BlockStart(
                             index=current_block_index,
                             block_type="tool_use",
                             tool_use_id=tc_delta.id,
                             tool_name=tc_delta.function.name if tc_delta.function else None,
                         )
+                        current_block_index += 1
 
+                    # Route delta to the correct block index
+                    blk_idx = tc_to_block_index[tc_idx]
                     if tc_delta.function and tc_delta.function.arguments:
-                        tool_call_args[tc_idx] += tc_delta.function.arguments
                         yield BlockDelta(
-                            index=current_block_index,
+                            index=blk_idx,
                             delta=tc_delta.function.arguments,
                         )
 
             # Finish reason
             if choice.finish_reason:
-                # Close any open blocks
+                # Close all open blocks
                 if text_started:
                     yield BlockStop(index=current_block_index)
-                    text_started = False
-                elif tool_call_started:
-                    yield BlockStop(index=current_block_index)
+                    open_blocks.discard(current_block_index)
+                for blk_idx in sorted(open_blocks):
+                    yield BlockStop(index=blk_idx)
+                open_blocks.clear()
 
                 yield MessageStop(stop_reason=_map_stop_reason(choice.finish_reason))
 

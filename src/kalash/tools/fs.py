@@ -385,7 +385,6 @@ class WriteTool:
         if err := _check_writable(path, ctx):
             return err
 
-        # Digest check for overwrites (I-012)
         existing_mode: int | None = None
         previous_text = ""
         if path.exists():
@@ -393,20 +392,20 @@ class WriteTool:
             # non-fatal: the diff is a display nicety, the write is the contract.
             with contextlib.suppress(OSError, UnicodeDecodeError):
                 previous_text = path.read_text(encoding="utf-8", errors="replace")
+            current_digest = _content_digest(path.read_bytes())
             if not args.digest:
                 return ToolEnvelope.fail(
                     code="KALASH_TOOL_STALE_READ",
-                    message="File exists; provide 'digest' from a prior read to confirm overwrite (I-012).",
+                    message=f"File exists; provide digest='{current_digest}' to confirm overwrite (I-012).",
                     recoverable=True,
-                    remediation="Read the file first, then pass the content_digest in the write call.",
+                    remediation=f"Pass digest='{current_digest}' in the write call to overwrite.",
                 )
-            current_digest = _content_digest(path.read_bytes())
             if args.digest != current_digest:
                 return ToolEnvelope.fail(
                     code="KALASH_TOOL_STALE_READ",
-                    message="Digest mismatch — file changed since last read.",
+                    message=f"Digest mismatch — file changed since last read. Current digest is '{current_digest}'.",
                     recoverable=True,
-                    remediation="Re-read the file to get the current digest.",
+                    remediation=f"Pass digest='{current_digest}' in the write call.",
                 )
             # Preserve metadata
             st = path.stat()
@@ -433,6 +432,7 @@ class WriteTool:
         
         # Atomic write: temp -> fsync -> replace
         content_bytes = args.content.encode("utf-8")
+        tmp_path: Path | None = None
         try:
             fd = tempfile.NamedTemporaryFile(
                 mode="wb",
@@ -456,7 +456,7 @@ class WriteTool:
             os.replace(tmp_path, path)
         except OSError as exc:
             # Clean up temp file on failure
-            if tmp_path.exists():
+            if tmp_path is not None and tmp_path.exists():
                 tmp_path.unlink(missing_ok=True)
             return ToolEnvelope.fail(
                 code="KALASH_TOOL_ERROR",

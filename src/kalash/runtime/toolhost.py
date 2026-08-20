@@ -649,6 +649,8 @@ class ToolHost:
             if error is None:
                 return f"ERROR: {name} failed without detail."
             parts = [f"ERROR {error.code}: {error.message}"]
+            if envelope.content:
+                parts.append(envelope.content)
             if error.remediation:
                 parts.append(error.remediation)
             return "\n".join(parts)

@@ -118,14 +118,18 @@ def classify_error(exc: Exception, model_id: str = "") -> str:
     # Rate limits (TPM / RPM)
     if any(s in msg for s in ("rate limit", "429", "tpm", "tokens per minute", "overloaded", "503", "502", "500", "timeout", "connection")):
         # Extract TPM limit from error if provider supplied it: e.g. "Limit 8000, Requested 10692"
-        match = re.search(r"limit\s+(\d+)", msg, re.I)
+        match = re.search(r"limit\s+(\d[\d,]*)", msg, re.I)
         if match and model_id:
             try:
-                tpm_val = int(match.group(1))
+                tpm_val = int(match.group(1).replace(",", ""))
                 ConstraintCache.record_tpm(model_id, tpm_val)
                 logger.info("Learned dynamic TPM constraint for %s: %d", model_id, tpm_val)
             except Exception:
                 pass
+        return ErrorKind.TRANSIENT
+
+    # Tool argument parse failure (Groq / OpenAI upstream) — retryable with remedy
+    if any(s in msg for s in ("failed to parse tool call", "parse tool call arguments", "failed to call a function", "failed_generation", "cutoff by max_tokens")):
         return ErrorKind.TRANSIENT
 
     # Bad request — permanent
@@ -214,15 +218,54 @@ class SlidingWindowRatePacer:
 # ---------------------------------------------------------------------------
 
 
+def _extract_retry_after(exc: Exception) -> float | None:
+    """Extract retry-after delay from provider error messages and HTTP headers."""
+    # Check HTTP Retry-After header if response object exists
+    resp = getattr(exc, "response", None)
+    if resp and hasattr(resp, "headers"):
+        header = (resp.headers.get("retry-after")
+                  or resp.headers.get("Retry-After")
+                  or resp.headers.get("retry-after-ms"))
+        if header:
+            try:
+                val = float(header)
+                # Values > 1000 are likely milliseconds
+                return val / 1000.0 if val > 1000 else val
+            except ValueError:
+                pass
+    
+    # Parse from error message text
+    msg = str(exc)
+    patterns = [
+        r"try again in ([\d.]+)\s*(?:s|sec)",
+        r"retry after ([\d.]+)\s*(?:s|sec)",
+        r"wait ([\d.]+)\s*(?:s|sec)",
+        r"retry.after\s*[:=]\s*([\d.]+)",
+        r"in ([\d.]+)\s*ms",  # milliseconds
+    ]
+    for pat in patterns:
+        m = re.search(pat, msg, re.I)
+        if m:
+            try:
+                val = float(m.group(1))
+                # "in 200ms" pattern returns ms
+                if "ms" in pat:
+                    return val / 1000.0
+                return val
+            except ValueError:
+                pass
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class RetryConfig:
     """Retry parameters for a single provider attempt."""
 
-    max_attempts: int = 4
-    initial_delay_s: float = 0.5
-    max_delay_s: float = 16.0
+    max_attempts: int = 6
+    initial_delay_s: float = 1.0
+    max_delay_s: float = 30.0
     jitter_factor: float = 0.25
-    budget_s: float = 60.0
+    budget_s: float = 180.0  # 3 min — enough for a Groq 429 retry-after (typ 12-30s)
 
     def delay_for_attempt(self, attempt: int) -> float:
         """Compute delay with exponential backoff and jitter."""
@@ -300,6 +343,7 @@ class ModelGateway:
     ) -> AsyncIterator[StreamEvent]:
         start = time.monotonic()
         last_exc: Exception | None = None
+        yielded_any = False
 
         for attempt in range(self._retry.max_attempts):
             elapsed = time.monotonic() - start
@@ -314,6 +358,7 @@ class ModelGateway:
             try:
                 stream = provider.stream(messages, **kwargs)
                 async for event in stream:
+                    yielded_any = True
                     yield event
                 return
             except Exception as exc:
@@ -323,8 +368,17 @@ class ModelGateway:
                 if last_kind in (ErrorKind.AUTH, ErrorKind.PERMANENT, ErrorKind.CONTEXT_EXCEEDED):
                     raise exc
 
+                # If we already yielded events, don't retry from scratch
+                # as it would duplicate output
+                if yielded_any:
+                    raise exc
+
                 if attempt < self._retry.max_attempts - 1:
-                    delay = self._retry.delay_for_attempt(attempt)
+                    retry_after = _extract_retry_after(exc)
+                    if retry_after is not None:
+                        delay = retry_after + 0.5
+                    else:
+                        delay = self._retry.delay_for_attempt(attempt)
                     remaining = self._retry.budget_s - (time.monotonic() - start)
                     delay = min(delay, max(0, remaining - 0.1))
                     if delay > 0:
@@ -394,7 +448,11 @@ class ModelGateway:
 
                 # Transient — wait and retry
                 if attempt < self._retry.max_attempts - 1:
-                    delay = self._retry.delay_for_attempt(attempt)
+                    retry_after = _extract_retry_after(exc)
+                    if retry_after is not None:
+                        delay = retry_after + 0.5
+                    else:
+                        delay = self._retry.delay_for_attempt(attempt)
                     remaining_budget = self._retry.budget_s - (time.monotonic() - start)
                     delay = min(delay, max(0, remaining_budget - 0.1))
                     if delay > 0:
@@ -449,7 +507,7 @@ class ModelGateway:
 
             # Proactive sliding-window rate pacing
             model_lims = effective_limits(provider.name)
-            await self._pacer.pace(provider.name, prompt_tokens + adjusted_max, model_lims.tokens_per_minute)
+            await self._pacer.pace(provider.name, prompt_tokens + min(adjusted_max, 1024), model_lims.tokens_per_minute)
 
             result = await self._attempt_with_retry(
                 provider, messages, mode="complete", **provider_kwargs
@@ -515,7 +573,7 @@ class ModelGateway:
 
             # Proactive sliding-window rate pacing
             model_lims = effective_limits(provider.name)
-            await self._pacer.pace(provider.name, prompt_tokens + adjusted_max, model_lims.tokens_per_minute)
+            await self._pacer.pace(provider.name, prompt_tokens + min(adjusted_max, 1024), model_lims.tokens_per_minute)
 
             result = await self._attempt_with_retry(
                 provider, messages, mode="stream", **provider_kwargs
