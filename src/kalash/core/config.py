@@ -156,16 +156,14 @@ def _merge(base: dict[str, Any], overlay: dict[str, Any]) -> None:
 
 def _filter_security_keys(data: dict[str, Any], source: str) -> None:
     """Remove security-relevant keys from project-scope config."""
-    import structlog
+    import logging as _log
 
-    logger = structlog.get_logger()
+    _logger = _log.getLogger(__name__)
     for key in list(_flat_keys(data)):
         if key in SECURITY_KEYS:
-            logger.warning(
-                "config_scope_ignored",
-                key=key,
-                source=source,
-                reason="Security keys only from user scope",
+            _logger.warning(
+                "config_scope_ignored: key=%s source=%s reason=Security keys only from user scope",
+                key, source,
             )
             _remove_nested(data, key.split("."))
 

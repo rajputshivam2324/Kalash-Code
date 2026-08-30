@@ -23,6 +23,7 @@ APP_CSS = """
 Screen {
     background: $background;
     color: $foreground;
+    layers: base overlay;
 }
 
 #transcript {
@@ -34,6 +35,18 @@ Screen {
     color: $foreground;
 }
 
+#context-sidebar {
+    width: 35;
+    dock: right;
+    display: none;
+    background: $surface;
+    border-left: vkey $border;
+    padding: 1 2;
+}
+#context-sidebar.visible {
+    display: block;
+}
+
 #footer {
     dock: bottom;
     height: auto;
@@ -42,17 +55,58 @@ Screen {
     background: $background;
 }
 
-#input-wrap {
-    height: 3;
+UserMessage {
+    height: auto;
     width: 100%;
-    border: round $primary;
+    padding: 0 0 0 1;
+    margin: 1 0 1 0;
+    color: $foreground;
+    border-left: thick $secondary;
+}
+
+AssistantMessage {
+    height: auto;
+    width: 100%;
+    padding: 0 0 0 1;
+    margin: 1 0 1 0;
+    color: $foreground;
+    transition: opacity 300ms in_out_cubic;
+}
+
+SystemMessage {
+    height: auto;
+    width: 100%;
+    padding: 0 0 0 1;
+    margin: 1 0 0 0;
+    color: $text-muted;
+}
+
+.high-contrast SystemMessage {
+    color: $foreground;
+}
+
+ToolCallLine {
+    height: auto;
+    width: 100%;
+    padding: 0 0 0 1;
+    margin: 0 0 1 0;
+    color: $foreground;
+}
+
+#input-wrap {
+    height: auto;
+    width: 100%;
+    border: none;
     background: $surface;
+    padding: 1 0;
+    margin-top: 1;
+    transition: height 200ms in_out_cubic;
 }
 #input-wrap.busy {
-    border: round $warning;
+    border-top: wide $warning;
 }
 #input-wrap:focus-within {
-    border: round $accent;
+    border: none;
 }
 
 #prompt {
@@ -88,43 +142,6 @@ WelcomeBanner {
     padding: 2 0 1 0;
 }
 
-UserMessage {
-    height: auto;
-    width: 100%;
-    padding: 0 0 0 1;
-    margin: 1 0 0 0;
-    color: $foreground;
-    border-left: thick $primary;
-}
-
-AssistantMessage {
-    height: auto;
-    width: 100%;
-    padding: 0 0 0 1;
-    margin: 1 0 0 0;
-    color: $foreground;
-}
-
-SystemMessage {
-    height: auto;
-    width: 100%;
-    padding: 0 0 0 1;
-    margin: 1 0 0 0;
-    color: $text-muted;
-}
-
-.high-contrast SystemMessage {
-    color: $foreground;
-}
-
-ToolCallLine {
-    height: auto;
-    width: 100%;
-    padding: 0 0 0 1;
-    margin: 0 0 1 0;
-    color: $foreground;
-}
-
 ToolOutputView {
     height: auto;
     width: 100%;
@@ -148,6 +165,26 @@ Picker {
 }
 Picker.visible {
     display: block;
+}
+
+DiffReview {
+    margin: 1 0;
+    padding: 1;
+    border: round $accent;
+    background: $surface;
+}
+DiffReview .buttons {
+    height: auto;
+    align: right middle;
+    margin-top: 1;
+}
+
+MetricsMessage {
+    height: auto;
+    margin: 1 0;
+    padding: 1;
+    background: $surface;
+    border-left: tall $success;
 }
 """
 
@@ -257,28 +294,28 @@ def palette(*, high_contrast: bool = False, dark: bool = True) -> dict[str, str]
     """Named colors for Rich inline styles."""
     if dark:
         return {
-            "bg": "#0d1117",
-            "fg": "#f0f6fc" if high_contrast else "#e6edf3",
-            "muted": "#c9d1d9" if high_contrast else "#9da7b3",
-            "primary": "#58a6ff",
-            "accent": "#79c0ff",
-            "success": "#3fb950",
-            "warning": "#d29922",
-            "error": "#ff7b72",
-            "border": "#30363d",
-            "surface": "#161b22",
+            "bg": "#0a0a0a",
+            "fg": "#ffffff" if high_contrast else "#eeeeee",
+            "muted": "#c4c4c4" if high_contrast else "#808080",
+            "primary": "#fab283",
+            "accent": "#9d7cd8",
+            "success": "#7fd88f",
+            "warning": "#f5a742",
+            "error": "#e06c75",
+            "border": "#484848",
+            "surface": "#141414",
         }
     return {
         "bg": "#ffffff",
-        "fg": "#1f2328",
-        "muted": "#424a53" if high_contrast else "#59636e",
-        "primary": "#0969da",
-        "accent": "#0550ae",
-        "success": "#1a7f37",
-        "warning": "#9a6700",
-        "error": "#cf222e",
-        "border": "#d1d9e0",
-        "surface": "#f6f8fa",
+        "fg": "#000000" if high_contrast else "#1a1a1a",
+        "muted": "#505050" if high_contrast else "#8a8a8a",
+        "primary": "#3b7dd8",
+        "accent": "#d68c27",
+        "success": "#3d9a57",
+        "warning": "#d68c27",
+        "error": "#d1383d",
+        "border": "#b8b8b8",
+        "surface": "#fafafa",
     }
 
 

@@ -6,13 +6,17 @@ import asyncio
 from dataclasses import dataclass
 from typing import Any
 
-import structlog
+try:
+    import structlog
+    logger = structlog.get_logger()
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
 
 from kalash.core.config import KalashConfig, load_config
 from kalash.memory.registry import MemoryRegistry
 from kalash.memory.router import MemoryRouter, ReadPolicy, WritePolicy
 
-logger = structlog.get_logger()
 
 _service: MemoryService | None = None
 _init_lock = asyncio.Lock()

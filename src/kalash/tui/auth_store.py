@@ -72,22 +72,55 @@ def _decrypt(value: str) -> str:
     return plain.decode("utf-8", errors="replace")
 
 
+_auth_cache: dict[str, str] | None = None
+_auth_cache_mtime: float = 0.0
+
+
 def load_auth() -> dict[str, str]:
-    """Load saved credentials."""
+    """Load saved credentials, with in-memory caching (P-1).
+
+    The cache is invalidated when the file's mtime changes (i.e. after a
+    ``save_credential`` call or external edit).
+    """
+    global _auth_cache, _auth_cache_mtime
+
     path = _auth_path()
     if not path.exists():
+        _auth_cache = {}
+        _auth_cache_mtime = 0.0
         return {}
+
+    try:
+        current_mtime = path.stat().st_mtime
+    except OSError:
+        current_mtime = 0.0
+
+    if _auth_cache is not None and current_mtime == _auth_cache_mtime:
+        return dict(_auth_cache)  # return a copy
+
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return {}
     if not isinstance(raw, dict):
         return {}
-    return {str(k): _decrypt(str(v)) for k, v in raw.items()}
+
+    result = {str(k): _decrypt(str(v)) for k, v in raw.items()}
+    _auth_cache = result
+    _auth_cache_mtime = current_mtime
+    return dict(result)
+
+
+def _invalidate_auth_cache() -> None:
+    """Reset the credential cache after a write."""
+    global _auth_cache, _auth_cache_mtime
+    _auth_cache = None
+    _auth_cache_mtime = 0.0
 
 
 def save_credential(provider_id: str, api_key: str) -> None:
     """Save a credential for a provider."""
+    _invalidate_auth_cache()
     path = _auth_path()
     data: dict[str, str] = {}
     if path.exists():
@@ -134,5 +167,7 @@ def get_active_provider() -> tuple[str, str] | None:
 def set_active_provider(provider_id: str, model: str) -> None:
     """Set the active provider and model."""
     config_path = kalash_home() / "provider.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
     data = {"provider": provider_id, "model": model}
     config_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    config_path.chmod(0o600)  # SEC-3: restrict like auth.json

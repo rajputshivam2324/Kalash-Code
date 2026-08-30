@@ -139,6 +139,7 @@ def build_provider(
             reason=f"no API key for {info.name} — run /connect or set {info.env_key}",
         )
 
+    provider: Any = None  # explicit annotation prevents type-narrowing (S-2)
     try:
         if provider_id == "anthropic":
             from kalash.models.providers.anthropic import AnthropicProvider
@@ -184,7 +185,7 @@ def build_gateway(model_identifiers: list[str]) -> Resolution:
     if not model_identifiers:
         return build_provider()
         
-    providers = []
+    providers: list[Any] = []
     
     for identifier in model_identifiers:
         if "/" in identifier:
@@ -200,13 +201,15 @@ def build_gateway(model_identifiers: list[str]) -> Resolution:
             # If a fallback fails, we might just warn, but for now let's just fail
             if not providers:
                 return res
-                
-    if not providers:
+
+    # Filter out any None values that slipped through (S-3)
+    valid_providers = [p for p in providers if p is not None]
+    if not valid_providers:
         return Resolution(None, None, None, "No providers could be built")
         
     from kalash.models.gateway import ModelGateway
     
-    gateway = ModelGateway(primary=providers[0], fallbacks=providers[1:])
+    gateway = ModelGateway(primary=valid_providers[0], fallbacks=valid_providers[1:])
     
     # Return resolution with the gateway as the provider
     # provider_id and model_id are from the primary provider

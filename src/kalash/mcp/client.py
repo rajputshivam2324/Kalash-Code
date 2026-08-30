@@ -14,6 +14,9 @@ from typing import Any
 
 from kalash.core.errors import KalashError, ToolTimeoutError
 from kalash.core.ids import generate_id
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class TransportType(StrEnum):
@@ -463,5 +466,6 @@ class MCPClient:
                 continue
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except Exception as e:
+                logger.error("Error in MCP read loop", exc_info=e)
                 continue

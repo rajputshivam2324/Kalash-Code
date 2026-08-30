@@ -106,7 +106,7 @@ class FanoutPattern(TeamPattern):
         if self._detect_cycle(agents):
             raise KalashError("Cycle detected in fanout agents", recoverable=True)
 
-        start = asyncio.get_event_loop().time()
+        start = asyncio.get_running_loop().time()
         tasks = [self._spawn_with_cap(agent) for agent in agents]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -121,7 +121,7 @@ class FanoutPattern(TeamPattern):
                     error=str(r),
                 ))
 
-        elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+        elapsed_ms = int((asyncio.get_running_loop().time() - start) * 1000)
 
         # Merge: collect all outputs into a list
         merged = [e.result for e in envelopes if e.status == "completed"]
@@ -147,7 +147,7 @@ class PipelinePattern(TeamPattern):
         if self._detect_cycle(agents):
             raise KalashError("Cycle detected in pipeline agents", recoverable=True)
 
-        start = asyncio.get_event_loop().time()
+        start = asyncio.get_running_loop().time()
         envelopes: list[ResultEnvelope] = []
         previous_output: Any = None
 
@@ -159,7 +159,7 @@ class PipelinePattern(TeamPattern):
             try:
                 envelope = await self._spawn_with_cap(agent)
             except (BudgetError, DepthLimitExceededError, CycleDetectedError) as exc:
-                elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+                elapsed_ms = int((asyncio.get_running_loop().time() - start) * 1000)
                 return TeamResult(
                     pattern="pipeline",
                     results=envelopes,
@@ -170,7 +170,7 @@ class PipelinePattern(TeamPattern):
             envelopes.append(envelope)
 
             if envelope.status != "completed":
-                elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+                elapsed_ms = int((asyncio.get_running_loop().time() - start) * 1000)
                 return TeamResult(
                     pattern="pipeline",
                     results=envelopes,
@@ -180,7 +180,7 @@ class PipelinePattern(TeamPattern):
 
             previous_output = envelope.result
 
-        elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+        elapsed_ms = int((asyncio.get_running_loop().time() - start) * 1000)
         return TeamResult(
             pattern="pipeline",
             results=envelopes,
@@ -213,7 +213,7 @@ class CriticPattern(TeamPattern):
 
         proposer_config = agents[0]
         reviewer_config = agents[1]
-        start = asyncio.get_event_loop().time()
+        start = asyncio.get_running_loop().time()
         envelopes: list[ResultEnvelope] = []
 
         proposal: Any = None
@@ -228,7 +228,7 @@ class CriticPattern(TeamPattern):
             try:
                 proposer_result = await self._spawn_with_cap(proposer_config)
             except (BudgetError, DepthLimitExceededError, CycleDetectedError) as exc:
-                elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+                elapsed_ms = int((asyncio.get_running_loop().time() - start) * 1000)
                 return TeamResult(
                     pattern="critic",
                     results=envelopes,
@@ -251,7 +251,7 @@ class CriticPattern(TeamPattern):
             try:
                 reviewer_result = await self._spawn_with_cap(reviewer_config)
             except (BudgetError, DepthLimitExceededError, CycleDetectedError) as exc:
-                elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+                elapsed_ms = int((asyncio.get_running_loop().time() - start) * 1000)
                 return TeamResult(
                     pattern="critic",
                     results=envelopes,
@@ -267,7 +267,7 @@ class CriticPattern(TeamPattern):
             # Check if accepted
             review_output = str(reviewer_result.result or "")
             if "ACCEPT" in review_output.upper():
-                elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+                elapsed_ms = int((asyncio.get_running_loop().time() - start) * 1000)
                 return TeamResult(
                     pattern="critic",
                     results=envelopes,
@@ -279,7 +279,7 @@ class CriticPattern(TeamPattern):
             # Feed critique back for next round
             proposal = review_output
 
-        elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+        elapsed_ms = int((asyncio.get_running_loop().time() - start) * 1000)
         # Max rounds hit — return last proposal
         last_proposal = next(
             (e.result for e in reversed(envelopes) if e.status == "completed"),
@@ -321,13 +321,13 @@ class SupervisorPattern(TeamPattern):
 
         supervisor_config = agents[0]
         worker_configs = {a.agent: a for a in agents[1:]}
-        start = asyncio.get_event_loop().time()
+        start = asyncio.get_running_loop().time()
         envelopes: list[ResultEnvelope] = []
 
         try:
             supervisor_result = await self._spawn_with_cap(supervisor_config)
         except (BudgetError, DepthLimitExceededError, CycleDetectedError) as exc:
-            elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+            elapsed_ms = int((asyncio.get_running_loop().time() - start) * 1000)
             return TeamResult(
                 pattern="supervisor",
                 results=envelopes,
@@ -338,7 +338,7 @@ class SupervisorPattern(TeamPattern):
         envelopes.append(supervisor_result)
 
         if supervisor_result.status != "completed":
-            elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+            elapsed_ms = int((asyncio.get_running_loop().time() - start) * 1000)
             return TeamResult(
                 pattern="supervisor",
                 results=envelopes,
@@ -354,7 +354,7 @@ class SupervisorPattern(TeamPattern):
             try:
                 worker_result = await self._spawn_with_cap(delegation)
             except (BudgetError, DepthLimitExceededError, CycleDetectedError) as exc:
-                elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+                elapsed_ms = int((asyncio.get_running_loop().time() - start) * 1000)
                 return TeamResult(
                     pattern="supervisor",
                     results=envelopes,
@@ -364,7 +364,7 @@ class SupervisorPattern(TeamPattern):
                 )
             envelopes.append(worker_result)
 
-        elapsed_ms = int((asyncio.get_event_loop().time() - start) * 1000)
+        elapsed_ms = int((asyncio.get_running_loop().time() - start) * 1000)
         worker_outputs = [e.result for e in envelopes[1:] if e.status == "completed"]
 
         return TeamResult(

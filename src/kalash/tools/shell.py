@@ -90,14 +90,51 @@ _DANGEROUS_PATTERNS = {
     "wget": "shell.network",
     "ssh": "shell.network",
     "scp": "shell.network",
+    # SEC-2: system-level destructive commands
+    "mkfs": "shell.destructive",
+    "dd": "shell.destructive",
+    "reboot": "shell.destructive",
+    "shutdown": "shell.destructive",
+    "halt": "shell.destructive",
+    "poweroff": "shell.destructive",
+    "iptables": "shell.network",
+    "nft": "shell.network",
+    "systemctl": "shell.destructive",
+    "crontab": "shell.destructive",
+    "pkill": "shell.destructive",
+    "killall": "shell.destructive",
+    "mount": "shell.destructive",
+    "umount": "shell.destructive",
+    "fdisk": "shell.destructive",
 }
 
 
+# P-2: Pre-compile word-boundary regex for single-word patterns at module load
+# so _classify_command doesn't recompile on every call.
+import re as _re
+
+_COMPILED_PATTERNS: list[tuple[_re.Pattern[str], str]] = []
+_MULTI_WORD_PATTERNS: list[tuple[str, str]] = []
+
+for _pat, _cap in _DANGEROUS_PATTERNS.items():
+    if " " in _pat:
+        _MULTI_WORD_PATTERNS.append((_pat, _cap))
+    else:
+        _COMPILED_PATTERNS.append((_re.compile(rf'\b{_re.escape(_pat)}\b'), _cap))
+
+
 def _classify_command(command: str) -> frozenset[str]:
-    """Identify capabilities needed based on command content."""
+    """Identify capabilities needed based on command content.
+
+    Uses pre-compiled word-boundary patterns to avoid false positives —
+    e.g. 'curl' should not match inside 'uncurl' (S-8).
+    """
     caps: set[str] = set()
     cmd_lower = command.lower().strip()
-    for pattern, cap in _DANGEROUS_PATTERNS.items():
+    for regex, cap in _COMPILED_PATTERNS:
+        if regex.search(cmd_lower):
+            caps.add(cap)
+    for pattern, cap in _MULTI_WORD_PATTERNS:
         if pattern in cmd_lower:
             caps.add(cap)
     return frozenset(caps)
@@ -377,9 +414,12 @@ class _ShellCancelled(Exception):
 
 def _cwd_allowed(cwd: Path, ctx: ToolContext) -> bool:
     """True when cwd is under one of the writable roots."""
+    resolved_cwd = cwd.resolve()
     for root in ctx.writable_roots:
         try:
-            cwd.relative_to(root.resolve())
+            # Resolve roots once per check rather than inside a loop
+            # that calls this on every command execution (S-9).
+            resolved_cwd.relative_to(root.resolve())
             return True
         except ValueError:
             continue

@@ -250,8 +250,8 @@ class AgentLoop:
                     session_id=self.session_id,
                     project_dir=project_dir,
                 ))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error("Failed to dispatch SESSION_START hook", exc_info=e)
 
         try:
             while self._running and self._iteration < self.max_iterations:
@@ -392,8 +392,8 @@ class AgentLoop:
                     reason=reason.value,
                     duration_ms=0,
                 ))
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error("Failed to dispatch SESSION_END hook", exc_info=e)
         
         combined = "\n\n".join(part for part in self._response_parts if part)
         if final and final not in combined:
@@ -1096,8 +1096,8 @@ class AgentLoop:
                 state="COMPLETED",
                 token_count=usage.total_tokens,
             )
-        except Exception:
-            logger.warning("Failed to persist turn", exc_info=True)
+        except Exception as e:
+            logger.error("Failed to persist turn", exc_info=e)
 
     async def persist_user_message(self, message: Message) -> None:
         """Record a user (or tool-result) message so the session can be resumed."""
@@ -1117,8 +1117,8 @@ class AgentLoop:
                 content_type="blocks",
             )
             await self.session_repo.complete_turn(turn_id=turn_id, state="COMPLETED")
-        except Exception:
-            logger.warning("Failed to persist user message", exc_info=True)
+        except Exception as e:
+            logger.error("Failed to persist user message", exc_info=e)
 
     async def _persist_tool_results(self, message: Message) -> None:
         """Persist tool-result blocks from a ReAct observe step."""

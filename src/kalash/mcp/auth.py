@@ -132,12 +132,11 @@ class MCPAuth:
         if not opened:
             # Headless or no browser available — the user must open it manually,
             # so the URL has to be surfaced rather than swallowed.
-            import structlog
+            import logging as _log
 
-            structlog.get_logger().warning(
-                "mcp_oauth_open_browser_manually",
-                server=server_name,
-                url=auth_url,
+            _log.getLogger(__name__).warning(
+                "mcp_oauth_open_browser_manually: server=%s url=%s",
+                server_name, auth_url,
             )
 
         # Wait for the callback with authorization code

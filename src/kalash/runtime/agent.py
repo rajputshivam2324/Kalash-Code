@@ -130,8 +130,8 @@ class Agent:
                     self.session_id, self.cwd
                 ).recall_blocks(prompt, limit=12, existing_context=existing)
                 memory_blocks = recalled + memory_blocks
-        except Exception:
-            logger.debug("memory recall skipped", exc_info=True)
+        except Exception as e:
+            logger.error("memory recall failed", exc_info=e)
 
         result = await self.loop.run(
             user_message=user_message,
@@ -161,8 +161,8 @@ class Agent:
                     conversation=self.loop.conversation,
                     turn_seq=self.loop.budget.turns_used,
                 )
-        except Exception:
-            logger.debug("turn memory capture skipped", exc_info=True)
+        except Exception as e:
+            logger.error("turn memory capture failed", exc_info=e)
 
         return result
 
@@ -202,11 +202,12 @@ def build_agent(
 
     # The id the provider actually resolved to, which is what limits are keyed
     # on. The caller's model_id may be None (use the configured default).
-    resolved_model = (
+    resolved_model: str = (
         model_id
         or getattr(resolution, "model_id", "")
         or getattr(resolution.provider, "model", "")
         or getattr(resolution.provider, "name", "")
+        or ""
     )
 
     base = (cwd or Path.cwd()).resolve()
@@ -504,8 +505,8 @@ def _load_history(repo: SessionRepository, session_id: str) -> list[Message]:
 
     try:
         rows = asyncio.run(fetch()) if not _in_loop() else []
-    except Exception:
-        logger.warning("could not load session history", exc_info=True)
+    except Exception as e:
+        logger.error("could not load session history", exc_info=e)
         return []
     return rehydrate_messages(rows)
 
@@ -514,8 +515,8 @@ async def load_history_async(repo: SessionRepository, session_id: str) -> list[M
     """Async variant, for callers already inside an event loop."""
     try:
         rows = await repo.get_session_messages(session_id)
-    except Exception:
-        logger.warning("could not load session history", exc_info=True)
+    except Exception as e:
+        logger.error("could not load session history", exc_info=e)
         return []
     return rehydrate_messages(rows)
 

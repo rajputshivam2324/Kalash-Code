@@ -24,12 +24,16 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Sequence
 
-import structlog
+try:
+    import structlog
+    logger = structlog.get_logger()
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
 
 from kalash.core.ids import generate_id
 from kalash.storage.engine import StorageEngine
 
-logger = structlog.get_logger()
 
 
 # ---------------------------------------------------------------------------

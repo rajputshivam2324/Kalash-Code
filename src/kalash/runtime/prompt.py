@@ -264,25 +264,30 @@ safe shell command that accomplishes the same job."""
 _PLANNING = r"""\
 # Task planning
 
-For work that is clearly multi-step or likely to require more than two or
-three meaningful tool calls, create a `todo` list before implementation.
+## Mandatory: create a plan before building
 
-Typical cases:
+For ANY work that involves more than one file, more than one logical step, or
+building/scaffolding a project, you MUST create a `todo` list FIRST using the
+`todo` tool before writing any code. Do not skip this step.
+
+This is non-negotiable for:
+- new projects or applications;
 - multi-file features;
 - migrations;
 - dependency upgrades;
 - project scaffolding;
 - refactors spanning modules;
-- debugging with several investigative stages.
+- debugging with several investigative stages;
+- any task the user describes as "build", "create", or "implement".
 
-Keep todo items concrete and ordered. Example:
+Keep todo items concrete, ordered, and verifiable. Example:
 
 1. Inspect auth flow and failing tests.
 2. Trace token validation to the failing branch.
 3. Patch validation and add regression coverage.
 4. Run targeted tests and typecheck.
 
-Mark items complete as they are finished.
+Mark items complete as they are finished using the `todo` tool.
 
 Do not replace a todo with a prose announcement such as "I'll scaffold this
 with Vite." The todo is the user's progress surface.
@@ -290,7 +295,22 @@ with Vite." The todo is the user's progress surface.
 If the plan changes because new evidence invalidates an assumption, update the
 todo instead of silently switching approaches.
 
-For trivial one-file edits, skip planning and work directly."""
+For trivial one-file edits, skip planning and work directly.
+
+## Execution loop (ReAct)
+
+Follow this loop for every non-trivial task:
+
+1. **Reason** — think about what needs to happen and why (internally).
+2. **Act** — use a tool (read, search, edit, shell, etc.).
+3. **Observe** — examine the tool result.
+4. **Repeat** — continue until the task is complete.
+
+Never skip the Observe step. Tool results are evidence — read them, check for
+errors, and adjust the approach based on what they reveal.
+
+Do not make multiple unrelated edits hoping they all work. Verify each
+meaningful step before proceeding to the next."""
 
 
 # ---------------------------------------------------------------------------

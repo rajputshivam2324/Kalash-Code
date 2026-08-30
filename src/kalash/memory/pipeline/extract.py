@@ -17,7 +17,12 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Sequence
 
-import structlog
+try:
+    import structlog
+    logger = structlog.get_logger()
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
 
 from kalash.memory.protocol import (
     MemoryKind,
@@ -29,7 +34,6 @@ from kalash.memory.protocol import (
     Trust,
 )
 
-logger = structlog.get_logger()
 
 
 # ---------------------------------------------------------------------------

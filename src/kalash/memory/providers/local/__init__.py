@@ -25,7 +25,12 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, AsyncIterator, Sequence
 
-import structlog
+try:
+    import structlog
+    logger = structlog.get_logger()
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
 
 from kalash.core.ids import generate_id
 from kalash.memory.protocol import (
@@ -49,7 +54,6 @@ from kalash.memory.protocol import (
 )
 from kalash.storage.engine import StorageEngine
 
-logger = structlog.get_logger()
 
 
 # ---------------------------------------------------------------------------

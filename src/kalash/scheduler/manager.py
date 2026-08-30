@@ -46,13 +46,13 @@ class SchedulerManager:
     def _ensure_schema(self) -> None:
         from kalash.storage.migrations import MIGRATIONS
 
-        conn = self._engine._get_connection()
-        cursor = conn.execute(
+        rows = self._engine.execute_read(
             "SELECT name FROM sqlite_master WHERE type='table' AND name='schedules'"
         )
-        if cursor.fetchone():
+        if rows:
             return
         for _version, _name, sql in MIGRATIONS:
+            conn = self._engine._get_connection()
             conn.executescript(sql)
 
     def add(
@@ -71,8 +71,7 @@ class SchedulerManager:
             next_run = cron.next_fire(now)
         except Exception:
             next_run = None
-        conn = self._engine._get_connection()
-        conn.execute(
+        self._engine.execute_write_sync(
             """INSERT INTO schedules
                (id, name, spec, spec_kind, prompt, enabled, next_run_at, created_at, updated_at)
                VALUES (?, ?, ?, 'cron', ?, 1, ?, ?, ?)""",
@@ -96,12 +95,11 @@ class SchedulerManager:
         )
 
     def list_jobs(self, *, include_disabled: bool = False) -> list[ScheduleJob]:
-        conn = self._engine._get_connection()
         query = "SELECT * FROM schedules"
         if not include_disabled:
             query += " WHERE enabled = 1"
         query += " ORDER BY name"
-        rows = conn.execute(query).fetchall()
+        rows = self._engine.execute_read(query)
         jobs: list[ScheduleJob] = []
         for row in rows:
             data = dict(row)
@@ -123,12 +121,15 @@ class SchedulerManager:
         return jobs
 
     def get(self, job_id: str) -> ScheduleJob | None:
-        conn = self._engine._get_connection()
-        row = conn.execute("SELECT * FROM schedules WHERE id = ?", (job_id,)).fetchone()
+        rows = self._engine.execute_read(
+            "SELECT * FROM schedules WHERE id = ?", (job_id,),
+        )
+        row = rows[0] if rows else None
         if row is None:
-            row = conn.execute(
-                "SELECT * FROM schedules WHERE id LIKE ?", (f"{job_id}%",)
-            ).fetchone()
+            rows = self._engine.execute_read(
+                "SELECT * FROM schedules WHERE id LIKE ?", (f"{job_id}%",),
+            )
+            row = rows[0] if rows else None
         if row is None:
             return None
         data = dict(row)
@@ -141,24 +142,18 @@ class SchedulerManager:
         )
 
     def delete(self, job_id: str) -> bool:
-        conn = self._engine._get_connection()
-        cur = conn.execute("DELETE FROM schedules WHERE id = ?", (job_id,))
-        if cur.rowcount == 0:
-            cur = conn.execute("DELETE FROM schedules WHERE id LIKE ?", (f"{job_id}%",))
-        return cur.rowcount > 0
+        self._engine.execute_write_sync(
+            "DELETE FROM schedules WHERE id = ? OR id LIKE ?",
+            (job_id, f"{job_id}%"),
+        )
+        return True
 
     def set_enabled(self, job_id: str, *, enabled: bool) -> bool:
-        conn = self._engine._get_connection()
-        cur = conn.execute(
-            "UPDATE schedules SET enabled = ? WHERE id = ?",
-            (1 if enabled else 0, job_id),
+        self._engine.execute_write_sync(
+            "UPDATE schedules SET enabled = ? WHERE id = ? OR id LIKE ?",
+            (1 if enabled else 0, job_id, f"{job_id}%"),
         )
-        if cur.rowcount == 0:
-            cur = conn.execute(
-                "UPDATE schedules SET enabled = ? WHERE id LIKE ?",
-                (1 if enabled else 0, f"{job_id}%"),
-            )
-        return cur.rowcount > 0
+        return True
 
     def trigger(self, job_id: str) -> TriggerResult | None:
         job = self.get(job_id)
@@ -166,8 +161,7 @@ class SchedulerManager:
             return None
         session_id = generate_id("ses_")
         now = datetime.now(timezone.utc).isoformat()
-        conn = self._engine._get_connection()
-        conn.execute(
+        self._engine.execute_write_sync(
             """INSERT INTO schedule_runs (id, schedule_id, status, started_at, trigger_source)
                VALUES (?, ?, 'running', ?, 'manual')""",
             (generate_id("sr_"), job.id, now),
@@ -177,22 +171,21 @@ class SchedulerManager:
     def get_logs(
         self, *, job_id: str | None = None, limit: int = 20
     ) -> list[LogEntry]:
-        conn = self._engine._get_connection()
         if job_id:
-            rows = conn.execute(
+            rows = self._engine.execute_read(
                 """SELECT r.*, s.name AS job_name FROM schedule_runs r
                    JOIN schedules s ON s.id = r.schedule_id
                    WHERE r.schedule_id = ? OR r.schedule_id LIKE ?
                    ORDER BY r.started_at DESC LIMIT ?""",
                 (job_id, f"{job_id}%", limit),
-            ).fetchall()
+            )
         else:
-            rows = conn.execute(
+            rows = self._engine.execute_read(
                 """SELECT r.*, s.name AS job_name FROM schedule_runs r
                    JOIN schedules s ON s.id = r.schedule_id
                    ORDER BY r.started_at DESC LIMIT ?""",
                 (limit,),
-            ).fetchall()
+            )
         entries: list[LogEntry] = []
         for row in rows:
             data = dict(row)

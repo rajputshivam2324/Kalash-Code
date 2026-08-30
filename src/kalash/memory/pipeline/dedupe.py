@@ -19,7 +19,12 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Sequence
 
-import structlog
+try:
+    import structlog
+    logger = structlog.get_logger()
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
 
 from kalash.memory.protocol import (
     MemoryEdit,
@@ -30,8 +35,6 @@ from kalash.memory.protocol import (
     RecallQuery,
     Scope,
 )
-
-logger = structlog.get_logger()
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +146,8 @@ async def near_duplicate_check(
     for candidate in candidates:
         try:
             candidate_embedding = await get_embedding(candidate.content)
-        except Exception:
+        except Exception as e:
+            logger.warning("Embedding failed for candidate in dedupe", exc_info=e)
             results.append(NearDuplicateResult(candidate=candidate, is_duplicate=False))
             continue
 

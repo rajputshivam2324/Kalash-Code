@@ -21,7 +21,12 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Sequence
 
-import structlog
+try:
+    import structlog
+    logger = structlog.get_logger()
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
 
 from kalash.core.events import Event, EventType, get_event_bus
 from kalash.core.ids import generate_id
@@ -41,7 +46,6 @@ from kalash.memory.protocol import (
 )
 from kalash.memory.registry import MemoryRegistry
 
-logger = structlog.get_logger()
 
 
 # ---------------------------------------------------------------------------

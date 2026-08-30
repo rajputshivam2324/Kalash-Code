@@ -17,7 +17,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-import structlog
+try:
+    import structlog
+    logger = structlog.get_logger()
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
 
 from kalash.core.config import MemoryConfig
 from kalash.memory.protocol import (
@@ -26,7 +31,6 @@ from kalash.memory.protocol import (
     ProviderHealth,
 )
 
-logger = structlog.get_logger()
 
 # Type for provider factory functions
 ProviderFactory = Callable[[dict[str, Any]], MemoryProvider]
@@ -249,8 +253,8 @@ class MemoryRegistry:
             await asyncio.sleep(self.HEALTH_CHECK_INTERVAL_S)
             try:
                 await self.check_all_health()
-            except Exception:
-                logger.warning("health_loop_error", exc_info=True)
+            except Exception as e:
+                logger.error("health_loop_error", exc_info=e)
 
     def stop_health_monitor(self) -> None:
         """Stop the periodic health monitor."""

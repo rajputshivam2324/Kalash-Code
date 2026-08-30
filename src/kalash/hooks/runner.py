@@ -138,13 +138,11 @@ class HookRunner:
         effective_chain = chain_id or generate_id("chain_")
         current_depth = self._chain_depth.get(effective_chain, 0)
         if current_depth > self.MAX_CHAIN_DEPTH:
-            import structlog
+            import logging as _log
 
-            structlog.get_logger().warning(
-                "hook_loop_protection",
-                event=event,
-                chain_id=effective_chain,
-                depth=current_depth,
+            _log.getLogger(__name__).warning(
+                "hook_loop_protection: event=%s chain_id=%s depth=%d",
+                event, effective_chain, current_depth,
             )
             return []
 
@@ -305,6 +303,17 @@ class HookRunner:
         except urllib.error.HTTPError as e:
             response_body = e.read().decode(errors="replace") if e.fp else ""
             exit_code = 2 if e.code == 403 else 1
+        except (urllib.error.URLError, OSError, asyncio.TimeoutError) as e:
+            # R-1: DNS failure, connection refused, or timeout.
+            response_body = ""
+            exit_code = 1
+            return HookResult(
+                hook_id=config.id,
+                event=payload.event,
+                exit_code=exit_code,
+                error=f"HTTP hook unreachable: {e}",
+                duration_ms=int((time.time() - start) * 1000),
+            )
 
         return HookResult(
             hook_id=config.id,

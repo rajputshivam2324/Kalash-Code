@@ -122,10 +122,9 @@ class SchedulerDaemon:
                     await self._process_due_schedules()
             except asyncio.CancelledError:
                 break
-            except Exception:
-                import structlog
-
-                structlog.get_logger().warning("scheduler_tick_error", exc_info=True)
+            except Exception as e:
+                import logging as _log
+                _log.getLogger(__name__).error("scheduler_tick_error", exc_info=e)
 
             await asyncio.sleep(self._tick_interval)
 
@@ -139,10 +138,9 @@ class SchedulerDaemon:
                     await self._try_acquire_lease()
             except asyncio.CancelledError:
                 break
-            except Exception:
-                import structlog
-
-                structlog.get_logger().warning("scheduler_heartbeat_error", exc_info=True)
+            except Exception as e:
+                import logging as _log
+                _log.getLogger(__name__).error("scheduler_heartbeat_error", exc_info=e)
 
             await asyncio.sleep(self._heartbeat_interval)
 
@@ -186,8 +184,9 @@ class SchedulerDaemon:
                 self._leader = True
                 return True
 
-        except Exception:
-            pass
+        except Exception as e:
+            import logging as _log
+            _log.getLogger(__name__).error("scheduler_lease_error", exc_info=e)
 
         self._leader = False
         return False
@@ -357,5 +356,6 @@ class SchedulerDaemon:
         for hook in self._notification_hooks:
             try:
                 await hook(event, schedule_id, data)
-            except Exception:
-                pass  # notification failures are non-critical
+            except Exception as e:
+                import logging as _log
+                _log.getLogger(__name__).warning("Notification hook failed", exc_info=e)

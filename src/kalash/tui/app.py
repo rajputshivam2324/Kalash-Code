@@ -14,6 +14,10 @@ import os
 import time
 import asyncio
 from enum import StrEnum
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from kalash.runtime.agent import Agent
 
 
 from textual import events, on, work
@@ -25,6 +29,10 @@ from textual.reactive import reactive
 from textual.theme import ThemeProvider
 from textual.widgets import Input, Static
 from textual.worker import Worker, WorkerState
+
+import rich.default_styles
+# Force transparent backgrounds for inline code by stripping the background from default styles
+rich.default_styles.DEFAULT_STYLES["markdown.code_inline"] = "bold cyan"
 
 from kalash.tui.messages import (
     AssistantMessage,
@@ -38,7 +46,7 @@ from kalash.tui.picker import Picker, PickerItem, PickerMode
 from kalash.tui.theme import APP_CSS, KalashTheme, register_kalash_themes
 
 # How often the elapsed counter on a running tool call refreshes.
-TOOL_TICK_SECONDS = 0.5
+TOOL_TICK_SECONDS = 0.1
 
 
 def summarize_tool_call(name: str, arguments: dict) -> str:
@@ -121,6 +129,7 @@ def summarize_tool_result(name: str, data: dict) -> str:
 
 SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/connect", "Connect or switch AI model provider"),
+    ("/key", "Update API key for the current provider"),
     ("/models", "Switch active model"),
     ("/mode", "Toggle build/plan mode (tab)"),
     ("/plan", "View current task plan and progress"),
@@ -187,6 +196,7 @@ class KalashApp(App[None]):
         Binding("ctrl+k", "copy_code", "Copy code block", show=False),
         Binding("ctrl+t", "copy_transcript", "Copy transcript", show=False),
         Binding("ctrl+o", "toggle_output", "Expand output", show=False),
+        Binding("ctrl+b", "toggle_sidebar", "Toggle Context", show=False),
     ]
 
     mode: reactive[str] = reactive(Mode.BUILD.value)
@@ -215,7 +225,7 @@ class KalashApp(App[None]):
         self._banner_removed = False
         self._stream_worker: Worker[None] | None = None
         self._resolution_error: str | None = None
-        self._agent: object = None
+        self._agent: Agent | None = None
         self._agent_signature: str = ""
         self._active_tool: ToolCallLine | None = None
         self._active_tools: dict[str, ToolCallLine] = {}
@@ -226,7 +236,7 @@ class KalashApp(App[None]):
         self._context_fill: float = 0.0
         self._react_step: int = 0
         self._subagents: dict[str, SubagentLine] = {}
-        self._tool_event_bus: object | None = None
+        self._tool_event_bus: Any = None
         self._restore_session()
         if mode.strip().lower() == "plan":
             self.mode = Mode.PLAN.value
@@ -240,14 +250,25 @@ class KalashApp(App[None]):
         self.provider_id, self.model_id = active_selection()
 
     def compose(self) -> ComposeResult:
-        with VerticalScroll(id="transcript"):
-            yield WelcomeBanner()
+        from textual.containers import Horizontal
+        with Horizontal():
+            with VerticalScroll(id="transcript"):
+                yield WelcomeBanner()
+            yield Static("Workspace Context\n\n- No active files\n- Token usage: 0\n- Agents: Idle", id="context-sidebar")
         with Vertical(id="footer"):
             yield Picker()
             with Container(id="input-wrap"):
                 yield Input(placeholder="Ask anything…", id="prompt")
             yield Static(id="statusline")
             yield Static(id="hints")
+
+    def action_toggle_sidebar(self) -> None:
+        """Toggle the right context sidebar."""
+        sidebar = self.query_one("#context-sidebar")
+        if sidebar.has_class("visible"):
+            sidebar.remove_class("visible")
+        else:
+            sidebar.add_class("visible")
 
     def on_mount(self) -> None:
         self.theme_changed_signal.subscribe(self, self._on_textual_theme_changed)
@@ -259,6 +280,7 @@ class KalashApp(App[None]):
         # Automatically disable terminal mouse reporting so standard native OS terminal
         # text selection, highlighting, and right-click context menu copy work seamlessly.
         if hasattr(self, "_driver") and self._driver is not None:
+            import contextlib
             with contextlib.suppress(Exception):
                 if hasattr(self._driver, "_disable_mouse_support"):
                     self._driver._disable_mouse_support()
@@ -312,15 +334,7 @@ class KalashApp(App[None]):
         picker = self.query_one(Picker)
         if not picker.is_open:
             return
-        query = prefix.lower()
-        items = [
-            PickerItem(value=c, label=c, detail=d)
-            for c, d in SLASH_COMMANDS
-            if c.lower().startswith(query) or query in d.lower()
-        ]
-        picker.set_items(items)
-        if not items:
-            picker.close()
+        picker.filter(prefix)
 
     # -- status line -------------------------------------------------------
 
@@ -361,6 +375,36 @@ class KalashApp(App[None]):
             self.query_one("#statusline", Static).update(text)
         except NoMatches:
             pass
+        self._refresh_sidebar()
+
+    def _refresh_sidebar(self) -> None:
+        try:
+            sidebar = self.query_one("#context-sidebar", Static)
+        except Exception:
+            return
+
+        lines = ["[bold cyan]Workspace Context[/bold cyan]\n"]
+        
+        if self._agent and self._agent.budget:
+            budget = self._agent.budget
+            lines.append(f"[bold]Tokens:[/bold] {budget.tokens_used:,}")
+            if budget.max_tokens:
+                lines.append(f"[bold]Limit:[/bold] {budget.max_tokens:,}")
+            lines.append(f"[bold]Cost:[/bold] ${budget.cost_used:.4f}")
+            lines.append(f"[bold]Tools:[/bold] {budget.tool_calls_used}")
+        else:
+            lines.append("[bold]Tokens:[/bold] 0")
+            lines.append("[bold]Cost:[/bold] $0.00")
+        
+        lines.append("")
+        
+        state = "[yellow]Thinking...[/yellow]" if self.busy else "[green]Idle[/green]"
+        lines.append(f"[bold]Status:[/bold] {state}")
+        
+        if self._react_step > 0:
+            lines.append(f"[bold]Step:[/bold] {self._react_step}")
+
+        sidebar.update("\n".join(lines))
 
     def _refresh_hints(self) -> None:
         from rich.text import Text
@@ -687,7 +731,21 @@ class KalashApp(App[None]):
                 SystemMessage([f"{c:<10} {d}" for c, d in SLASH_COMMANDS])
             )
         elif command == "/clear":
-            await self._transcript().remove_children()
+            # Guard against accidental erasure of a multi-hour session (U-5).
+            transcript = self._transcript()
+            children = list(transcript.children)
+            if len(children) > 1 and not getattr(self, "_clear_confirmed", False):
+                self._clear_confirmed = True
+                await self._post(
+                    SystemMessage(
+                        "⚠ this will erase the entire transcript. "
+                        "run /clear again to confirm.",
+                        error=True,
+                    )
+                )
+                return
+            self._clear_confirmed = False
+            await transcript.remove_children()
             self._banner_removed = True
         elif command == "/new":
             await self._transcript().remove_children()
@@ -698,6 +756,17 @@ class KalashApp(App[None]):
             await self._post(SystemMessage(self._status_lines()))
         elif command == "/connect":
             await self._start_connect()
+        elif command == "/key":
+            if self.provider_id:
+                from kalash.tui.providers import get_provider
+                provider = get_provider(self.provider_id)
+                if provider and provider.requires_key:
+                    self._pending_provider = self.provider_id
+                    self._ask_for(InputIntent.API_KEY, f"paste your new {provider.name} API key")
+                else:
+                    await self._post(SystemMessage("current provider does not require an API key"))
+            else:
+                await self._post(SystemMessage("no provider connected — run /connect", error=True))
         elif command == "/theme":
             await self._start_theme()
         elif command == "/models":
@@ -1060,7 +1129,7 @@ class KalashApp(App[None]):
         self._open_picker(PickerMode.SESSION, items)
         self.query_one("#prompt", Input).placeholder = "pick a session — ↑↓ then enter"
 
-    async def _replay_history(self, history: list[Any]) -> None:
+    async def _replay_history(self, history: list) -> None:
         """Mount restored session conversation messages into the transcript."""
         from kalash.models.normalize import (
             Role,
@@ -1122,10 +1191,14 @@ class KalashApp(App[None]):
             await self._post(SystemMessage(reason, error=True))
             return
 
+        # Load history asynchronously — the sync _load_history inside
+        # build_agent uses asyncio.run() which returns [] when called from
+        # inside the TUI's already-running event loop.
         if agent.loop.session_repo is not None:
-            agent.history = await load_history_async(
+            loaded = await load_history_async(
                 agent.loop.session_repo, session_id
             )
+            agent.history = loaded
 
         self._agent = agent
         self._agent_signature = f"{self.provider_id}:{self.model_id}"
@@ -1153,7 +1226,7 @@ class KalashApp(App[None]):
         self.query_one("#prompt", Input).placeholder = "select a provider — ↑↓ then enter"
 
     async def _provider_chosen(self, provider_id: str) -> None:
-        from kalash.tui.auth_store import save_credential
+        from kalash.tui.auth_store import get_credential, save_credential
         from kalash.tui.providers import get_provider
 
         provider = get_provider(provider_id)
@@ -1170,6 +1243,24 @@ class KalashApp(App[None]):
             save_credential(provider_id, "")
             self.provider_id = provider_id
             self._reset_intent()
+            await self._start_models()
+            return
+
+        # If a key is already saved, skip re-asking and go straight to models.
+        existing_key = get_credential(provider_id)
+        if not existing_key:
+            # Also check the environment variable as a fallback.
+            existing_key = os.environ.get(provider.env_key, "")
+        if existing_key:
+            save_credential(provider_id, existing_key)
+            self.provider_id = provider_id
+            self._reset_intent()
+            await self._post(
+                SystemMessage(
+                    f"using saved key for {provider.name} — "
+                    f"run /key to update it if needed"
+                )
+            )
             await self._start_models()
             return
 
@@ -1284,9 +1375,10 @@ class KalashApp(App[None]):
                         SystemMessage(result.error or "run failed", error=True)
                     )
                 case TerminationReason.BUDGET_EXHAUSTED:
+                    detail = f" ({result.error})" if result.error else ""
                     await self._post(
                         SystemMessage(
-                            f"budget ceiling reached after {result.iterations} turns — "
+                            f"budget ceiling reached after {result.iterations} turns{detail} — "
                             f"work may be incomplete",
                             error=True,
                         )
@@ -1328,7 +1420,7 @@ class KalashApp(App[None]):
 
         return emit
 
-    async def _prepare_agent(self, agent) -> None:
+    async def _prepare_agent(self, agent: Agent) -> None:
         """Wire MCP, tool-event handlers, and approval UI for an agent."""
         from kalash.runtime.bootstrap import wire_agent_tools
         from kalash.tui.approval import TuiApprovalAdapter
@@ -1345,7 +1437,7 @@ class KalashApp(App[None]):
         await wire_agent_tools(agent)
         await self._report_model_constraints(agent)
 
-    async def _ensure_agent(self):
+    async def _ensure_agent(self) -> Agent | None:
         """Build the agent on first use, rebuilding if the model changed."""
         signature = f"{self.provider_id}:{self.model_id}"
         if self._agent is not None and self._agent_signature == signature:
@@ -1373,7 +1465,7 @@ class KalashApp(App[None]):
         await self._prepare_agent(agent)
         return agent
 
-    async def _report_model_constraints(self, agent) -> None:
+    async def _report_model_constraints(self, agent: Agent) -> None:
         """Surface model limits once — in the status line, not the transcript."""
         from kalash.models.limits import describe, supports_tools
 
@@ -1411,7 +1503,7 @@ class KalashApp(App[None]):
         """
         return "plan" if self.mode == Mode.PLAN.value else "build"
 
-    def _subscribe_tool_events(self, bus) -> None:
+    def _subscribe_tool_events(self, bus: Any) -> None:
         """Show tool activity in the transcript so the run is not a black box.
 
         A bare `· shell` with no command and no output is indistinguishable from

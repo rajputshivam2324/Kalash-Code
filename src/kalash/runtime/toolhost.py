@@ -506,8 +506,8 @@ class ToolHost:
                     result=envelope.ok,
                 )
             )
-        except Exception:
-            logger.debug("PostToolUse hook failed for %s", name, exc_info=True)
+        except Exception as e:
+            logger.error("PostToolUse hook failed for %s", name, exc_info=e)
 
     # -- the gate ------------------------------------------------------------
 
@@ -637,8 +637,8 @@ class ToolHost:
                     "risk_class": risk.risk_class.value,
                 },
             )
-        except Exception:
-            logger.debug("could not persist permission grant", exc_info=True)
+        except Exception as e:
+            logger.error("could not persist permission grant", exc_info=e)
 
     # -- rendering -----------------------------------------------------------
 

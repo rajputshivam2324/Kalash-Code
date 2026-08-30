@@ -187,12 +187,11 @@ class MCPManager:
         except Exception as e:
             status.state = ServerState.FAILED
             status.error = str(e)
-            import structlog
+            import logging as _log
 
-            structlog.get_logger().warning(
-                "mcp_server_connect_failed",
-                server=name,
-                error=str(e),
+            _log.getLogger(__name__).warning(
+                "mcp_server_connect_failed: server=%s error=%s",
+                name, str(e),
             )
 
     def _detect_collisions(self) -> None:

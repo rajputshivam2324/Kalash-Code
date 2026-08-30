@@ -36,23 +36,7 @@ OUTPUT_PREVIEW_LINES = 6
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 TOOL_BADGES: dict[str, str] = {
-    "read": "[read]",
-    "write": "[write]",
-    "edit": "[edit]",
-    "multi_edit": "[edit]",
-    "glob": "[glob]",
-    "list": "[list]",
-    "search": "[search]",
-    "shell": "[shell]",
-    "task": "[subagent]",
-    "skill": "[skill]",
-    "recall": "[recall]",
-    "remember": "[remember]",
-    "forget": "[forget]",
-    "todo": "[plan]",
-    "note": "[note]",
-    "fetch": "[fetch]",
-    "web_search": "[web]",
+    # OpenCode style: no explicit textual badges, rely on the summarized label (e.g. `$ cmd`, `Edited file`)
 }
 
 
@@ -92,10 +76,7 @@ class UserMessage(Static):
 
     def __init__(self, text: str) -> None:
         self.plain_text = text
-        formatted = Text()
-        formatted.append("> ", style="bold cyan")
-        formatted.append(text, style="bold")
-        super().__init__(formatted)
+        super().__init__(Text(text))
 
 
 class AssistantMessage(Static):
@@ -111,7 +92,7 @@ class AssistantMessage(Static):
     """
 
     def __init__(self) -> None:
-        super().__init__(Text("● …", style="dim cyan"))
+        super().__init__(Text("…", style="dim"))
         self._chunks: list[str] = []
         self._done = False
         self._error: str | None = None
@@ -140,7 +121,7 @@ class AssistantMessage(Static):
     def set_working(self) -> None:
         """Shown when the model delegated to tools without saying anything first."""
         if not self._chunks and not self._done:
-            self.update(Text("● working…", style="yellow"))
+            self.update(Text("working…", style="yellow"))
 
     def set_error(self, message: str) -> None:
         self._done = True
@@ -148,27 +129,22 @@ class AssistantMessage(Static):
         self._repaint()
 
     def _repaint(self) -> None:
-        """Rebuild the rendered body with Markdown when finished."""
+        """Rebuild the rendered body with Markdown."""
         if self._error is not None:
             self.update(Text.assemble(("✗ ", "bold red"), (self._error, "red")))
             return
 
         body = self.text
         if not body:
-            self.update(Text("● …", style="dim cyan"))
+            # OpenCode style subtle thinking indicator
+            self.update(Text("…", style="dim"))
             return
 
-        if self._done:
-            try:
-                md = Markdown(body, code_theme="monokai", inline_code_theme="monokai")
-                self.update(md)
-                return
-            except Exception:
-                pass
-
-        marker = ("● ", "bold green" if self._done else "bold cyan")
-        self.update(Text.assemble(marker, (body, "")))
-
+        try:
+            md = Markdown(body, code_theme="monokai")
+            self.update(md)
+        except Exception:
+            self.update(body)
 
 class SystemMessage(Static):
     """Command output, help text, status lines."""
@@ -287,7 +263,7 @@ class ToolCallLine(Static):
         self._summary = ""
         self._expanded = False
         self._spinner_idx = 0
-        self._badge = TOOL_BADGES.get(tool_name, f"[{tool_name}]" if tool_name else "")
+        self._badge = TOOL_BADGES.get(tool_name, "")
         super().__init__(self._build_line())
 
     async def on_click(self, event: Click) -> None:
@@ -360,7 +336,11 @@ class ToolCallLine(Static):
     def plain_output(self) -> str:
         return "\n".join(self._output) if self._output else self._diff_text
 
-    def _build_line(self) -> Text:
+    def _build_line(self) -> Any:
+        from rich.console import Group
+        from rich.panel import Panel
+        from rich.text import Text
+
         text = Text()
         failed = self._failed
         badge_part = f"{self._badge} " if self._badge else ""
@@ -389,19 +369,40 @@ class ToolCallLine(Static):
         for value, style in meta:
             text.append("  ")
             text.append(value, style=style)
-        text.append("\n")
+
+        renderables = [text]
 
         if self._diff_text:
-            _append_folded_diff(text, self._diff_text, expanded=self._expanded)
+            diff_text = Text()
+            _append_folded_diff(diff_text, self._diff_text, expanded=self._expanded)
+            renderables.append(diff_text)
         elif self._output:
-            _append_folded_output(text, self._output, expanded=self._expanded)
+            visible = self._output if self._expanded else self._output[:OUTPUT_PREVIEW_LINES]
+            output_text = Text("\n".join(visible))
+            hidden = len(self._output) - len(visible)
+            if hidden > 0 and not self._expanded:
+                output_text.append(f"\n\n… {hidden} output lines hidden · ctrl+o to expand", style="italic")
+            elif self._expanded and len(self._output) > OUTPUT_PREVIEW_LINES:
+                output_text.append("\n\n… ctrl+o to fold output", style="italic")
+
+            panel = Panel(
+                output_text,
+                style="dim",
+                border_style="bright_black",
+                padding=(0, 1),
+            )
+            renderables.append(panel)
 
         if self._summary:
-            text.append("  │ ")
+            summary_text = Text()
+            summary_text.append("  │ ")
             style = "yellow" if "unwrapped" in self._summary.lower() else "dim"
-            text.append(self._summary, style=style)
-            text.append("\n")
-        return text
+            summary_text.append(self._summary, style=style)
+            renderables.append(summary_text)
+            
+        if len(renderables) == 1:
+            return renderables[0]
+        return Group(*renderables)
 
 
 class SubagentLine(Static):
@@ -484,3 +485,48 @@ def _short_path(path: str) -> str:
     except (ValueError, OSError):
         parts = Path(path).parts
         return str(Path(*parts[-3:])) if len(parts) > 3 else path
+
+
+from textual.app import ComposeResult
+from textual.containers import Horizontal
+from textual.widgets import Button
+
+class DiffReview(Static):
+    """An interactive diff review widget."""
+    def __init__(self, diff_text: str) -> None:
+        self.diff_text = diff_text
+        super().__init__()
+
+    def compose(self) -> ComposeResult:
+        text = Text()
+        _append_folded_diff(text, self.diff_text, expanded=True)
+        yield Static(text)
+        with Horizontal(classes="buttons"):
+            yield Button("Accept", variant="success", id="btn-accept")
+            yield Button("Reject", variant="error", id="btn-reject")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-accept":
+            self.styles.border = ("round", "green")
+            self.query_one(".buttons").remove()
+        elif event.button.id == "btn-reject":
+            self.styles.border = ("round", "red")
+            self.query_one(".buttons").remove()
+
+
+class MetricsMessage(Static):
+    """Rich visualizations for stats/cost."""
+    def __init__(self, title: str, metric: str, value: int, max_value: int) -> None:
+        self.title = title
+        self.metric = metric
+        self.value = value
+        self.max_value = max_value
+        super().__init__()
+        
+    def compose(self) -> ComposeResult:
+        from rich.bar import Bar
+        from rich.console import Group
+        
+        header = Text(f"{self.title} | {self.metric}: {self.value}/{self.max_value}", style="bold cyan")
+        bar = Bar(size=self.max_value, begin=0, end=self.value, color="cyan", bgcolor="black")
+        yield Static(Group(header, bar))

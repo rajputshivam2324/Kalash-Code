@@ -104,6 +104,11 @@ class TestSlashCommands:
             await submit(pilot, app, "hello")
             assert len(app.query(UserMessage)) == 1
 
+            # First /clear shows a confirmation warning (U-5)
+            await submit(pilot, app, "/clear")
+            assert len(app.query(UserMessage)) >= 1  # not cleared yet
+
+            # Second /clear actually clears
             await submit(pilot, app, "/clear")
             assert len(app.query(UserMessage)) == 0
 

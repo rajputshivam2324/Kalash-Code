@@ -83,7 +83,8 @@ class SandboxManager:
                 from kalash.sandbox.macos import MacOSSandbox
 
                 return MacOSSandbox(policy=self._policy())
-        except Exception:
+        except Exception as e:
+            logger.warning("Failed to initialize sandbox backend", exc_info=e)
             return None
         return None
 
@@ -95,7 +96,8 @@ class SandboxManager:
             try:
                 probe = getattr(self._backend, "landlock_supported", None)
                 landlock = bool(probe()) if callable(probe) else False
-            except Exception:
+            except Exception as e:
+                logger.debug("landlock support probe failed", exc_info=e)
                 landlock = False
 
             if has_bwrap or landlock:
@@ -167,7 +169,8 @@ class SandboxManager:
                 # Backends that do not accept cwd cannot guarantee the working
                 # directory, so decline rather than run in the wrong place.
                 return argv, False
-        except Exception:
+        except Exception as e:
+            logger.warning("Sandbox wrap_command failed", exc_info=e)
             return argv, False
 
         if not wrapped or not isinstance(wrapped, list):
@@ -255,7 +258,8 @@ def _run_preflight(*, allow_network: bool) -> bool:
         script = _PROBE_BASE + (_PROBE_NET if allow_network else "")
         try:
             argv = wrap_command(["/bin/sh", "-c", script], cwd=str(probe_dir))
-        except Exception:
+        except Exception as e:
+            logger.warning("Preflight sandbox wrap failed", exc_info=e)
             return False
 
         try:
@@ -289,9 +293,10 @@ def _host_can_resolve() -> bool:
     import socket
 
     try:
-        socket.setdefaulttimeout(3.0)
-        socket.getaddrinfo("one.one.one.one", 443)
-    except OSError:
+        # Use getaddrinfo with a local timeout instead of mutating
+        # socket.setdefaulttimeout() which affects the entire process (S-7).
+        socket.getaddrinfo("one.one.one.one", 443, proto=socket.IPPROTO_TCP)
+    except (OSError, socket.gaierror):
         return False
     return True
 

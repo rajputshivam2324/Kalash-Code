@@ -94,15 +94,11 @@ class SessionManager:
         proj = project_dir or str(self._config.project_dir)
         session_id = generate_id("ses_")
 
-        # Persist to DB
         engine = self._ensure_engine()
         now = datetime.now(timezone.utc).isoformat()
-        with engine.read() as conn:
-            pass  # just ensure connection exists
 
-        # Use synchronous write for session creation
-        conn = engine._get_connection()
-        conn.execute(
+        # Use the engine's synchronous write path (A-1/R-3).
+        engine.execute_write_sync(
             """INSERT INTO sessions (id, project_dir, agent, state, created_at, updated_at)
                VALUES (?, ?, ?, 'ACTIVE', ?, ?)""",
             (session_id, proj, self._config.model.primary.split("/")[0],
@@ -198,16 +194,20 @@ class SessionManager:
         if self.get_session(session_id) is None:
             return False
 
-        conn = engine._get_connection()  # noqa: SLF001
         # Ordered child-first because the schema declares foreign keys and
-        # SQLite enforces them when foreign_keys=ON.
-        conn.execute(
+        # SQLite enforces them when foreign_keys=ON.  All three DELETEs go
+        # through the engine's serialized write path (A-1).
+        engine.execute_write_sync(
             """DELETE FROM messages WHERE turn_id IN
                (SELECT id FROM turns WHERE session_id = ?)""",
             (session_id,),
         )
-        conn.execute("DELETE FROM turns WHERE session_id = ?", (session_id,))
-        conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        engine.execute_write_sync(
+            "DELETE FROM turns WHERE session_id = ?", (session_id,),
+        )
+        engine.execute_write_sync(
+            "DELETE FROM sessions WHERE id = ?", (session_id,),
+        )
         return True
 
     def export_session(self, session_id: str, format: str = "json") -> str | None:
@@ -251,8 +251,7 @@ class SessionManager:
         """Close a session."""
         engine = self._ensure_engine()
         now = datetime.now(timezone.utc).isoformat()
-        conn = engine._get_connection()
-        conn.execute(
+        engine.execute_write_sync(
             "UPDATE sessions SET state = 'CLOSED', closed_at = ?, updated_at = ? WHERE id = ?",
             (now, now, session_id),
         )

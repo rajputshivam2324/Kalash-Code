@@ -131,16 +131,27 @@ async def _safe_call(handler: EventHandler, event: Event) -> None:
     try:
         await handler(event)
     except Exception:
-        # Log but never propagate — bus must not disrupt callers
-        import structlog
+        # Log but never propagate — bus must not disrupt callers.
+        # Fall back to stdlib logging when structlog is unavailable (A-5).
+        try:
+            import structlog
 
-        logger = structlog.get_logger()
-        logger.warning(
-            "event_handler_error",
-            event_type=event.type,
-            handler=handler.__qualname__,
-            exc_info=True,
-        )
+            logger = structlog.get_logger()
+            logger.warning(
+                "event_handler_error",
+                event_type=event.type,
+                handler=handler.__qualname__,
+                exc_info=True,
+            )
+        except ImportError:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "event handler %s raised for %s",
+                handler.__qualname__,
+                event.type,
+                exc_info=True,
+            )
 
 
 # Global singleton

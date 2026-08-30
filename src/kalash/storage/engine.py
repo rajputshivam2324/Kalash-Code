@@ -5,7 +5,9 @@ All writes serialize through one queue. Reads go wide via WAL.
 
 from __future__ import annotations
 
+import atexit
 import asyncio
+import threading
 import sqlite3
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
@@ -58,10 +60,30 @@ class StorageEngine:
                 conn.execute("ROLLBACK")
                 raise
 
+    # Thread-level lock for synchronous callers (session manager, scheduler)
+    # that cannot await the async write lock.
+    _sync_lock: threading.Lock = threading.Lock()
+
     async def execute_write(self, sql: str, params: tuple[Any, ...] = ()) -> None:
         """Execute a single write statement."""
         async with self.write() as conn:
             conn.execute(sql, params)
+
+    def execute_write_sync(self, sql: str, params: tuple[Any, ...] = ()) -> None:
+        """Execute a single write statement synchronously with lock (A-1).
+
+        Safe to call from non-async code (SessionManager, SchedulerManager).
+        Uses a threading.Lock so it serialises even across threads.
+        """
+        with self._sync_lock:
+            conn = self._get_connection()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.execute(sql, params)
+                conn.execute("COMMIT")
+            except Exception:
+                conn.execute("ROLLBACK")
+                raise
 
     async def execute_many(self, sql: str, params_list: list[tuple[Any, ...]]) -> None:
         """Execute many write statements in a single transaction."""
@@ -92,6 +114,17 @@ class StorageEngine:
 
 # Global engine singleton
 _engine: StorageEngine | None = None
+
+
+def _close_global_engine() -> None:
+    """atexit handler — checkpoint WAL and release the connection (R-5)."""
+    global _engine
+    if _engine is not None:
+        _engine.close()
+        _engine = None
+
+
+atexit.register(_close_global_engine)
 
 
 def get_engine() -> StorageEngine:

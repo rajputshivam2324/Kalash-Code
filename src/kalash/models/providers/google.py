@@ -263,7 +263,8 @@ class GeminiProvider:
         max_tokens: int | None = None,
         temperature: float | None = None,
         stop_sequences: list[str] | None = None,
-    ) -> tuple[Any, Any]:
+    ) -> Any:
+        """Build a GenerateContentConfig for a Gemini request."""
         from google.genai import types
         
         system_instruction = None

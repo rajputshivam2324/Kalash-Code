@@ -16,12 +16,16 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Sequence
 
-import structlog
+try:
+    import structlog
+    logger = structlog.get_logger()
+except ImportError:
+    import logging
+    logger = logging.getLogger(__name__)
 
 from kalash.core.budget import estimate_tokens
 from kalash.memory.protocol import MemoryHit, MemoryKind, Trust
 
-logger = structlog.get_logger()
 
 
 # ---------------------------------------------------------------------------

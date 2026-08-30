@@ -8,14 +8,17 @@ from pathlib import Path
 
 from kalash.mcp.client import MCPServerConfig
 from kalash.mcp.manager import MCPManager
-from kalash.mcp.registry import MCPRegistry
+from kalash.mcp.registry import MCPRegistry, MCPServerEntry
 from kalash.mcp.tools import MCPToolAdapter
 from kalash.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
+# Prevent fire-and-forget tasks from being garbage collected before completion.
+_background_tasks: set[asyncio.Task[MCPManager | None]] = set()
 
-def _entry_to_config(entry: object) -> MCPServerConfig:
+
+def _entry_to_config(entry: MCPServerEntry) -> MCPServerConfig:
     registry = MCPRegistry()
     return registry._to_config(entry)  # noqa: SLF001 — shared conversion logic
 
@@ -69,8 +72,10 @@ def wire_mcp_tools_sync(
     except RuntimeError:
         return asyncio.run(wire_mcp_tools(registry, cwd=cwd))
 
-    # Inside a running loop: schedule wiring; caller should also await
-    # wire_agent_tools() before the first turn when MCP tools are required.
-    loop.create_task(wire_mcp_tools(registry, cwd=cwd))
+    # Inside a running loop: schedule wiring and keep a strong reference so
+    # the task is not garbage collected before completion (S-6).
+    task = loop.create_task(wire_mcp_tools(registry, cwd=cwd))
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
     logger.debug("scheduled async MCP wiring inside running event loop")
     return None
