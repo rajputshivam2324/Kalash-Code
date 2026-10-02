@@ -1,18 +1,28 @@
-"""CLI-facing configuration manager.
-
-Wraps :mod:`kalash.core.config` layered resolution with get/set/show/edit for
-the ``kalash config`` command group.
+"""
+This is being done by this file .  Simply in CLI app if i changes something , like i switch model to xyz , it changes it into the main config file.
+User action
+    ↓
+"set model.primary to gpt-5.6"
+    ↓
+ConfigManager
+    ↓
+opens project settings
+    ↓
+changes model.primary
+    ↓
+saves settings
+    ↓
+Kalash later reads the new configuration
 """
 
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 from typing import Any
 
 from kalash.core.config import load_config
-from kalash.core.paths import kalash_home, settings_path
+from kalash.core.paths import settings_path
 
 
 class ConfigManager:
@@ -29,7 +39,8 @@ class ConfigManager:
         if not path.exists():
             return {}
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
         except (json.JSONDecodeError, OSError):
             return {}
 

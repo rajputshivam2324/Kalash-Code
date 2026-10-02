@@ -23,22 +23,23 @@ from typing import Any
 
 from kalash.core.paths import kalash_home
 
-
 # Security-relevant keys that only come from user scope
-SECURITY_KEYS = frozenset({
-    "permissions.sandbox",
-    "permissions.approval",
-    "permissions.network",
-    "network",
-    "network.enabled",
-    "network.allowed_hosts",
-    "network.allow_private",
-    "memory.egress",
-    "memory.egress.mode",
-    "memory.egress.artifacts",
-    "capabilities",
-    "sandbox.protected_paths",
-})
+SECURITY_KEYS = frozenset(
+    {
+        "permissions.sandbox",
+        "permissions.approval",
+        "permissions.network",
+        "network",
+        "network.enabled",
+        "network.allowed_hosts",
+        "network.allow_private",
+        "memory.egress",
+        "memory.egress.mode",
+        "memory.egress.artifacts",
+        "capabilities",
+        "sandbox.protected_paths",
+    }
+)
 
 
 @dataclass
@@ -58,7 +59,7 @@ class MemoryConfig:
     enabled: bool = True
     primary: str = "local"
     providers: list[str] = field(default_factory=lambda: ["local"])
-    read_policy: str = "fanout_merge"
+    read_policy: str = "primary_only"
     write_policy: str = "primary"
     recall_budget: float = 0.08
     provider_configs: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -83,7 +84,6 @@ class BudgetConfig:
     max_turns: int = 100
     max_tool_calls: int = 500
     max_spawn_depth: int = 3
-    max_concurrent_agents: int = 8
 
 
 @dataclass
@@ -98,7 +98,9 @@ class KalashConfig:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
-def load_config(project_dir: Path | None = None, overrides: dict[str, Any] | None = None) -> KalashConfig:
+def load_config(
+    project_dir: Path | None = None, overrides: dict[str, Any] | None = None
+) -> KalashConfig:
     """Load and merge configuration from all sources."""
     merged: dict[str, Any] = {}
 
@@ -140,7 +142,8 @@ def load_config(project_dir: Path | None = None, overrides: dict[str, Any] | Non
 def _load_json(path: Path) -> dict[str, Any]:
     """Load a JSON file, returning empty dict on error."""
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
     except (json.JSONDecodeError, OSError):
         return {}
 
@@ -163,7 +166,8 @@ def _filter_security_keys(data: dict[str, Any], source: str) -> None:
         if key in SECURITY_KEYS:
             _logger.warning(
                 "config_scope_ignored: key=%s source=%s reason=Security keys only from user scope",
-                key, source,
+                key,
+                source,
             )
             _remove_nested(data, key.split("."))
 
@@ -193,7 +197,7 @@ def _apply_env(data: dict[str, Any]) -> None:
     for key, value in os.environ.items():
         if key.startswith(prefix) and key != "KALASH_HOME":
             # KALASH_MODEL_PRIMARY -> model.primary
-            config_key = key[len(prefix):].lower().replace("__", ".")
+            config_key = key[len(prefix) :].lower().replace("__", ".")
             parts = config_key.split(".")
             target = data
             for part in parts[:-1]:
@@ -246,7 +250,7 @@ def _build_config(data: dict[str, Any], project_dir: Path) -> KalashConfig:
         enabled=memory_data.get("enabled", True),
         primary=memory_data.get("primary", "local"),
         providers=memory_data.get("providers", ["local"]),
-        read_policy=memory_data.get("read_policy", "fanout_merge"),
+        read_policy=memory_data.get("read_policy", "primary_only"),
         write_policy=memory_data.get("write_policy", "primary"),
         recall_budget=memory_data.get("recall_budget", 0.08),
         provider_configs=memory_data.get("provider_configs", {}),
@@ -265,7 +269,6 @@ def _build_config(data: dict[str, Any], project_dir: Path) -> KalashConfig:
         max_turns=budget_data.get("max_turns", 100),
         max_tool_calls=budget_data.get("max_tool_calls", 500),
         max_spawn_depth=budget_data.get("max_spawn_depth", 3),
-        max_concurrent_agents=budget_data.get("max_concurrent_agents", 8),
     )
 
     return KalashConfig(

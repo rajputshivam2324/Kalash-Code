@@ -9,14 +9,9 @@ the fix, proving the fix is real and preventing silent reversion.
 
 from __future__ import annotations
 
-import json
-import os
-import re
-
 import pytest
 
 from kalash.runtime.scratchpad import reset_cache
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -80,9 +75,7 @@ class TestC2PickerSetItems:
         from kalash.tui.picker import Picker
 
         # Confirm the method doesn't exist (it shouldn't)
-        assert not hasattr(Picker, "set_items"), (
-            "If set_items was added, update the fix to use it"
-        )
+        assert not hasattr(Picker, "set_items"), "If set_items was added, update the fix to use it"
 
     def test_picker_filter_works(self):
         from kalash.tui.picker import Picker, PickerItem, PickerMode
@@ -109,6 +102,7 @@ class TestC3AgentTyping:
 
     def test_agent_type_annotation(self):
         import inspect
+
         from kalash.tui.app import KalashApp
 
         hints = {}
@@ -131,9 +125,10 @@ class TestC5MCPEntryTyping:
 
     def test_entry_parameter_is_typed(self):
         import inspect
-        from kalash.mcp.load import _entry_to_config
 
-        sig = inspect.signature(_entry_to_config)
+        from kalash.mcp.registry import MCPRegistry
+
+        sig = inspect.signature(MCPRegistry._to_config)
         param = sig.parameters["entry"]
         assert "MCPServerEntry" in str(param.annotation), (
             f"_entry_to_config parameter should be MCPServerEntry, got {param.annotation}"
@@ -151,7 +146,6 @@ class TestC6ModelIdNone:
     def test_resolved_model_is_always_str(self, workspace, monkeypatch):
         """Even when everything returns None, resolved_model must be str."""
         from kalash.models.normalize import (
-            MessageStart,
             MessageStop,
             StopReason,
         )
@@ -232,21 +226,23 @@ class TestS3FallbackNone:
 # ---------------------------------------------------------------------------
 
 
-class TestS6FireAndForgetTask:
-    """wire_mcp_tools_sync created tasks that could be garbage collected."""
+class TestMCPSetupLifecycle:
+    async def test_setup_is_awaited_once(self, workspace, monkeypatch):
+        from unittest.mock import AsyncMock
 
-    def test_background_tasks_set_exists(self):
-        from kalash.mcp import load
+        from kalash.runtime.agent import build_agent
+        from tests.unit.test_wiring import FakeProvider, FakeResolution
 
-        assert hasattr(load, "_background_tasks"), (
-            "Task references must be stored to prevent GC"
+        monkeypatch.setattr(
+            "kalash.models.resolve.build_provider", lambda *a: FakeResolution(FakeProvider([]))
         )
-        assert isinstance(load._background_tasks, set)
-
-
-# ---------------------------------------------------------------------------
-# S-7: Global socket timeout mutation
-# ---------------------------------------------------------------------------
+        wire = AsyncMock(return_value=None)
+        monkeypatch.setattr("kalash.mcp.load.wire_mcp_tools", wire)
+        agent, reason = build_agent(cwd=workspace, persist=False)
+        assert agent is not None, reason
+        await agent.prepare()
+        await agent.prepare()
+        wire.assert_awaited_once()
 
 
 class TestS7SocketTimeout:
@@ -260,9 +256,7 @@ class TestS7SocketTimeout:
 
         _host_can_resolve()
         after = socket.getdefaulttimeout()
-        assert after == original, (
-            f"socket.setdefaulttimeout was mutated: {original} → {after}"
-        )
+        assert after == original, f"socket.setdefaulttimeout was mutated: {original} → {after}"
 
 
 # ---------------------------------------------------------------------------
@@ -330,13 +324,14 @@ class TestS9CwdAllowed:
     """_cwd_allowed should resolve both cwd and roots."""
 
     def test_cwd_allowed_resolves_path(self, workspace):
-        from pathlib import Path
 
         from kalash.tools.base import ToolContext
         from kalash.tools.shell import _cwd_allowed
 
         ctx = ToolContext(
-            session_id="s", run_id="r", cwd=workspace,
+            session_id="s",
+            run_id="r",
+            cwd=workspace,
             writable_roots=(workspace,),
         )
         subdir = workspace / "sub"
@@ -344,7 +339,6 @@ class TestS9CwdAllowed:
         assert _cwd_allowed(subdir, ctx) is True
 
     def test_cwd_outside_roots_rejected(self, workspace, tmp_path):
-        from pathlib import Path
 
         from kalash.tools.base import ToolContext
         from kalash.tools.shell import _cwd_allowed
@@ -352,7 +346,9 @@ class TestS9CwdAllowed:
         outside = tmp_path / "other"
         outside.mkdir()
         ctx = ToolContext(
-            session_id="s", run_id="r", cwd=workspace,
+            session_id="s",
+            run_id="r",
+            cwd=workspace,
             writable_roots=(workspace,),
         )
         assert _cwd_allowed(outside, ctx) is False
@@ -368,10 +364,9 @@ class TestA5StructlogFallback:
 
     @pytest.mark.asyncio
     async def test_handler_error_does_not_raise(self):
-        from kalash.core.events import EventBus, Event, EventType
+        from kalash.core.events import Event, EventBus, EventType
 
         bus = EventBus()
-        errors: list[str] = []
 
         async def exploding_handler(event: Event) -> None:
             raise RuntimeError("boom")
@@ -379,11 +374,13 @@ class TestA5StructlogFallback:
         bus.on(EventType.TURN_START, exploding_handler)
 
         # This must not raise — it logs and swallows the exception
-        await bus.emit(Event(
-            type=EventType.TURN_START,
-            session_id="test",
-            data={},
-        ))
+        await bus.emit(
+            Event(
+                type=EventType.TURN_START,
+                session_id="test",
+                data={},
+            )
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -405,8 +402,8 @@ class TestProviderKeyPersistence:
         assert get_credential("groq") == "gsk-test-key-456"
 
     def test_credential_for_finds_saved_key(self, isolated_store):
-        from kalash.tui.auth_store import save_credential
         from kalash.models.resolve import credential_for
+        from kalash.tui.auth_store import save_credential
 
         save_credential("openrouter", "sk-or-saved")
         assert credential_for("openrouter") == "sk-or-saved"
@@ -428,10 +425,13 @@ class TestSessionSerialization:
 
     def test_tool_use_and_result_survive_roundtrip(self):
         from kalash.models.normalize import (
-            Message, Role, TextBlock, ToolUseBlock, ToolResultBlock,
+            TextBlock,
+            ToolResultBlock,
+            ToolUseBlock,
         )
         from kalash.runtime.serialize import (
-            serialize_blocks, deserialize_blocks, rehydrate_messages,
+            rehydrate_messages,
+            serialize_blocks,
         )
 
         assistant_blocks = [
@@ -453,17 +453,17 @@ class TestSessionSerialization:
 
         assert len(messages) >= 1
         # Check tool_use block survived
-        has_tool_use = any(
-            isinstance(b, ToolUseBlock) for m in messages for b in m.content
-        )
+        has_tool_use = any(isinstance(b, ToolUseBlock) for m in messages for b in m.content)
         assert has_tool_use, "ToolUseBlock must survive serialization"
 
-    def test_dangling_tool_calls_are_dropped(self):
+    def test_dangling_tool_calls_retain_intent(self):
         from kalash.models.normalize import (
-            Message, Role, TextBlock, ToolUseBlock,
+            TextBlock,
+            ToolUseBlock,
         )
         from kalash.runtime.serialize import (
-            serialize_blocks, rehydrate_messages,
+            rehydrate_messages,
+            serialize_blocks,
         )
 
         # An assistant turn with a tool_use that has no matching result
@@ -474,12 +474,12 @@ class TestSessionSerialization:
         rows = [{"role": "assistant", "content": serialize_blocks(blocks)}]
         messages = rehydrate_messages(rows)
 
-        # The orphan tool_use must be dropped to avoid provider rejection
-        for msg in messages:
-            for block in msg.content:
-                assert not isinstance(block, ToolUseBlock), (
-                    "Dangling ToolUseBlock should have been dropped"
-                )
+        from kalash.models.normalize import ToolResultBlock
+
+        assert isinstance(messages[0].content[-1], ToolUseBlock)
+        result = messages[1].content[0]
+        assert isinstance(result, ToolResultBlock)
+        assert result.tool_use_id == "tu_orphan" and result.is_error
 
 
 # ---------------------------------------------------------------------------
@@ -555,13 +555,13 @@ class TestAuthStoreIntegrity:
     """Credentials must survive save/load cycle and be encrypted at rest."""
 
     def test_roundtrip_preserves_key(self, isolated_store):
-        from kalash.tui.auth_store import save_credential, get_credential
+        from kalash.tui.auth_store import get_credential, save_credential
 
         save_credential("test-provider", "sk-secret-12345")
         assert get_credential("test-provider") == "sk-secret-12345"
 
     def test_key_not_plaintext_on_disk(self, isolated_store):
-        from kalash.tui.auth_store import save_credential, _auth_path
+        from kalash.tui.auth_store import _auth_path, save_credential
 
         save_credential("test-provider", "sk-secret-12345")
         raw = _auth_path().read_text()
@@ -569,7 +569,9 @@ class TestAuthStoreIntegrity:
 
     def test_remove_credential(self, isolated_store):
         from kalash.tui.auth_store import (
-            save_credential, get_credential, remove_credential,
+            get_credential,
+            remove_credential,
+            save_credential,
         )
 
         save_credential("doomed", "key")
@@ -578,7 +580,7 @@ class TestAuthStoreIntegrity:
         assert get_credential("doomed") is None
 
     def test_multiple_providers_coexist(self, isolated_store):
-        from kalash.tui.auth_store import save_credential, get_credential
+        from kalash.tui.auth_store import get_credential, save_credential
 
         save_credential("provider-a", "key-a")
         save_credential("provider-b", "key-b")
@@ -590,7 +592,8 @@ class TestAuthStoreIntegrity:
 
     def test_active_provider_persists(self, isolated_store):
         from kalash.tui.auth_store import (
-            set_active_provider, get_active_provider,
+            get_active_provider,
+            set_active_provider,
         )
 
         set_active_provider("groq", "model-x")
@@ -609,8 +612,13 @@ class TestAgentConversationContinuity:
     @pytest.mark.asyncio
     async def test_second_turn_sees_first(self, workspace, monkeypatch):
         from kalash.models.normalize import (
-            BlockDelta, BlockStart, BlockStop,
-            MessageStart, MessageStop, StopReason, UsageUpdate,
+            BlockDelta,
+            BlockStart,
+            BlockStop,
+            MessageStart,
+            MessageStop,
+            StopReason,
+            UsageUpdate,
         )
 
         class FakeProvider:

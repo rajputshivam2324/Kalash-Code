@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -16,7 +16,7 @@ console = Console()
 def add(
     content: Annotated[str, typer.Argument(help="Memory content to store")],
     tags: Annotated[
-        Optional[list[str]],
+        list[str] | None,
         typer.Option("--tag", "-t", help="Tags for the memory"),
     ] = None,
     scope: Annotated[
@@ -35,11 +35,9 @@ def add(
 @memory_app.command("search")
 def search(
     query: Annotated[str, typer.Argument(help="Search query")],
-    limit: Annotated[
-        int, typer.Option("--limit", "-n", help="Max results")
-    ] = 10,
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Max results")] = 10,
     scope: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--scope", "-s", help="Filter by scope"),
     ] = None,
 ) -> None:
@@ -68,15 +66,13 @@ def search(
 
 @memory_app.command("ls")
 def ls(
-    limit: Annotated[
-        int, typer.Option("--limit", "-n", help="Max entries to show")
-    ] = 20,
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Max entries to show")] = 20,
     scope: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--scope", "-s", help="Filter by scope"),
     ] = None,
     tag: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--tag", "-t", help="Filter by tag"),
     ] = None,
 ) -> None:
@@ -108,9 +104,7 @@ def ls(
 @memory_app.command("forget")
 def forget(
     memory_id: Annotated[str, typer.Argument(help="Memory ID to delete")],
-    force: Annotated[
-        bool, typer.Option("--force", "-f", help="Skip confirmation")
-    ] = False,
+    force: Annotated[bool, typer.Option("--force", "-f", help="Skip confirmation")] = False,
 ) -> None:
     """Delete a memory entry."""
     from kalash.memory.manager import MemoryManager
@@ -133,7 +127,7 @@ def forget(
 @memory_app.command("export")
 def export(
     output: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--output", "-o", help="Output file path (defaults to stdout)"),
     ] = None,
     format: Annotated[
@@ -181,59 +175,6 @@ def import_(
     manager = MemoryManager()
     count = manager.import_from_file(path, format=format, merge=merge)
     console.print(f"[green]Imported {count} memories.[/green]")
-
-
-@memory_app.command("migrate")
-def migrate(
-    source: Annotated[str, typer.Argument(help="Source provider name")],
-    target: Annotated[str, typer.Argument(help="Target provider name")],
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="Preview without applying changes")
-    ] = False,
-) -> None:
-    """Migrate memories between storage providers."""
-    from kalash.memory.manager import MemoryManager
-
-    manager = MemoryManager()
-    result = manager.migrate(source=source, target=target, dry_run=dry_run)
-
-    if dry_run:
-        console.print(f"[yellow]Dry run:[/yellow] Would migrate {result.count} entries.")
-    else:
-        console.print(
-            f"[green]Migrated {result.count} entries from {source} to {target}.[/green]"
-        )
-
-
-@memory_app.command("audit")
-def audit(
-    limit: Annotated[
-        int, typer.Option("--limit", "-n", help="Max entries to show")
-    ] = 50,
-) -> None:
-    """Show memory egress audit log."""
-    from kalash.memory.manager import MemoryManager
-
-    manager = MemoryManager()
-    entries = manager.get_audit_log(limit=limit)
-
-    table = Table(title="Memory Egress Audit Log")
-    table.add_column("Timestamp", style="green")
-    table.add_column("Operation", style="cyan")
-    table.add_column("Provider", style="yellow")
-    table.add_column("Count", justify="right")
-    table.add_column("Destination")
-
-    for e in entries:
-        table.add_row(
-            e.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-            e.operation,
-            e.provider,
-            str(e.count),
-            e.destination or "—",
-        )
-
-    console.print(table)
 
 
 @memory_app.command("doctor")

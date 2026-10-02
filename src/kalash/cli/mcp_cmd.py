@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -10,6 +10,21 @@ from rich.table import Table
 
 mcp_app = typer.Typer(help="Manage MCP servers")
 console = Console()
+
+
+@mcp_app.command("trust")
+def trust() -> None:
+    """Authorize the current project MCP configuration after reviewing it."""
+    from pathlib import Path
+
+    from kalash.core.trust import trust_file
+
+    path = Path.cwd() / ".kalash" / "settings" / "mcp.json"
+    if not path.is_file():
+        console.print("[red]No project MCP configuration found.[/red]")
+        raise typer.Exit(code=1)
+    digest = trust_file(path)
+    console.print(f"Trusted MCP configuration: {digest[:16]}")
 
 
 @mcp_app.command("add")
@@ -21,7 +36,7 @@ def add(
         typer.Option("--transport", "-t", help="Transport type: stdio, sse, streamable-http"),
     ] = "stdio",
     env: Annotated[
-        Optional[list[str]],
+        list[str] | None,
         typer.Option("--env", "-e", help="Environment variables (KEY=VALUE)"),
     ] = None,
     scope: Annotated[
@@ -39,9 +54,7 @@ def add(
             env_dict[key] = value
 
     registry = MCPRegistry()
-    server = registry.add_server(
-        name=name, url=url, transport=transport, env=env_dict, scope=scope
-    )
+    server = registry.add_server(name=name, url=url, transport=transport, env=env_dict, scope=scope)
     console.print(f"[green]MCP server added:[/green] {server.name}")
     console.print(f"  Transport: {server.transport}")
     console.print(f"  URL: {server.url}")
@@ -50,12 +63,10 @@ def add(
 @mcp_app.command("ls")
 def ls(
     scope: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--scope", "-s", help="Filter by scope: global, project"),
     ] = None,
-    verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Show extra details")
-    ] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show extra details")] = False,
 ) -> None:
     """List configured MCP servers."""
     from kalash.mcp.registry import MCPRegistry
@@ -88,9 +99,7 @@ def ls(
 @mcp_app.command("test")
 def test(
     name: Annotated[str, typer.Argument(help="Server name to test")],
-    timeout: Annotated[
-        int, typer.Option("--timeout", help="Connection timeout in seconds")
-    ] = 10,
+    timeout: Annotated[int, typer.Option("--timeout", help="Connection timeout in seconds")] = 10,
 ) -> None:
     """Test connectivity to an MCP server."""
     from kalash.mcp.registry import MCPRegistry
@@ -102,41 +111,13 @@ def test(
     result = registry.test_server(name, timeout=timeout)
 
     if result.success:
-        console.print(f"[green]✓ Connected successfully[/green]")
+        console.print("[green]✓ Connected successfully[/green]")
         console.print(f"  Protocol version: {result.protocol_version}")
         console.print(f"  Tools available: {result.tool_count}")
         console.print(f"  Latency: {result.latency_ms:.0f}ms")
     else:
         console.print(f"[red]✗ Connection failed:[/red] {result.error}")
         raise typer.Exit(code=1)
-
-
-@mcp_app.command("serve")
-def serve(
-    host: Annotated[
-        str, typer.Option("--host", "-h", help="Host to bind to")
-    ] = "127.0.0.1",
-    port: Annotated[
-        int, typer.Option("--port", "-p", help="Port to bind to")
-    ] = 3100,
-    transport: Annotated[
-        str,
-        typer.Option("--transport", "-t", help="Transport: stdio, sse, streamable-http"),
-    ] = "stdio",
-) -> None:
-    """Start Kalash as an MCP server.
-
-    Exposes Kalash tools and capabilities over MCP protocol.
-    """
-    from kalash.mcp.server import start_mcp_server
-
-    console.print(f"Starting Kalash MCP server...")
-    console.print(f"  Transport: {transport}")
-
-    if transport != "stdio":
-        console.print(f"  Listening: {host}:{port}")
-
-    start_mcp_server(host=host, port=port, transport=transport)
 
 
 @mcp_app.command("auth")
@@ -163,7 +144,7 @@ def auth(
         result = registry.oauth_flow(name)
         if result.success:
             console.print("[green]✓ Authentication successful[/green]")
-            console.print(f"  Token stored securely.")
+            console.print("  Token stored securely.")
         else:
             console.print(f"[red]✗ Authentication failed:[/red] {result.error}")
             raise typer.Exit(code=1)

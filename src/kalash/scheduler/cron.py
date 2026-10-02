@@ -7,9 +7,8 @@ Uses zoneinfo for timezone handling.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Sequence
 from zoneinfo import ZoneInfo
 
 
@@ -30,7 +29,7 @@ class CronField:
     raw: str  # original expression fragment
 
     @classmethod
-    def parse(cls, expr: str, min_val: int, max_val: int) -> "CronField":
+    def parse(cls, expr: str, min_val: int, max_val: int) -> CronField:
         """Parse a cron field expression.
 
         Supports: *, N, N-M, N/step, */step, N-M/step, comma-separated.
@@ -84,7 +83,7 @@ class CronExpression:
     raw: str = ""
 
     @classmethod
-    def parse(cls, expression: str, tz: str | ZoneInfo = "UTC") -> "CronExpression":
+    def parse(cls, expression: str, tz: str | ZoneInfo = "UTC") -> CronExpression:
         """Parse a 5-field cron expression.
 
         Args:
@@ -128,7 +127,7 @@ class CronExpression:
         Computed in local wall time (DST-aware), returned as UTC.
         """
         if after is None:
-            after = datetime.now(timezone.utc)
+            after = datetime.now(UTC)
 
         # Work in local time for wall-clock correctness
         local = after.astimezone(self.tz)
@@ -140,12 +139,10 @@ class CronExpression:
         for _ in range(max_iterations):
             if self._matches_local(candidate):
                 # Convert back to UTC for storage (I-038)
-                return candidate.astimezone(timezone.utc)
+                return candidate.astimezone(UTC)
             candidate += timedelta(minutes=1)
 
-        raise ValueError(
-            f"Could not find next fire time for '{self.raw}' within search window"
-        )
+        raise ValueError(f"Could not find next fire time for '{self.raw}' within search window")
 
     def _matches_local(self, local_dt: datetime) -> bool:
         """Check if a local datetime matches (avoiding repeated timezone conversion)."""
@@ -172,7 +169,7 @@ class IntervalSpec:
 
     def next_fire(self, last_fire: datetime | None = None) -> datetime:
         """Compute next fire time based on interval from last fire."""
-        base = last_fire or self.start_after or datetime.now(timezone.utc)
+        base = last_fire or self.start_after or datetime.now(UTC)
         return base + timedelta(seconds=self.seconds)
 
 
@@ -184,7 +181,7 @@ class OnceSpec:
 
     def next_fire(self, after: datetime | None = None) -> datetime | None:
         """Returns fire_at if it's still in the future, else None."""
-        now = after or datetime.now(timezone.utc)
+        now = after or datetime.now(UTC)
         if self.fire_at > now:
             return self.fire_at
         return None

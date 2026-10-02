@@ -24,7 +24,6 @@ from textual.widgets import Static
 import kalash.tui.messages as messages_module
 import kalash.tui.picker as picker_module
 
-
 # Overriding these is the documented way to build a widget.
 INTENTIONAL_OVERRIDES = frozenset(
     {
@@ -55,9 +54,7 @@ def _widget_classes():
 
 def _own_callables(cls: type) -> set[str]:
     return {
-        name
-        for name, value in vars(cls).items()
-        if callable(value) and not name.startswith("__")
+        name for name, value in vars(cls).items() if callable(value) and not name.startswith("__")
     }
 
 
@@ -70,9 +67,7 @@ def _is_allowed(name: str) -> bool:
 @pytest.mark.parametrize("class_name,cls", list(_widget_classes()))
 def test_no_framework_method_shadowing(class_name: str, cls: type) -> None:
     collisions = sorted(
-        name
-        for name in _own_callables(cls)
-        if name in FRAMEWORK_NAMES and not _is_allowed(name)
+        name for name in _own_callables(cls) if name in FRAMEWORK_NAMES and not _is_allowed(name)
     )
     assert not collisions, (
         f"{class_name} defines {collisions}, which already exist on Textual's "
@@ -300,9 +295,7 @@ def test_no_framework_name_is_shadowed(label: str, cls: type) -> None:
     surface = _framework_surface()
     candidates = (_declared_names(cls) | _init_assigned_names(cls)) - ALLOWED_EXACT
     collisions = sorted(
-        name
-        for name in candidates
-        if name in surface and not name.startswith(ALLOWED_PREFIXES)
+        name for name in candidates if name in surface and not name.startswith(ALLOWED_PREFIXES)
     )
     assert not collisions, (
         f"{label} defines/assigns {collisions}, which Textual already uses. "

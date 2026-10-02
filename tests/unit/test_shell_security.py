@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
-from kalash.tools.shell import _classify_command, _DANGEROUS_PATTERNS
+from kalash.tools.shell import _DANGEROUS_PATTERNS, _classify_command
 
 
 class TestClassifyCommand:

@@ -22,7 +22,6 @@ from kalash.tools.base import (
     TruncationInfo,
 )
 
-
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -166,7 +165,7 @@ class SearchTool:
                 process.communicate(),
                 timeout=_SEARCH_TIMEOUT_S,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             process.kill()
             await process.wait()
             return ToolEnvelope.fail(

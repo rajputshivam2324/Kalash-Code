@@ -109,6 +109,7 @@ def discover_hooks(cwd: Path | None = None) -> list[HookConfig]:
 
             for raw in entries:
                 if isinstance(raw, dict) and (config := _parse_hook(raw, path)):
+                    config.source_path = str(path.resolve())
                     configs.append(config)
 
     return configs
@@ -120,7 +121,17 @@ def build_hook_runner(cwd: Path | None = None) -> Any | None:
     Returning None when nothing is configured keeps the hot path free of a
     dispatch call that would always be a no-op.
     """
-    configs = discover_hooks(cwd)
+    from kalash.core.trust import is_trusted
+
+    configs = []
+    for config in discover_hooks(cwd):
+        if is_trusted(Path(config.source_path)):
+            configs.append(config)
+        else:
+            logger.warning(
+                "Skipping untrusted hook config %s; authorize with kalash hooks trust",
+                config.source_path,
+            )
     if not configs:
         return None
 

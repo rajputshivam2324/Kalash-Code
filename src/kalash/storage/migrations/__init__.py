@@ -6,7 +6,7 @@ Each migration is a numbered SQL file. No down-migrations.
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -14,7 +14,10 @@ if TYPE_CHECKING:
 
 # Migration SQL statements in order
 MIGRATIONS: list[tuple[int, str, str]] = [
-    (1, "0001_init", _MIGRATION_0001 := """
+    (
+        1,
+        "0001_init",
+        _MIGRATION_0001 := """
 -- Schema migrations tracking
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version     INTEGER PRIMARY KEY,
@@ -376,8 +379,12 @@ CREATE TABLE IF NOT EXISTS audit_log (
     prev_hash   TEXT,
     hash        TEXT NOT NULL
 );
-"""),
-    (2, "0002_kalash_grants", """
+""",
+    ),
+    (
+        2,
+        "0002_kalash_grants",
+        """
 -- Durable permission grants (aligned with permissions/grants.py)
 CREATE TABLE IF NOT EXISTS kalash_grants (
     id              TEXT PRIMARY KEY,
@@ -394,13 +401,13 @@ CREATE TABLE IF NOT EXISTS kalash_grants (
 );
 CREATE INDEX IF NOT EXISTS idx_kalash_grants_session
     ON kalash_grants(session_id) WHERE session_id IS NOT NULL;
-"""),
+""",
+    ),
 ]
 
 
-async def run_migrations(engine: "StorageEngine") -> None:
+async def run_migrations(engine: StorageEngine) -> None:
     """Run all pending migrations."""
-    from kalash.core.ids import generate_id
 
     # Ensure migrations table exists (use raw connection for setup)
     conn = engine._get_connection()
@@ -423,7 +430,7 @@ async def run_migrations(engine: "StorageEngine") -> None:
             continue
 
         checksum = hashlib.sha256(sql.encode()).hexdigest()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         # executescript commits implicitly, so we use it outside our transaction wrapper
         conn.executescript(sql)

@@ -61,7 +61,10 @@ class RedactionResult:
 _SECRET_PATTERNS: list[tuple[re.Pattern[str], SecretKind]] = [
     (re.compile(r"AKIA[0-9A-Z]{16}"), SecretKind.AWS_ACCESS_KEY),
     (re.compile(r"ASIA[0-9A-Z]{16}"), SecretKind.AWS_ACCESS_KEY),
-    (re.compile(r"(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY)\s*[=:]\s*[A-Za-z0-9/+=]{40}"), SecretKind.AWS_SECRET_KEY),
+    (
+        re.compile(r"(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY)\s*[=:]\s*[A-Za-z0-9/+=]{40}"),
+        SecretKind.AWS_SECRET_KEY,
+    ),
     (re.compile(r"ghp_[A-Za-z0-9]{36,}"), SecretKind.GITHUB_PAT),
     (re.compile(r"gho_[A-Za-z0-9]{36,}"), SecretKind.GITHUB_TOKEN),
     (re.compile(r"github_pat_[A-Za-z0-9_]{22,}"), SecretKind.GITHUB_PAT),
@@ -72,8 +75,14 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], SecretKind]] = [
     (re.compile(r"rk_live_[A-Za-z0-9]{24,}"), SecretKind.STRIPE_KEY),
     (re.compile(r"AIza[A-Za-z0-9\-_]{35}"), SecretKind.GENERIC_TOKEN),
     (re.compile(r"eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+"), SecretKind.JWT),
-    (re.compile(r"-----BEGIN\s(?:RSA\s|EC\s|DSA\s|ENCRYPTED\s)?PRIVATE KEY-----"), SecretKind.PEM_PRIVATE_KEY),
-    (re.compile(r"(?:postgres|mysql|mongodb\+srv|redis)://[^\s]+:[^\s]+@[^\s]+"), SecretKind.DB_CONNECTION_STRING),
+    (
+        re.compile(r"-----BEGIN\s(?:RSA\s|EC\s|DSA\s|ENCRYPTED\s)?PRIVATE KEY-----"),
+        SecretKind.PEM_PRIVATE_KEY,
+    ),
+    (
+        re.compile(r"(?:postgres|mysql|mongodb\+srv|redis)://[^\s]+:[^\s]+@[^\s]+"),
+        SecretKind.DB_CONNECTION_STRING,
+    ),
 ]
 
 # Context patterns (variable assignment to secret-looking names)
@@ -141,12 +150,14 @@ def redact(text: str, profile: RedactionProfile = RedactionProfile.SECRETS) -> R
     for pattern, kind in _SECRET_PATTERNS:
         for match in pattern.finditer(result):
             marker = _make_marker(kind.value, match.group())
-            redactions.append({
-                "kind": kind.value,
-                "offset": match.start(),
-                "length": len(match.group()),
-            })
-            result = result[:match.start()] + marker + result[match.end():]
+            redactions.append(
+                {
+                    "kind": kind.value,
+                    "offset": match.start(),
+                    "length": len(match.group()),
+                }
+            )
+            result = result[: match.start()] + marker + result[match.end() :]
             # Re-scan from start after replacement (positions shifted)
             break  # Process one at a time to handle position shifts
 
@@ -155,10 +166,10 @@ def redact(text: str, profile: RedactionProfile = RedactionProfile.SECRETS) -> R
     while changed:
         changed = False
         for pattern, kind in _SECRET_PATTERNS:
-            match = pattern.search(result)
-            if match and not match.group().startswith("[REDACTED:"):
-                marker = _make_marker(kind.value, match.group())
-                result = result[:match.start()] + marker + result[match.end():]
+            candidate = pattern.search(result)
+            if candidate and not candidate.group().startswith("[REDACTED:"):
+                marker = _make_marker(kind.value, candidate.group())
+                result = result[: candidate.start()] + marker + result[candidate.end() :]
                 redactions.append({"kind": kind.value})
                 changed = True
                 break
@@ -166,19 +177,23 @@ def redact(text: str, profile: RedactionProfile = RedactionProfile.SECRETS) -> R
     # Context-based detection (entropy + context)
     for match in _CONTEXT_PATTERN.finditer(result):
         value = match.group(1)
-        if not value.startswith("[REDACTED:") and _shannon_entropy(value) > 3.5 and len(value) >= 12:
+        if (
+            not value.startswith("[REDACTED:")
+            and _shannon_entropy(value) > 3.5
+            and len(value) >= 12
+        ):
             marker = _make_marker("generic_secret", value)
             result = result.replace(value, marker, 1)
             redactions.append({"kind": "generic_secret"})
 
     # PII patterns (if profile includes PII)
     if profile in (RedactionProfile.SECRETS_PII, RedactionProfile.STRICT):
-        for pattern, kind in _PII_PATTERNS:
+        for pattern, pii_kind in _PII_PATTERNS:
             for match in pattern.finditer(result):
                 if not match.group().startswith("[REDACTED:"):
-                    marker = _make_marker(kind, match.group())
+                    marker = _make_marker(pii_kind, match.group())
                     result = result.replace(match.group(), marker, 1)
-                    redactions.append({"kind": kind})
+                    redactions.append({"kind": pii_kind})
 
     # STRICT: also redact paths, usernames, hostnames
     if profile == RedactionProfile.STRICT:

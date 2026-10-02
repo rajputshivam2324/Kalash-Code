@@ -27,7 +27,6 @@ from ..normalize import (
     ModelResponse,
     Role,
     StopReason,
-    StreamError,
     StreamEvent,
     TextBlock,
     ToolResultBlock,
@@ -53,14 +52,14 @@ _STOP_REASON_MAP: dict[str, StopReason] = {
 def _map_stop_reason(reason: Any) -> StopReason:
     if not reason:
         return StopReason.UNKNOWN
-    
+
     reason_str = str(reason).lower()
     if reason_str in _STOP_REASON_MAP:
         return _STOP_REASON_MAP[reason_str]
     # Check if reason is an enum like FinishReason.STOP
     if hasattr(reason, "name") and reason.name.lower() in _STOP_REASON_MAP:
         return _STOP_REASON_MAP[reason.name.lower()]
-        
+
     return StopReason.UNKNOWN
 
 
@@ -73,26 +72,27 @@ def _serialize_messages(
     messages: list[Message], *, system: str | None = None
 ) -> tuple[list[Any], Any]:
     """Convert normalized messages to Google Gemini format.
-    
+
     Returns (contents, system_instruction).
     """
     from google.genai import types
-    
+
     contents = []
-    
+
     system_instruction = None
     if system:
         system_instruction = types.Content(parts=[types.Part.from_text(text=system)])
 
     for msg in messages:
         if msg.role == Role.SYSTEM:
-            text = " ".join(
-                b.text for b in msg.content if isinstance(b, TextBlock)
-            )
+            text = " ".join(b.text for b in msg.content if isinstance(b, TextBlock))
             if not system_instruction:
                 system_instruction = types.Content(parts=[types.Part.from_text(text=text)])
             else:
-                system_instruction.parts.append(types.Part.from_text(text=text))
+                system_instruction.parts = [
+                    *(system_instruction.parts or []),
+                    types.Part.from_text(text=text),
+                ]
             continue
 
         parts = []
@@ -102,10 +102,12 @@ def _serialize_messages(
             elif isinstance(block, ToolUseBlock):
                 sig = getattr(block, "thought_signature", None)
                 if sig is not None:
-                    parts.append(types.Part(
-                        function_call=types.FunctionCall(name=block.name, args=block.input),
-                        thought_signature=sig,
-                    ))
+                    parts.append(
+                        types.Part(
+                            function_call=types.FunctionCall(name=block.name, args=block.input),
+                            thought_signature=sig,
+                        )
+                    )
                 else:
                     parts.append(types.Part.from_function_call(name=block.name, args=block.input))
             elif isinstance(block, ToolResultBlock):
@@ -116,7 +118,9 @@ def _serialize_messages(
                         content_dict = {"result": block.content}
                 else:
                     content_dict = {"result": str(block.content)}
-                parts.append(types.Part.from_function_response(name=block.tool_use_id, response=content_dict))
+                parts.append(
+                    types.Part.from_function_response(name=block.tool_use_id, response=content_dict)
+                )
             elif isinstance(block, ImageBlock):
                 if block.source_type == "url":
                     parts.append(types.Part.from_text(text=f"Image URL: {block.data}"))
@@ -125,17 +129,16 @@ def _serialize_messages(
 
         if not parts:
             continue
-            
+
         role = "user" if msg.role == Role.USER else "model"
         contents.append(types.Content(role=role, parts=parts))
 
     return contents, system_instruction
 
 
-_GEMINI_ALLOWED_SCHEMA_KEYS = frozenset({
-    "type", "format", "description", "nullable", "enum",
-    "properties", "required", "items"
-})
+_GEMINI_ALLOWED_SCHEMA_KEYS = frozenset(
+    {"type", "format", "description", "nullable", "enum", "properties", "required", "items"}
+)
 
 
 def _clean_gemini_schema_dict(d: dict[str, Any], defs: dict[str, Any]) -> dict[str, Any]:
@@ -152,7 +155,9 @@ def _clean_gemini_schema_dict(d: dict[str, Any], defs: dict[str, Any]) -> dict[s
             continue
         if k == "properties" and isinstance(v, dict):
             out["properties"] = {
-                prop_name: _clean_gemini_schema_dict(prop_val, defs) if isinstance(prop_val, dict) else prop_val
+                prop_name: _clean_gemini_schema_dict(prop_val, defs)
+                if isinstance(prop_val, dict)
+                else prop_val
                 for prop_name, prop_val in v.items()
             }
         elif k == "items" and isinstance(v, dict):
@@ -188,7 +193,7 @@ def _serialize_tools(tools: list[dict[str, Any]]) -> list[Any]:
         func_decl = types.FunctionDeclaration(
             name=tool["name"],
             description=tool.get("description", ""),
-            parameters=sanitized_schema,
+            parameters=types.Schema.model_validate(sanitized_schema),
         )
         function_declarations.append(func_decl)
 
@@ -266,18 +271,20 @@ class GeminiProvider:
     ) -> Any:
         """Build a GenerateContentConfig for a Gemini request."""
         from google.genai import types
-        
+
         system_instruction = None
         if system:
             system_instruction = types.Content(parts=[types.Part.from_text(text=system)])
-            
+
         config = types.GenerateContentConfig(
             max_output_tokens=max_tokens or self._default_max_tokens,
             temperature=temperature,
             stop_sequences=stop_sequences,
             system_instruction=system_instruction,
             tools=_serialize_tools(tools) if tools else None,
-            thinking_config=types.ThinkingConfig(thinking_budget=0) if hasattr(types, "ThinkingConfig") else None,
+            thinking_config=types.ThinkingConfig(thinking_budget=0)
+            if hasattr(types, "ThinkingConfig")
+            else None,
         )
         return config
 
@@ -312,7 +319,11 @@ class GeminiProvider:
         )
 
         blocks: list[ContentBlock] = []
-        if response.candidates and response.candidates[0].content and response.candidates[0].content.parts:
+        if (
+            response.candidates
+            and response.candidates[0].content
+            and response.candidates[0].content.parts
+        ):
             for part in response.candidates[0].content.parts:
                 if part.text:
                     blocks.append(TextBlock(text=part.text))
@@ -325,13 +336,15 @@ class GeminiProvider:
                             args = args.model_dump()
                     except Exception:
                         args = {"_raw": str(part.function_call.args)}
-                        
-                    blocks.append(ToolUseBlock(
-                        id=part.function_call.name,
-                        name=part.function_call.name,
-                        input=args or {},
-                        thought_signature=getattr(part, "thought_signature", None),
-                    ))
+
+                    blocks.append(
+                        ToolUseBlock(
+                            id=part.function_call.name,
+                            name=part.function_call.name,
+                            input=args or {},
+                            thought_signature=getattr(part, "thought_signature", None),
+                        )
+                    )
 
         stop_reason = StopReason.UNKNOWN
         if response.candidates and response.candidates[0].finish_reason:
@@ -340,8 +353,12 @@ class GeminiProvider:
                 stop_reason = StopReason.TOOL_USE
 
         usage = Usage(
-            input_tokens=response.usage_metadata.prompt_token_count if response.usage_metadata else 0,
-            output_tokens=response.usage_metadata.candidates_token_count if response.usage_metadata else 0,
+            input_tokens=response.usage_metadata.prompt_token_count
+            if response.usage_metadata
+            else 0,
+            output_tokens=response.usage_metadata.candidates_token_count
+            if response.usage_metadata
+            else 0,
             source="provider_reported",
             provider_raw={},
         )
@@ -398,9 +415,9 @@ class GeminiProvider:
 
             if not chunk.candidates:
                 continue
-                
+
             candidate = chunk.candidates[0]
-            
+
             if candidate.content and candidate.content.parts:
                 for part in candidate.content.parts:
                     if part.text:
@@ -413,7 +430,7 @@ class GeminiProvider:
                             yield BlockStop(index=current_block_index)
                             current_block_index += 1
                             text_started = False
-                            
+
                         yield BlockStart(
                             index=current_block_index,
                             block_type="tool_use",
@@ -421,7 +438,7 @@ class GeminiProvider:
                             tool_name=part.function_call.name,
                             thought_signature=getattr(part, "thought_signature", None),
                         )
-                        
+
                         args = part.function_call.args
                         args_json = "{}"
                         if isinstance(args, dict):
@@ -430,7 +447,7 @@ class GeminiProvider:
                             args_json = json.dumps(args.model_dump())
                         elif args:
                             args_json = json.dumps(args)
-                            
+
                         yield BlockDelta(
                             index=current_block_index,
                             delta=args_json,
@@ -442,13 +459,16 @@ class GeminiProvider:
                 if text_started:
                     yield BlockStop(index=current_block_index)
                     text_started = False
-                    
+
                 stop_reason = _map_stop_reason(candidate.finish_reason)
-                if candidate.content and candidate.content.parts and any(p.function_call for p in candidate.content.parts):
+                if (
+                    candidate.content
+                    and candidate.content.parts
+                    and any(p.function_call for p in candidate.content.parts)
+                ):
                     stop_reason = StopReason.TOOL_USE
-                    
+
                 yield MessageStop(stop_reason=stop_reason)
 
     async def close(self) -> None:
         """Close the HTTP client."""
-        pass

@@ -1,29 +1,4 @@
-"""The tool host — the seam between the model and the tool layer.
-
-This is the piece whose absence made every tool in the codebase unreachable. The
-tools were real and tested; the agent loop expected an interface
-(``execute``/``category``/``schemas``) that the concrete registry did not
-provide (``dispatch``/``list_schemas``), nothing populated a
-:class:`~kalash.tools.base.ToolContext`, and no code path ever called the
-permission policy. Five separate gaps, one missing object.
-
-The host owns four responsibilities:
-
-1. **Interface adaptation.** Presents the registry in the shape the loop needs,
-   and emits schemas as ``input_schema`` — the Anthropic-native key, which the
-   OpenAI provider also already reads, so one shape serves both.
-
-2. **Context construction.** Builds the ``ToolContext`` with populated
-   ``writable_roots`` and ``capabilities``. Without this the filesystem tools
-   fall back to their unrestricted branch.
-
-3. **The permission gate.** Classifies the call, evaluates policy, and prompts
-   when the answer is ASK. Nothing reaches a tool without passing through here.
-
-4. **Result deferral.** Large observations go to the scratchpad and come back as
-   a headline plus a ref, so a 40 KB build log costs the context window a line
-   instead of ten thousand tokens on every subsequent turn.
-"""
+"""Tool schemas, permission checks, execution context and bounded observations."""
 
 from __future__ import annotations
 
@@ -31,12 +6,15 @@ import asyncio
 import logging
 import shlex
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
+from kalash.core.config import KalashConfig
 from kalash.core.events import Event, EventBus, EventType
+from kalash.models.limits import supports_tools
 from kalash.permissions.classify import ToolRisk, classify_tool_call
 from kalash.permissions.policy import (
     Decision,
@@ -45,11 +23,11 @@ from kalash.permissions.policy import (
     RiskClass,
 )
 from kalash.permissions.prompt import ApprovalPrompt, ApprovalResponse, PromptContext
-from kalash.models.limits import TARGET_OUTPUT_TOKENS, input_budget, supports_tools
+from kalash.runtime.instructions import InstructionLoader
 from kalash.runtime.scratchpad import get_scratchpad
 from kalash.tools.base import SideEffect, ToolContext, ToolEnvelope
 from kalash.tools.registry import ToolRegistry
-from kalash.tools.schema import MINIMAL_TOOLS, STANDARD_TOOLS, select_profile, tool_schema
+from kalash.tools.schema import tool_schema
 
 logger = logging.getLogger(__name__)
 
@@ -62,12 +40,16 @@ class ToolCategory(StrEnum):
     EXEC = "exec"
 
 
+@dataclass(frozen=True, slots=True)
+class ToolExecutionResult:
+    content: str
+    is_error: bool = False
+
+
 class ToolHostProtocol(Protocol):
     """What the agent loop requires of a tool host."""
 
-    async def execute(
-        self, name: str, arguments: dict[str, Any], *, tool_use_id: str
-    ) -> str: ...
+    async def execute(self, name: str, arguments: dict[str, Any], *, tool_use_id: str) -> str: ...
 
     def category(self, name: str) -> ToolCategory: ...
 
@@ -90,43 +72,78 @@ DEFER_HEAD_LINES = 24
 # Capabilities granted per sandbox mode. Keys match what the tools declare.
 _MODE_CAPABILITIES: dict[str, frozenset[str]] = {
     "read_only": frozenset({"fs.read", "memory.read"}),
-    "workspace_write": frozenset({
-        "fs.read", "fs.write", "shell.exec",
-        "network.fetch", "network.search",
-        "memory.read", "memory.write", "task.spawn",
-    }),
-    "danger_full_access": frozenset({
-        "fs.read", "fs.write", "shell.exec",
-        "network.fetch", "network.search",
-        "memory.read", "memory.write", "task.spawn",
-    }),
+    "workspace_write": frozenset(
+        {
+            "fs.read",
+            "fs.write",
+            "shell.exec",
+            "network.fetch",
+            "network.search",
+            "network.write",
+            "memory.read",
+            "memory.write",
+            "task.spawn",
+        }
+    ),
+    "danger_full_access": frozenset(
+        {
+            "fs.read",
+            "fs.write",
+            "shell.exec",
+            "network.fetch",
+            "network.search",
+            "network.write",
+            "memory.read",
+            "memory.write",
+            "task.spawn",
+        }
+    ),
 }
 
 _WRITE_RISKS = (RiskClass.WRITE, RiskClass.WRITE_REMOTE, RiskClass.DESTRUCTIVE)
 
-# Tools whose network use is read-only: they retrieve and cannot mutate anything
-# remote. Prompting for these makes the capability unusable — the model calls
-# `web_search`, the run blocks on a dialog, and to the user it looks frozen.
-#
-# `curl`/`wget` are deliberately NOT here. A shell command is opaque: it can POST
-# a payload as easily as it can GET a page, so it keeps its approval requirement.
-#
-# In a read-only sandbox these are still gated, because that mode exists to stop
-# the agent reaching outside the workspace at all.
-_READ_ONLY_NETWORK_TOOLS: frozenset[str] = frozenset({"web_search", "fetch"})
-
-
 # Programs whose whole purpose involves the network. A command reaching the
 # executor having already passed the gate should not then be silently starved of
 # the one resource it needs.
-_NETWORK_PROGRAMS: frozenset[str] = frozenset({
-    "npm", "npx", "pnpm", "yarn", "bun", "deno",
-    "pip", "pip3", "uv", "uvx", "poetry", "pipx",
-    "cargo", "go", "gem", "bundle", "composer", "mvn", "gradle",
-    "git", "curl", "wget", "ssh", "scp", "rsync",
-    "docker", "podman", "kubectl", "helm", "terraform",
-    "apt", "apt-get", "dnf", "brew", "apk",
-})
+_NETWORK_PROGRAMS: frozenset[str] = frozenset(
+    {
+        "npm",
+        "npx",
+        "pnpm",
+        "yarn",
+        "bun",
+        "deno",
+        "pip",
+        "pip3",
+        "uv",
+        "uvx",
+        "poetry",
+        "pipx",
+        "cargo",
+        "go",
+        "gem",
+        "bundle",
+        "composer",
+        "mvn",
+        "gradle",
+        "git",
+        "curl",
+        "wget",
+        "ssh",
+        "scp",
+        "rsync",
+        "docker",
+        "podman",
+        "kubectl",
+        "helm",
+        "terraform",
+        "apt",
+        "apt-get",
+        "dnf",
+        "brew",
+        "apk",
+    }
+)
 
 
 def _needs_network(risk: ToolRisk) -> bool:
@@ -192,6 +209,8 @@ class ToolHost:
     run_id: str = ""
     sandbox_mode: str = "workspace_write"
     mode: str = "build"
+    workspace_only: bool = False
+    network_enabled: bool = True
     """``build`` executes; ``plan`` refuses anything that changes state."""
 
     policy: PermissionPolicy | None = None
@@ -203,7 +222,7 @@ class ToolHost:
     max_spawn_depth: int = 3
     model_id: str = ""
     provider_id: str = ""
-    """Kalash provider slug (``groq``, ``anthropic``, …) for throughput defaults."""
+    """Provider identity for diagnostics and delegation."""
 
     hooks: Any = None
     """Optional :class:`~kalash.hooks.runner.HookRunner`. A PreToolUse block is
@@ -212,15 +231,11 @@ class ToolHost:
     cancel_event: asyncio.Event | None = None
     """Set by the agent loop; tools poll this to abort in-flight work."""
 
-    reserved_prompt_tokens: int = 1200
-    """Roughly what the system prompt costs, subtracted from the input budget
-    before choosing a tool profile."""
-
-    active_profile: str = "full"
-    """Which profile the last :meth:`schemas` call selected, for `/status`."""
-
-    force_profile: str | None = None
-    """When set, overrides :func:`select_profile` (e.g. ``minimal`` under TPM pressure)."""
+    delegate: Callable[..., Awaitable[dict[str, Any]]] | None = None
+    capability_limit: frozenset[str] | None = None
+    instruction_loader: InstructionLoader | None = None
+    loaded_skills: dict[str, str] = field(default_factory=dict, init=False)
+    config: KalashConfig | None = None
 
     # Session grants earned from "allow session"/"allow always" answers. Also
     # persisted in kalash_grants when storage is available.
@@ -235,11 +250,10 @@ class ToolHost:
 
     @property
     def capabilities(self) -> frozenset[str]:
-        return capabilities_for_mode(self.sandbox_mode)
+        available = capabilities_for_mode(self.sandbox_mode)
+        return available if self.capability_limit is None else available & self.capability_limit
 
-    def build_context(
-        self, *, allow_network: bool = False, tool_use_id: str = ""
-    ) -> ToolContext:
+    def build_context(self, *, allow_network: bool = False, tool_use_id: str = "") -> ToolContext:
         """Construct the populated context tools execute against."""
         return ToolContext(
             session_id=self.session_id,
@@ -251,74 +265,27 @@ class ToolHost:
             max_spawn_depth=self.max_spawn_depth,
             model_id=self.model_id,
             allow_network=allow_network,
+            require_sandbox=normalize_sandbox_mode(self.sandbox_mode) != "danger_full_access",
             tool_use_id=tool_use_id,
             event_bus=self.event_bus,
             cancel_event=self.cancel_event,
             hooks=self.hooks,
+            delegate=self.delegate,
+            config=self.config,
         )
 
     # -- loop-facing interface ----------------------------------------------
 
-    def schemas(
-        self,
-        *,
-        prompt_tokens: int | None = None,
-        force_profile: str | None = None,
-    ) -> list[dict[str, Any]]:
-        """Tool schemas in the shape both providers accept.
-
-        In plan mode the state-changing tools are withheld entirely rather than
-        offered and then refused: a tool the model can see but never use wastes
-        schema tokens and invites a rejected call every turn.
-
-        The set is then sized against the model's input budget. The full block
-        measures roughly 2.5k tokens even minified, which does not fit a
-        throughput-limited endpoint that allows 8k per minute — so a small model
-        gets a reduced profile instead of a rejected request.
-
-        ``prompt_tokens`` should reflect the measured assembled prompt when the
-        loop has it; the reserved estimate alone can overstate headroom and
-        send too many tools to a TPM-bound model.
-        """
+    def schemas(self) -> list[dict[str, Any]]:
+        """Expose the complete permitted tool set, stable across turns."""
         if not supports_tools(self.model_id):
             return []
-
-        candidates = [
-            tool
+        return [
+            tool_schema(tool)
             for tool in self.registry.list_tools()
-            if not (
-                self.mode == "plan"
-                and tool.side_effect in (SideEffect.WRITE, SideEffect.EXEC)
-            )
+            if not (self.mode == "plan" and tool.side_effect in (SideEffect.WRITE, SideEffect.EXEC))
+            and tool.capabilities <= self.capabilities
         ]
-        if not candidates:
-            return []
-
-        prompt = (
-            prompt_tokens
-            if prompt_tokens is not None
-            else self.reserved_prompt_tokens
-        )
-        by_name = {tool.name: tool for tool in candidates}
-        profile_override = force_profile or self.force_profile
-
-        if profile_override in ("minimal", "minimal-forced"):
-            selected = [by_name[name] for name in MINIMAL_TOOLS if name in by_name]
-            profile = "minimal-forced"
-        elif profile_override == "standard":
-            selected = [by_name[name] for name in STANDARD_TOOLS if name in by_name]
-            profile = "standard-forced"
-        else:
-            selected, profile = select_profile(
-                candidates,
-                budget_tokens=input_budget(
-                    self.model_id, provider_id=self.provider_id or None
-                ),
-                prompt_tokens=prompt,
-                reserve_output=TARGET_OUTPUT_TOKENS,
-            )
-        self.active_profile = profile
-        return [tool_schema(tool) for tool in selected]
 
     def category(self, name: str) -> ToolCategory:
         """Concurrency class, derived from the tool's declared side effect."""
@@ -335,22 +302,51 @@ class ToolHost:
             case _:
                 return ToolCategory.EXEC
 
-    async def execute(
+    async def execute(self, name: str, arguments: dict[str, Any], *, tool_use_id: str) -> str:
+        result = await self.execute_result(name, arguments, tool_use_id=tool_use_id)
+        return result.content
+
+    async def execute_result(
         self, name: str, arguments: dict[str, Any], *, tool_use_id: str
-    ) -> str:
+    ) -> ToolExecutionResult:
         """Gate, run, and render one tool call. Never raises."""
+        try:
+            tool = self.registry.get(name)
+        except KeyError:
+            tool = None
+        if tool is not None:
+            if self.mode == "plan" and tool.side_effect in (SideEffect.WRITE, SideEffect.EXEC):
+                return ToolExecutionResult(
+                    "REFUSED: state-changing tools are disabled in plan mode", True
+                )
+            if not tool.capabilities <= self.capabilities:
+                return ToolExecutionResult(
+                    "REFUSED: tool requires capabilities unavailable to this run", True
+                )
+            if not self.network_enabled and any(
+                cap.startswith("network.") for cap in tool.capabilities
+            ):
+                return ToolExecutionResult("REFUSED: network access is disabled for this run", True)
         risk = classify_tool_call(
             name,
             arguments,
             cwd=self.cwd,
             writable_roots=self.writable_roots,
         )
+        if self.instruction_loader is not None and risk.paths:
+            added = self.instruction_loader.include(risk.paths)
+            if added and self.category(name) != ToolCategory.READ:
+                return ToolExecutionResult(
+                    "New scoped project guidance loaded. Review it before retrying this change:\n"
+                    + "\n\n".join(added),
+                    True,
+                )
 
         # Hooks run before the policy. They are the user's deterministic control
         # and a block from one is final — the model cannot reason its way past it.
         blocked = await self._run_pre_hooks(name, arguments)
         if blocked is not None:
-            return blocked
+            return ToolExecutionResult(blocked, is_error=True)
 
         # Delegation is announced before it starts: a child can run for a long
         # time returning nothing, and an unannounced pause looks like a stall.
@@ -376,23 +372,28 @@ class ToolHost:
                     data={"tool": name, "reason": verdict, "tool_use_id": tool_use_id},
                 )
             )
-            return verdict
+            return ToolExecutionResult(verdict, is_error=True)
 
         # Commands that legitimately need the network get it, having already
         # passed the gate. Package managers, git remotes, and curl all classify
         # as NETWORK, so this is the same decision the user already approved.
         context = self.build_context(
-            allow_network=_needs_network(risk),
+            allow_network=self.network_enabled and _needs_network(risk),
             tool_use_id=tool_use_id,
         )
 
         start_time = time.monotonic()
         envelope = await self.registry.dispatch(name, arguments, context)
+        if name == "skill" and envelope.ok and envelope.metadata.get("skill"):
+            self.loaded_skills[str(envelope.metadata["skill"])] = envelope.content
         duration_ms = int((time.monotonic() - start_time) * 1000)
         rendered = self._render(name, envelope, risk)
+        # Apply the tool contract even to third-party tools and error bodies.
+        limit = min(max(tool.max_output_bytes, 1024), 65536) if tool else 65536
+        rendered = self._bound_observation(name, rendered, limit)
         await self._publish_result(name, tool_use_id, envelope, duration_ms=duration_ms)
         await self._run_post_hooks(name, arguments, envelope)
-        return rendered
+        return ToolExecutionResult(rendered, is_error=not envelope.ok)
 
     async def _publish_result(
         self, name: str, tool_use_id: str, envelope: ToolEnvelope, *, duration_ms: int = 0
@@ -427,7 +428,6 @@ class ToolHost:
                 payload[key] = value
 
         if name == "task":
-
             await self.event_bus.emit(
                 Event(
                     type=EventType.AGENT_COMPLETE,
@@ -452,9 +452,7 @@ class ToolHost:
 
     # -- hooks ---------------------------------------------------------------
 
-    async def _run_pre_hooks(
-        self, name: str, arguments: dict[str, Any]
-    ) -> str | None:
+    async def _run_pre_hooks(self, name: str, arguments: dict[str, Any]) -> str | None:
         """Fire PreToolUse. Returns a refusal string when a hook blocks."""
         if self.hooks is None:
             return None
@@ -479,6 +477,8 @@ class ToolHost:
             )
 
         for result in results:
+            if result.error:
+                return f"REFUSED: PreToolUse hook could not complete: {result.error}"
             if result.blocked:
                 detail = result.stderr.strip() or "blocked by policy"
                 return (
@@ -513,6 +513,14 @@ class ToolHost:
 
     async def _gate(self, risk: ToolRisk, arguments: dict[str, Any]) -> str | None:
         """Return a refusal string, or None to proceed."""
+        if self.workspace_only:
+            for name in risk.paths:
+                path = Path(name)
+                path = (self.cwd / path if not path.is_absolute() else path).resolve()
+                if not path.is_relative_to(self.cwd.resolve()):
+                    return "REFUSED: this run may only access its workspace"
+        if not self.network_enabled and _needs_network(risk):
+            return "REFUSED: network access is disabled for this run"
         # Plan mode is enforced, not merely requested in the prompt.
         if self.mode == "plan" and risk.risk_class in _WRITE_RISKS:
             return (
@@ -520,16 +528,6 @@ class ToolHost:
                 f"({risk.reason}). Describe the intended change instead; the user will "
                 f"switch to build mode to apply it."
             )
-
-        # Retrieval over the network is admitted without a prompt outside
-        # read-only mode. This is the single most common thing a user asks for
-        # ("search the web for X") and blocking it on a dialog is why a search
-        # request appeared to hang.
-        if (
-            risk.tool_name in _READ_ONLY_NETWORK_TOOLS
-            and normalize_sandbox_mode(self.sandbox_mode) != "read_only"
-        ):
-            return None
 
         if self.policy is None:
             return None
@@ -616,9 +614,7 @@ class ToolHost:
             return f"shell:{program}:{risk.risk_class.value}"
         return f"{risk.tool_name}:{risk.risk_class.value}"
 
-    async def _persist_grant(
-        self, risk: ToolRisk, signature: str, *, lifetime: str
-    ) -> None:
+    async def _persist_grant(self, risk: ToolRisk, signature: str, *, lifetime: str) -> None:
         """Record a session or always grant in durable storage."""
         if self.policy is None:
             return
@@ -642,6 +638,20 @@ class ToolHost:
 
     # -- rendering -----------------------------------------------------------
 
+    def _bound_observation(self, name: str, content: str, limit: int) -> str:
+        body = content.encode("utf-8")
+        if len(body) <= limit:
+            return content
+        try:
+            stored = get_scratchpad(self.session_id).put("other", name, content)
+            hint = f"Full result: expand({stored.ref}, grep=...) or use offset/limit."
+        except OSError:
+            logger.warning("could not retain oversized %s result", name, exc_info=True)
+            hint = "Full result could not be stored; rerun with narrower output."
+        suffix = f"\n[output bounded from {len(body)} bytes. {hint}]"
+        room = max(0, limit - len(suffix.encode("utf-8")))
+        return body[:room].decode("utf-8", errors="ignore") + suffix
+
     def _render(self, name: str, envelope: ToolEnvelope, risk: ToolRisk) -> str:
         """Turn an envelope into the string the model sees."""
         if not envelope.ok:
@@ -661,8 +671,7 @@ class ToolHost:
             hint = envelope.truncation.retrieval_hint
             content += (
                 f"\n[truncated: showing {envelope.truncation.shown_lines} of "
-                f"{envelope.truncation.total_lines} lines"
-                + (f". {hint}]" if hint else "]")
+                f"{envelope.truncation.total_lines} lines" + (f". {hint}]" if hint else "]")
             )
 
         deferred = self._maybe_defer(name, content, risk)
@@ -680,7 +689,10 @@ class ToolHost:
 
         try:
             stored = get_scratchpad(self.session_id).put(
-                kind, headline, content, metadata={"tool": name, "path": risk.paths[0] if risk.paths else ""}
+                kind,
+                headline,
+                content,
+                metadata={"tool": name, "path": risk.paths[0] if risk.paths else ""},
             )
         except OSError:
             # If the store is unavailable, inlining is still correct.
@@ -688,7 +700,11 @@ class ToolHost:
             return None
 
         lines = content.splitlines()
-        head = "\n".join(lines[:DEFER_HEAD_LINES])
+        head = (
+            "\n".join(lines[:DEFER_HEAD_LINES])
+            .encode("utf-8")[:6144]
+            .decode("utf-8", errors="ignore")
+        )
         remaining = max(0, len(lines) - DEFER_HEAD_LINES)
 
         return (

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -21,7 +21,11 @@ def _discover_agent_files() -> list[tuple[str, Path, str]]:
     for directory in agents_dirs():
         if not directory.is_dir():
             continue
-        source = "user" if ".kalash" not in str(directory) or str(directory).endswith("/agents") else "project"
+        source = (
+            "user"
+            if ".kalash" not in str(directory) or str(directory).endswith("/agents")
+            else "project"
+        )
         for path in sorted(directory.glob("*.md")):
             found[path.stem] = (path, source if "agents" in str(directory) else "project")
     return [(name, path, source) for name, (path, source) in sorted(found.items())]
@@ -53,7 +57,7 @@ def run(
     name: Annotated[str, typer.Argument(help="Agent name")],
     prompt: Annotated[str, typer.Option("--prompt", "-p", help="Task prompt")],
     model: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--model", "-m", help="Model override"),
     ] = None,
 ) -> None:
@@ -61,7 +65,7 @@ def run(
     import asyncio
 
     from kalash.agents.loader import load_agent_definition
-    from kalash.runtime.agent import run_isolated
+    from kalash.runtime.delegation import run_isolated
 
     definition = load_agent_definition(name)
     if definition is None:
@@ -76,6 +80,7 @@ def run(
             mode=definition.mode,
             max_turns=definition.max_turns,
             agent_instructions=definition.body or None,
+            allowed_tools=frozenset(definition.tools) if definition.tools else None,
         )
         if result.get("error"):
             console.print(f"[red]{result['error']}[/red]")
@@ -107,7 +112,6 @@ def new(
 name: {name}
 description: Specialized agent for {name.replace("-", " ")} tasks.
 tools: [read, write, edit, search, shell]
-model: sonnet
 max_turns: 25
 ---
 

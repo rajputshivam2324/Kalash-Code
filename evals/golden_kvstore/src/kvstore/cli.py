@@ -1,10 +1,13 @@
 """CLI interface for KVStore."""
+
 from __future__ import annotations
 
 import json
+
 import typer
 from rich.console import Console
 from rich.table import Table
+
 from kvstore.store import KVStore
 
 app = typer.Typer(help="KVStore — Embedded key-value CLI manager.")

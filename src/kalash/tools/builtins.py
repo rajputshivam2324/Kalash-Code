@@ -1,18 +1,4 @@
-"""Built-in tool registration.
-
-Until now every tool in this package was real, tested, and unreachable: nothing
-in the codebase ever instantiated one, so the registry was empty at runtime and
-the model was handed no tools at all. This module is the missing factory.
-
-**Tools that cannot act are not registered by default.** Each schema in the
-context window costs a few hundred tokens on every request, and a tool the model
-calls only to receive "not initialized" costs a wasted turn on top of that. So
-the default registry contains the tools that actually work, and the ones still
-waiting on their subsystem are opt-in:
-
-* ``include_memory`` — ``recall``/``remember``/``forget`` against the local provider.
-* ``include_task`` — ``task`` delegates to an isolated child agent.
-"""
+"""Built-in tools in stable registration order."""
 
 from __future__ import annotations
 

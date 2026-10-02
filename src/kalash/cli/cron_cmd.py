@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -18,7 +18,7 @@ def add(
     schedule: Annotated[str, typer.Argument(help="Cron expression (e.g. '0 9 * * *')")],
     prompt: Annotated[str, typer.Option("--prompt", "-p", help="Prompt to execute")],
     model: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--model", "-m", help="Model to use (defaults to config)"),
     ] = None,
     max_turns: Annotated[
@@ -30,18 +30,14 @@ def add(
     from kalash.scheduler.manager import SchedulerManager
 
     manager = SchedulerManager()
-    job = manager.add(
-        name=name, schedule=schedule, prompt=prompt, model=model, max_turns=max_turns
-    )
+    job = manager.add(name=name, schedule=schedule, prompt=prompt, model=model, max_turns=max_turns)
     console.print(f"[green]Schedule created:[/green] {job.id[:12]} ({name})")
     console.print(f"  Next run: {job.next_run}")
 
 
 @cron_app.command("ls")
 def ls(
-    all_: Annotated[
-        bool, typer.Option("--all", "-a", help="Include disabled schedules")
-    ] = False,
+    all_: Annotated[bool, typer.Option("--all", "-a", help="Include disabled schedules")] = False,
 ) -> None:
     """List all scheduled tasks."""
     from kalash.scheduler.manager import SchedulerManager
@@ -74,9 +70,7 @@ def ls(
 @cron_app.command("rm")
 def rm(
     job_id: Annotated[str, typer.Argument(help="Schedule ID to delete")],
-    force: Annotated[
-        bool, typer.Option("--force", "-f", help="Skip confirmation")
-    ] = False,
+    force: Annotated[bool, typer.Option("--force", "-f", help="Skip confirmation")] = False,
 ) -> None:
     """Delete a scheduled task."""
     from kalash.scheduler.manager import SchedulerManager
@@ -162,12 +156,10 @@ def run(
 @cron_app.command("logs")
 def logs(
     job_id: Annotated[
-        Optional[str],
+        str | None,
         typer.Argument(help="Schedule ID (omit for all)"),
     ] = None,
-    limit: Annotated[
-        int, typer.Option("--limit", "-n", help="Max log entries")
-    ] = 20,
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Max log entries")] = 20,
 ) -> None:
     """Show execution history for scheduled tasks."""
     from kalash.scheduler.manager import SchedulerManager
@@ -183,11 +175,7 @@ def logs(
     table.add_column("Session", style="dim")
 
     for entry in entries:
-        status_display = (
-            "[green]✓ success[/green]"
-            if entry.success
-            else "[red]✗ failed[/red]"
-        )
+        status_display = "[green]✓ success[/green]" if entry.success else "[red]✗ failed[/red]"
         table.add_row(
             entry.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
             entry.job_name,

@@ -139,8 +139,7 @@ def _clip(text: Any) -> str:
     """Coerce to a trimmed string under the snippet cap."""
     if not isinstance(text, str):
         text = "" if text is None else str(text)
-    text = text.strip()
-    return text[:MAX_SNIPPET_CHARS]
+    return str(text).strip()[:MAX_SNIPPET_CHARS]
 
 
 # ---------------------------------------------------------------------------
@@ -266,9 +265,7 @@ def select_provider(preferred: str = "") -> ProviderSpec | None:
 
 def configuration_hint() -> str:
     """Actionable guidance when no provider is configured."""
-    names = ", ".join(
-        f"{spec.name} ({spec.env_keys[0]})" for spec in PROVIDERS
-    )
+    names = ", ".join(f"{spec.name} ({spec.env_keys[0]})" for spec in PROVIDERS)
     return f"Set one of: {names}. Pin a provider with KALASH_SEARCH_PROVIDER."
 
 

@@ -14,10 +14,11 @@ Usage:
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator, AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncGenerator, AsyncIterator, Optional
+from typing import Any
 
 from kalash.runtime.agent import Agent, build_agent
 
@@ -31,7 +32,7 @@ class CompletionResponse:
     tokens_used: int
     cost_usd: float
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    session_id: Optional[str] = None
+    session_id: str | None = None
 
 
 @dataclass
@@ -40,7 +41,7 @@ class StreamChunk:
 
     text: str
     done: bool = False
-    tool_call: Optional[dict[str, Any]] = None
+    tool_call: dict[str, Any] | None = None
 
 
 @dataclass
@@ -56,7 +57,7 @@ class SessionInfo:
 class KalashSession:
     """An active session context for multi-turn conversations."""
 
-    def __init__(self, agent: Agent, client: "KalashClient") -> None:
+    def __init__(self, agent: Agent, client: KalashClient) -> None:
         self._agent = agent
         self._client = client
 
@@ -68,9 +69,9 @@ class KalashSession:
         self,
         prompt: str,
         *,
-        model: Optional[str] = None,
-        max_turns: Optional[int] = None,
-        tools: Optional[list[str]] = None,
+        model: str | None = None,
+        max_turns: int | None = None,
+        tools: list[str] | None = None,
     ) -> CompletionResponse:
         """Run a single-shot completion within this session."""
         if max_turns is not None:
@@ -96,9 +97,9 @@ class KalashSession:
         self,
         prompt: str,
         *,
-        model: Optional[str] = None,
-        max_turns: Optional[int] = None,
-        tools: Optional[list[str]] = None,
+        model: str | None = None,
+        max_turns: int | None = None,
+        tools: list[str] | None = None,
     ) -> AsyncIterator[StreamChunk]:
         """Stream a response within this session."""
         if max_turns is not None:
@@ -144,6 +145,7 @@ class KalashSession:
     async def close(self) -> None:
         from kalash.runtime.session import SessionManager
 
+        await self._agent.close()
         SessionManager().close_session(self._agent.session_id)
 
 
@@ -153,8 +155,8 @@ class KalashClient:
     def __init__(
         self,
         *,
-        model: Optional[str] = None,
-        config_overrides: Optional[dict[str, Any]] = None,
+        model: str | None = None,
+        config_overrides: dict[str, Any] | None = None,
         cwd: Path | None = None,
     ) -> None:
         self._default_model = model
@@ -173,8 +175,8 @@ class KalashClient:
     async def session(
         self,
         *,
-        resume: Optional[str] = None,
-        model: Optional[str] = None,
+        resume: str | None = None,
+        model: str | None = None,
     ) -> AsyncGenerator[KalashSession, None]:
         from kalash.core.logging import configure_logging
         from kalash.runtime.bootstrap import prepare_agent
@@ -204,27 +206,23 @@ class KalashClient:
         self,
         prompt: str,
         *,
-        model: Optional[str] = None,
-        max_turns: Optional[int] = None,
-        tools: Optional[list[str]] = None,
+        model: str | None = None,
+        max_turns: int | None = None,
+        tools: list[str] | None = None,
     ) -> CompletionResponse:
         async with self.session(model=model) as sess:
-            return await sess.complete(
-                prompt, model=model, max_turns=max_turns, tools=tools
-            )
+            return await sess.complete(prompt, model=model, max_turns=max_turns, tools=tools)
 
     async def stream(
         self,
         prompt: str,
         *,
-        model: Optional[str] = None,
-        max_turns: Optional[int] = None,
-        tools: Optional[list[str]] = None,
+        model: str | None = None,
+        max_turns: int | None = None,
+        tools: list[str] | None = None,
     ) -> AsyncIterator[StreamChunk]:
         async with self.session(model=model) as sess:
-            async for chunk in sess.stream(
-                prompt, model=model, max_turns=max_turns, tools=tools
-            ):
+            async for chunk in sess.stream(prompt, model=model, max_turns=max_turns, tools=tools):
                 yield chunk
 
 

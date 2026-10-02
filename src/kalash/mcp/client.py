@@ -8,13 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
 from kalash.core.errors import KalashError, ToolTimeoutError
-from kalash.core.ids import generate_id
-import logging
+from kalash.mcp.auth import MCPAuth
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +49,7 @@ class MCPServerConfig:
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     url: str = ""  # For HTTP/SSE
+    headers: dict[str, str] = field(default_factory=dict)
     timeout_s: float = 30.0
     capabilities: list[str] = field(default_factory=list)
 
@@ -73,6 +74,7 @@ class MCPClient:
 
     def __init__(self, config: MCPServerConfig) -> None:
         self._config = config
+        self._auth = MCPAuth()
         self._connected = False
         self._tools: dict[str, MCPToolSchema] = {}  # namespaced_name → schema
         self._process: asyncio.subprocess.Process | None = None
@@ -81,9 +83,11 @@ class MCPClient:
         self._reader_task: asyncio.Task[None] | None = None
         self._stdin: asyncio.StreamWriter | None = None
         self._stdout: asyncio.StreamReader | None = None
+        self._http: Any = None
         self._sse_client: Any = None
         self._sse_endpoint: str = ""
-        self._post_endpoint: str = "" 
+        self._post_endpoint: str = ""
+        self._endpoint_ready = asyncio.Event()
 
     @property
     def name(self) -> str:
@@ -162,17 +166,36 @@ class MCPClient:
                 await self._reader_task
             except asyncio.CancelledError:
                 pass
-        if self._process:
-            self._process.terminate()
+        if self._process and self._process.returncode is None:
+            import os
+            import signal
+
+            try:
+                os.killpg(self._process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                self._process.kill()
+            except TimeoutError:
+                try:
+                    os.killpg(self._process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                await self._process.wait()
+        if self._http is not None:
+            headers = {**self._config.headers, **await self._auth.get_headers(self._config.name)}
+            await self._http.close(headers)
+            self._http = None
         if self._sse_client:
             await self._sse_client.aclose()
             self._sse_client = None
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(MCPConnectionError("MCP disconnected", recoverable=True))
+        self._pending.clear()
         self._connected = False
         self._tools.clear()
+        self._process = None
 
     def get_tool_schema(self, tool_name: str) -> MCPToolSchema | None:
         """Get schema for a specific tool (by raw or namespaced name)."""
@@ -189,28 +212,34 @@ class MCPClient:
 
     async def _connect_stdio(self) -> None:
         """Connect via stdio transport (subprocess with JSON-RPC on stdin/stdout)."""
-        env = {**self._config.env} if self._config.env else None
+        from kalash.sandbox.environment import safe_environment
+
+        env = {**safe_environment(), **self._config.env}
         try:
             self._process = await asyncio.create_subprocess_exec(
                 self._config.command,
                 *self._config.args,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True,
                 env=env,
             )
-            self._stdin = self._process.stdin  # type: ignore
-            self._stdout = self._process.stdout  # type: ignore
+            self._stdin = self._process.stdin
+            self._stdout = self._process.stdout
 
             # Start reader task
             self._reader_task = asyncio.create_task(self._read_loop())
 
             # Send initialize
-            await self._send_request("initialize", {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "kalash", "version": "0.1.0"},
-            })
+            await self._send_request(
+                "initialize",
+                {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "kalash", "version": "0.1.0"},
+                },
+            )
 
             # Send initialized notification
             await self._send_notification("notifications/initialized", {})
@@ -223,14 +252,26 @@ class MCPClient:
 
     async def _connect_http(self) -> None:
         """Connect via streamable HTTP transport."""
-        # HTTP transport is stateless per-request; just validate the URL
         if not self._config.url:
             raise MCPConnectionError(
                 f"HTTP transport requires a URL for server '{self._config.name}'",
                 recoverable=True,
             )
-        # Connection is established per-request in _send_request
-        self._connected = True
+        from kalash.mcp.http import HTTPTransport
+
+        self._http = HTTPTransport(self._config.url, self._config.timeout_s)
+        result = await self._send_request(
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "kalash", "version": "0.1.0"},
+            },
+        )
+        if not isinstance(result, dict) or "protocolVersion" not in result:
+            raise MCPSchemaError("Invalid MCP initialize response", recoverable=True)
+        self._http.protocol = result["protocolVersion"]
+        await self._send_notification("notifications/initialized", {})
 
     async def _connect_sse(self) -> None:
         """Connect via legacy SSE transport."""
@@ -240,42 +281,63 @@ class MCPClient:
                 recoverable=True,
             )
         import httpx
-        from kalash.mcp.auth import MCPAuth
+
         self._sse_client = httpx.AsyncClient(timeout=self._config.timeout_s)
         self._sse_endpoint = self._config.url
-        self._post_endpoint = self._config.url
-        
+        self._endpoint_ready.clear()
         self._reader_task = asyncio.create_task(self._sse_read_loop())
-        self._connected = True
+        await asyncio.wait_for(self._endpoint_ready.wait(), self._config.timeout_s)
+        await self._send_request(
+            "initialize",
+            {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {},
+                "clientInfo": {"name": "kalash", "version": "0.1.0"},
+            },
+        )
+        await self._send_notification("notifications/initialized", {})
 
     async def _sse_read_loop(self) -> None:
-        import httpx
         import json
-        from kalash.mcp.auth import MCPAuth
-        
+
         while True:
             try:
                 headers = {"Accept": "text/event-stream"}
-                auth_headers = MCPAuth.get_headers(self._config.name)
+                auth_headers = await self._auth.get_headers(self._config.name)
+                headers.update(self._config.headers)
                 if auth_headers:
                     headers.update(auth_headers)
-                    
-                async with self._sse_client.stream("GET", self._sse_endpoint, headers=headers) as response:
+
+                async with self._sse_client.stream(
+                    "GET", self._sse_endpoint, headers=headers
+                ) as response:
                     response.raise_for_status()
                     event_type = "message"
-                    buffer = []
-                    
+                    buffer: list[str] = []
+
                     async for line in response.aiter_lines():
                         line = line.strip()
                         if not line:
                             if buffer:
                                 data_str = "\n".join(buffer)
                                 buffer = []
-                                
+
                                 if event_type == "endpoint":
-                                    from urllib.parse import urljoin
+                                    from urllib.parse import urljoin, urlsplit
+
                                     # Post endpoint is relative to sse_endpoint or absolute
-                                    self._post_endpoint = urljoin(self._sse_endpoint, data_str)
+                                    endpoint = urljoin(self._sse_endpoint, data_str)
+                                    origin = urlsplit(self._sse_endpoint)
+                                    target = urlsplit(endpoint)
+                                    if (origin.scheme, origin.netloc) != (
+                                        target.scheme,
+                                        target.netloc,
+                                    ):
+                                        raise MCPConnectionError(
+                                            "SSE endpoint changed origin", recoverable=False
+                                        )
+                                    self._post_endpoint = endpoint
+                                    self._endpoint_ready.set()
                                 elif event_type == "message":
                                     try:
                                         msg = json.loads(data_str)
@@ -283,47 +345,58 @@ class MCPClient:
                                         if req_id and req_id in self._pending:
                                             future = self._pending.pop(req_id)
                                             if "error" in msg:
-                                                future.set_exception(MCPSchemaError(str(msg["error"]), recoverable=True))
+                                                future.set_exception(
+                                                    MCPSchemaError(
+                                                        str(msg["error"]), recoverable=True
+                                                    )
+                                                )
                                             else:
                                                 future.set_result(msg.get("result"))
                                     except json.JSONDecodeError:
                                         pass
                             event_type = "message"
                             continue
-                            
+
                         if line.startswith("event:"):
                             event_type = line[6:].strip()
                         elif line.startswith("data:"):
                             buffer.append(line[5:].strip())
-                            
+                            if sum(len(part) for part in buffer) > 2 * 1024 * 1024:
+                                raise MCPSchemaError("MCP SSE event too large", recoverable=True)
+
+                self._connection_lost()
+                return
             except asyncio.CancelledError:
-                break
+                self._connection_lost()
+                return
             except Exception:
-                await asyncio.sleep(2.0)
+                logger.warning("MCP SSE stream disconnected", exc_info=True)
+                self._connection_lost()
+                return
 
     async def _send_sse(self, message: dict[str, Any], req_id: int) -> Any:
-        import httpx
-        import json
-        from kalash.mcp.auth import MCPAuth
-        
+
         if not self._sse_client:
             raise MCPConnectionError("Not connected via SSE", recoverable=True)
-            
+
         future: asyncio.Future[Any] = asyncio.get_event_loop().create_future()
         self._pending[req_id] = future
-        
+
         headers = {"Content-Type": "application/json"}
-        auth_headers = MCPAuth.get_headers(self._config.name)
+        auth_headers = await self._auth.get_headers(self._config.name)
+        headers.update(self._config.headers)
         if auth_headers:
             headers.update(auth_headers)
-            
+
         try:
-            response = await self._sse_client.post(self._post_endpoint, json=message, headers=headers)
+            response = await self._sse_client.post(
+                self._post_endpoint, json=message, headers=headers
+            )
             response.raise_for_status()
-            
+
             result = await asyncio.wait_for(future, timeout=self._config.timeout_s)
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending.pop(req_id, None)
             raise ToolTimeoutError(
                 f"MCP request to '{self._config.name}' timed out after {self._config.timeout_s}s",
@@ -332,7 +405,8 @@ class MCPClient:
         except Exception as e:
             self._pending.pop(req_id, None)
             raise MCPConnectionError(f"Failed to send SSE POST: {e}", recoverable=True)
-
+        finally:
+            self._pending.pop(req_id, None)
 
     async def _discover_schema(self) -> None:
         """Discover available tools from the server."""
@@ -364,10 +438,9 @@ class MCPClient:
 
         if self._config.transport == TransportType.STDIO:
             return await self._send_stdio(message, req_id)
-        elif self._config.transport == TransportType.HTTP:
+        if self._config.transport == TransportType.HTTP:
             return await self._send_http(message)
-        else:
-            return await self._send_sse(message, req_id)
+        return await self._send_sse(message, req_id)
 
     async def _send_notification(self, method: str, params: dict[str, Any]) -> None:
         """Send a JSON-RPC notification (no response expected)."""
@@ -376,7 +449,15 @@ class MCPClient:
             "method": method,
             "params": params,
         }
-        if self._stdin:
+        if self._config.transport == TransportType.HTTP:
+            await self._send_http(message)
+        elif self._config.transport == TransportType.SSE and self._sse_client:
+            headers = {**self._config.headers, **await self._auth.get_headers(self._config.name)}
+            response = await self._sse_client.post(
+                self._post_endpoint, json=message, headers=headers
+            )
+            response.raise_for_status()
+        elif self._stdin:
             data = json.dumps(message) + "\n"
             self._stdin.write(data.encode())
             await self._stdin.drain()
@@ -396,50 +477,23 @@ class MCPClient:
         try:
             result = await asyncio.wait_for(future, timeout=self._config.timeout_s)
             return result
-        except asyncio.TimeoutError:
+        except TimeoutError:
             self._pending.pop(req_id, None)
             raise ToolTimeoutError(
                 f"MCP request to '{self._config.name}' timed out after {self._config.timeout_s}s",
                 recoverable=True,
             )
+        finally:
+            self._pending.pop(req_id, None)
 
     async def _send_http(self, message: dict[str, Any]) -> Any:
-        """Send via HTTP transport."""
-        import urllib.request
-        import urllib.error
-
-        body = json.dumps(message).encode()
-        headers = {"Content-Type": "application/json"}
-
-        # Add auth if available
-        from kalash.mcp.auth import MCPAuth
-        auth_headers = MCPAuth.get_headers(self._config.name)
-        if auth_headers:
-            headers.update(auth_headers)
-
-        req = urllib.request.Request(
-            self._config.url,
-            data=body,
-            headers=headers,
-            method="POST",
-        )
-
+        if self._http is None:
+            raise MCPConnectionError("HTTP transport not connected", recoverable=True)
+        headers = {**self._config.headers, **await self._auth.get_headers(self._config.name)}
         try:
-            response = await asyncio.to_thread(
-                urllib.request.urlopen, req, timeout=self._config.timeout_s
-            )
-            response_data = json.loads(response.read().decode())
-            if "error" in response_data:
-                raise MCPSchemaError(
-                    f"MCP error: {response_data['error']}",
-                    recoverable=True,
-                )
-            return response_data.get("result")
-        except urllib.error.URLError as e:
-            raise MCPConnectionError(
-                f"HTTP request to '{self._config.name}' failed: {e}",
-                recoverable=True,
-            )
+            return await self._http.send(message, headers)
+        except Exception as exc:
+            raise MCPConnectionError(f"MCP HTTP request failed: {exc}", recoverable=True) from exc
 
     async def _read_loop(self) -> None:
         """Read responses from stdout for stdio transport."""
@@ -450,16 +504,17 @@ class MCPClient:
             try:
                 line = await self._stdout.readline()
                 if not line:
+                    self._connection_lost()
                     break  # EOF
 
                 data = json.loads(line.decode())
                 req_id = data.get("id")
                 if req_id and req_id in self._pending:
                     future = self._pending.pop(req_id)
+                    if future.done():
+                        continue
                     if "error" in data:
-                        future.set_exception(
-                            MCPSchemaError(str(data["error"]), recoverable=True)
-                        )
+                        future.set_exception(MCPSchemaError(str(data["error"]), recoverable=True))
                     else:
                         future.set_result(data.get("result"))
             except json.JSONDecodeError:
@@ -468,4 +523,12 @@ class MCPClient:
                 break
             except Exception as e:
                 logger.error("Error in MCP read loop", exc_info=e)
-                continue
+                self._connection_lost()
+                break
+
+    def _connection_lost(self) -> None:
+        self._connected = False
+        for future in self._pending.values():
+            if not future.done():
+                future.set_exception(MCPConnectionError("MCP stream ended", recoverable=True))
+        self._pending.clear()

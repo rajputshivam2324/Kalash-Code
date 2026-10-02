@@ -7,12 +7,14 @@ Side effects are declared statically and recorded at runtime.
 from __future__ import annotations
 
 import enum
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel
 
+from kalash.core.config import KalashConfig
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -81,6 +83,7 @@ class ToolContext:
     """Model the parent is running on, so a child can inherit it."""
 
     allow_network: bool = False
+    require_sandbox: bool = True
     """Whether this specific call may reach the network.
 
     Set per-call from the risk classification and the user's answer, not
@@ -96,8 +99,12 @@ class ToolContext:
     cancel_event: Any | None = None
     """When set, cooperative tools should abort in-flight work."""
 
+    delegate: Callable[..., Awaitable[dict[str, Any]]] | None = None
     hooks: Any | None = None
     """Optional HookRunner for tools to dispatch fine-grained events."""
+
+    config: KalashConfig | None = None
+    """The owning agent's configuration, including memory policy."""
 
     @property
     def can_spawn(self) -> bool:

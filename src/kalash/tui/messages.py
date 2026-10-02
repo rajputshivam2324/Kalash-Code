@@ -9,11 +9,11 @@ Pure developer-grade terminal interface:
 
 from __future__ import annotations
 
-import contextlib
 import time
 from pathlib import Path
 from typing import Any
 
+from rich.console import RenderableType
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
@@ -57,7 +57,10 @@ class WelcomeBanner(Static):
         body = Text(LOGO, style="bold cyan")
         body.append("\n\n")
         body.append("Kalash Code — Autonomous Terminal Coding Harness\n", style="bold")
-        body.append("Press / for commands (/models, /eval, /plan, /copy) or type a prompt to begin", style="dim")
+        body.append(
+            "Press / for commands (/models, /eval, /plan, /copy) or type a prompt to begin",
+            style="dim",
+        )
         super().__init__(body)
 
 
@@ -145,6 +148,7 @@ class AssistantMessage(Static):
             self.update(md)
         except Exception:
             self.update(body)
+
 
 class SystemMessage(Static):
     """Command output, help text, status lines."""
@@ -338,7 +342,6 @@ class ToolCallLine(Static):
 
     def _build_line(self) -> Any:
         from rich.console import Group
-        from rich.panel import Panel
         from rich.text import Text
 
         text = Text()
@@ -370,7 +373,7 @@ class ToolCallLine(Static):
             text.append("  ")
             text.append(value, style=style)
 
-        renderables = [text]
+        renderables: list[RenderableType] = [text]
 
         if self._diff_text:
             diff_text = Text()
@@ -381,7 +384,9 @@ class ToolCallLine(Static):
             output_text = Text("\n".join(visible))
             hidden = len(self._output) - len(visible)
             if hidden > 0 and not self._expanded:
-                output_text.append(f"\n\n… {hidden} output lines hidden · ctrl+o to expand", style="italic")
+                output_text.append(
+                    f"\n\n… {hidden} output lines hidden · ctrl+o to expand", style="italic"
+                )
             elif self._expanded and len(self._output) > OUTPUT_PREVIEW_LINES:
                 output_text.append("\n\n… ctrl+o to fold output", style="italic")
 
@@ -399,7 +404,7 @@ class ToolCallLine(Static):
             style = "yellow" if "unwrapped" in self._summary.lower() else "dim"
             summary_text.append(self._summary, style=style)
             renderables.append(summary_text)
-            
+
         if len(renderables) == 1:
             return renderables[0]
         return Group(*renderables)
@@ -491,8 +496,10 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Button
 
+
 class DiffReview(Static):
     """An interactive diff review widget."""
+
     def __init__(self, diff_text: str) -> None:
         self.diff_text = diff_text
         super().__init__()
@@ -516,17 +523,23 @@ class DiffReview(Static):
 
 class MetricsMessage(Static):
     """Rich visualizations for stats/cost."""
+
     def __init__(self, title: str, metric: str, value: int, max_value: int) -> None:
-        self.title = title
+        self.metric_title = title
         self.metric = metric
-        self.value = value
+        self.metric_value = value
         self.max_value = max_value
         super().__init__()
-        
+
     def compose(self) -> ComposeResult:
         from rich.bar import Bar
         from rich.console import Group
-        
-        header = Text(f"{self.title} | {self.metric}: {self.value}/{self.max_value}", style="bold cyan")
-        bar = Bar(size=self.max_value, begin=0, end=self.value, color="cyan", bgcolor="black")
+
+        header = Text(
+            f"{self.metric_title} | {self.metric}: {self.metric_value}/{self.max_value}",
+            style="bold cyan",
+        )
+        bar = Bar(
+            size=self.max_value, begin=0, end=self.metric_value, color="cyan", bgcolor="black"
+        )
         yield Static(Group(header, bar))

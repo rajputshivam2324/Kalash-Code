@@ -114,9 +114,7 @@ class TestBuildAgent:
             provider = None
             reason = "no API key configured"
 
-        monkeypatch.setattr(
-            "kalash.models.resolve.build_provider", lambda *a, **k: Bad()
-        )
+        monkeypatch.setattr("kalash.models.resolve.build_provider", lambda *a, **k: Bad())
         from kalash.runtime.agent import build_agent
 
         agent, reason = build_agent(cwd=workspace)
@@ -181,7 +179,8 @@ class TestHeadless:
                 final("Created server.js and package.json."),
             ],
         )
-        from kalash.cli._pipe import EXIT_OK, _run
+        from kalash.cli._pipe import _run
+        from kalash.cli.output import EXIT_OK
 
         code = await _run("build me a node todo app")
 
@@ -197,9 +196,7 @@ class TestHeadless:
             provider = None
             reason = "not configured"
 
-        monkeypatch.setattr(
-            "kalash.models.resolve.build_provider", lambda *a, **k: Bad()
-        )
+        monkeypatch.setattr("kalash.models.resolve.build_provider", lambda *a, **k: Bad())
         from kalash.cli._pipe import EXIT_PROVIDER_UNAVAILABLE, _run
 
         assert await _run("hello") == EXIT_PROVIDER_UNAVAILABLE
@@ -247,11 +244,7 @@ class TestSessionPersistenceAndResume:
 
         history = await load_history_async(agent.loop.session_repo, session_id)
         assert history, "stored rows must rehydrate into messages"
-        assert any(
-            "first question" in getattr(b, "text", "")
-            for m in history
-            for b in m.content
-        )
+        assert any("first question" in getattr(b, "text", "") for m in history for b in m.content)
 
     @pytest.mark.asyncio
     async def test_turn_sequences_do_not_collide(self, workspace, monkeypatch):

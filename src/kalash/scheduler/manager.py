@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 from kalash.core.ids import generate_id
 from kalash.scheduler.cron import CronExpression
@@ -65,7 +64,7 @@ class SchedulerManager:
         max_turns: int = 10,
     ) -> ScheduleJob:
         job_id = generate_id("sch_")
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         try:
             cron = CronExpression.parse(schedule)
             next_run = cron.next_fire(now)
@@ -104,9 +103,7 @@ class SchedulerManager:
         for row in rows:
             data = dict(row)
             next_run = (
-                datetime.fromisoformat(data["next_run_at"])
-                if data.get("next_run_at")
-                else None
+                datetime.fromisoformat(data["next_run_at"]) if data.get("next_run_at") else None
             )
             jobs.append(
                 ScheduleJob(
@@ -122,12 +119,14 @@ class SchedulerManager:
 
     def get(self, job_id: str) -> ScheduleJob | None:
         rows = self._engine.execute_read(
-            "SELECT * FROM schedules WHERE id = ?", (job_id,),
+            "SELECT * FROM schedules WHERE id = ?",
+            (job_id,),
         )
         row = rows[0] if rows else None
         if row is None:
             rows = self._engine.execute_read(
-                "SELECT * FROM schedules WHERE id LIKE ?", (f"{job_id}%",),
+                "SELECT * FROM schedules WHERE id LIKE ?",
+                (f"{job_id}%",),
             )
             row = rows[0] if rows else None
         if row is None:
@@ -160,7 +159,7 @@ class SchedulerManager:
         if job is None:
             return None
         session_id = generate_id("ses_")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         self._engine.execute_write_sync(
             """INSERT INTO schedule_runs (id, schedule_id, status, started_at, trigger_source)
                VALUES (?, ?, 'running', ?, 'manual')""",
@@ -168,9 +167,7 @@ class SchedulerManager:
         )
         return TriggerResult(session_id=session_id)
 
-    def get_logs(
-        self, *, job_id: str | None = None, limit: int = 20
-    ) -> list[LogEntry]:
+    def get_logs(self, *, job_id: str | None = None, limit: int = 20) -> list[LogEntry]:
         if job_id:
             rows = self._engine.execute_read(
                 """SELECT r.*, s.name AS job_name FROM schedule_runs r
@@ -194,14 +191,11 @@ class SchedulerManager:
             duration = 0.0
             if started and finished:
                 duration = (
-                    datetime.fromisoformat(finished)
-                    - datetime.fromisoformat(started)
+                    datetime.fromisoformat(finished) - datetime.fromisoformat(started)
                 ).total_seconds()
             entries.append(
                 LogEntry(
-                    timestamp=datetime.fromisoformat(started)
-                    if started
-                    else datetime.now(timezone.utc),
+                    timestamp=datetime.fromisoformat(started) if started else datetime.now(UTC),
                     job_name=str(data.get("job_name", "unknown")),
                     success=data.get("status") == "succeeded",
                     duration_seconds=duration,

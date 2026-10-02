@@ -15,8 +15,8 @@ import time
 from pathlib import Path
 
 from rich.console import Console
-from rich.table import Table
 from rich.panel import Panel
+from rich.table import Table
 
 from kalash.permissions.prompt import ApprovalResponse, PromptContext, PromptResult
 from kalash.runtime.agent import build_agent
@@ -26,8 +26,11 @@ console = Console()
 
 class LiveAllowingUI:
     """Auto-approver for live benchmark runs."""
+
     async def show_approval_prompt(self, context: PromptContext) -> PromptResult:
-        console.print(f"[bold cyan]● [gate][/bold cyan] Approved action: [bold]{context.action}[/bold] ({context.tool_name})")
+        console.print(
+            f"[bold cyan]● [gate][/bold cyan] Approved action: [bold]{context.action}[/bold] ({context.tool_name})"
+        )
         return PromptResult(response=ApprovalResponse.ALLOW_ONCE)
 
     async def show_info(self, message: str) -> None:
@@ -39,11 +42,13 @@ async def main() -> int:
     workspace.mkdir(parents=True, exist_ok=True)
     golden_dir = Path.cwd() / "evals" / "golden_kvstore"
 
-    console.print(Panel.fit(
-        "[bold cyan]Kalash Code — Live Project Build & Golden Reference Comparison[/bold cyan]\n"
-        "Testing live model agent loop, tool execution, streaming, and output fidelity.",
-        border_style="cyan",
-    ))
+    console.print(
+        Panel.fit(
+            "[bold cyan]Kalash Code — Live Project Build & Golden Reference Comparison[/bold cyan]\n"
+            "Testing live model agent loop, tool execution, streaming, and output fidelity.",
+            border_style="cyan",
+        )
+    )
 
     console.print(f"[dim]Target Workspace:[/dim] {workspace}")
     console.print(f"[dim]Golden Standard Directory:[/dim] {golden_dir}")
@@ -81,7 +86,9 @@ async def main() -> int:
     try:
         outcome = await agent.send(prompt, on_text_delta=on_text)
         duration = time.monotonic() - start_time
-        console.print(f"\n\n[bold green]✓ Live Agent Run Complete[/bold green] in {duration:.1f}s ({outcome.iterations} iterations, {agent.budget.tool_calls_used} tool calls)")
+        console.print(
+            f"\n\n[bold green]✓ Live Agent Run Complete[/bold green] in {duration:.1f}s ({outcome.iterations} iterations, {agent.budget.tool_calls_used} tool calls)"
+        )
     except Exception as exc:
         console.print(f"\n[bold red]Agent run encountered exception:[/bold red] {exc}")
         return 1
@@ -94,13 +101,19 @@ async def main() -> int:
         text=True,
         env={**os.environ, "PYTHONPATH": str(workspace / "src")},
     )
-    test_passed = (test_res.returncode == 0)
+    test_passed = test_res.returncode == 0
     console.print(f"Pytest Output:\n{test_res.stdout.strip() or test_res.stderr.strip()}")
-    console.print(f"Status: [{'green' if test_passed else 'red'}]{'PASS' if test_passed else 'FAIL'}[/]")
+    console.print(
+        f"Status: [{'green' if test_passed else 'red'}]{'PASS' if test_passed else 'FAIL'}[/]"
+    )
 
     # --- Verification 2: File-by-File Comparison against Golden Reference ---
-    console.print("\n[bold cyan]2. Comparing Live Generation vs Golden Reference Standard...[/bold cyan]")
-    table = Table(title="Live Build vs Golden Reference Comparison", border_style="cyan", show_lines=True)
+    console.print(
+        "\n[bold cyan]2. Comparing Live Generation vs Golden Reference Standard...[/bold cyan]"
+    )
+    table = Table(
+        title="Live Build vs Golden Reference Comparison", border_style="cyan", show_lines=True
+    )
     table.add_column("File / Component", style="bold")
     table.add_column("Live Size", justify="right")
     table.add_column("Golden Size", justify="right")
@@ -108,7 +121,11 @@ async def main() -> int:
     table.add_column("Status", justify="center")
 
     golden_files = list(golden_dir.rglob("*"))
-    all_golden_rels = [str(f.relative_to(golden_dir)) for f in golden_files if f.is_file() and "__pycache__" not in str(f)]
+    all_golden_rels = [
+        str(f.relative_to(golden_dir))
+        for f in golden_files
+        if f.is_file() and "__pycache__" not in str(f)
+    ]
 
     all_matched = True
     for rel in sorted(all_golden_rels):
@@ -119,13 +136,21 @@ async def main() -> int:
         live_text = live_file.read_text(encoding="utf-8") if live_file.exists() else ""
 
         if not live_file.exists():
-            table.add_row(rel, "[red]MISSING[/red]", f"{len(golden_text)} B", "0%", "[bold red]FAIL[/bold red]")
+            table.add_row(
+                rel,
+                "[red]MISSING[/red]",
+                f"{len(golden_text)} B",
+                "0%",
+                "[bold red]FAIL[/bold red]",
+            )
             all_matched = False
             continue
 
         matcher = difflib.SequenceMatcher(None, golden_text.splitlines(), live_text.splitlines())
         ratio = matcher.ratio()
-        status = "[bold green]PASS[/bold green]" if ratio >= 0.50 else "[bold yellow]DIFF[/bold yellow]"
+        status = (
+            "[bold green]PASS[/bold green]" if ratio >= 0.50 else "[bold yellow]DIFF[/bold yellow]"
+        )
         table.add_row(
             rel,
             f"{len(live_text)} B",

@@ -13,12 +13,9 @@ import logging
 import os
 import platform
 import shutil
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
-
-from kalash.core.paths import temp_dir_for_session
 
 from .policy import SandboxMode, SandboxPolicy
 
@@ -51,10 +48,7 @@ LANDLOCK_WRITE_ACCESS = (
     | LANDLOCK_ACCESS_FS_MAKE_DIR
 )
 
-LANDLOCK_READ_ACCESS = (
-    LANDLOCK_ACCESS_FS_READ_FILE
-    | LANDLOCK_ACCESS_FS_READ_DIR
-)
+LANDLOCK_READ_ACCESS = LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_READ_DIR
 
 
 # ---------------------------------------------------------------------------
@@ -225,9 +219,7 @@ class LinuxSandbox:
                 ]
                 for path in read_only_paths:
                     if path.exists():
-                        self._add_landlock_rule(
-                            libc, ruleset_fd, path, LANDLOCK_READ_ACCESS
-                        )
+                        self._add_landlock_rule(libc, ruleset_fd, path, LANDLOCK_READ_ACCESS)
 
                 # Restrict self
                 ret = libc.syscall(LANDLOCK_RESTRICT_SELF, ruleset_fd, 0)
@@ -238,8 +230,9 @@ class LinuxSandbox:
                 os.close(ruleset_fd)
 
             self._enforced = True
-            logger.info("Landlock sandbox enforced with %d writable roots",
-                       len(self.policy.writable_roots))
+            logger.info(
+                "Landlock sandbox enforced with %d writable roots", len(self.policy.writable_roots)
+            )
 
         except (OSError, AttributeError) as exc:
             logger.error("Landlock enforcement failed: %s", exc)
@@ -354,11 +347,7 @@ class LinuxSandbox:
         # relative path and every bare `ls` silently resolves against the sandbox
         # root instead of the workspace. That is worse than not sandboxing: the
         # command succeeds while operating somewhere unintended.
-        target = cwd or (
-            str(self.policy.writable_roots[0])
-            if self.policy.writable_roots
-            else None
-        )
+        target = cwd or (str(self.policy.writable_roots[0]) if self.policy.writable_roots else None)
         if not target:
             msg = "cannot wrap without a working directory — refusing to run at /"
             raise RuntimeError(msg)

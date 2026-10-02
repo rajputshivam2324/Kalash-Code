@@ -27,9 +27,9 @@ from ..normalize import (
     ModelResponse,
     Role,
     StopReason,
-    StreamError,
     StreamEvent,
     TextBlock,
+    ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
     UsageUpdate,
@@ -92,9 +92,7 @@ def _serialize_messages(
     for msg in messages:
         if msg.role == Role.SYSTEM:
             # Additional system messages
-            text = " ".join(
-                b.text for b in msg.content if isinstance(b, TextBlock)
-            )
+            text = " ".join(b.text for b in msg.content if isinstance(b, TextBlock))
             result.append({"role": "system", "content": text})
             continue
 
@@ -102,7 +100,7 @@ def _serialize_messages(
             # Check for tool calls
             tool_calls = [b for b in msg.content if isinstance(b, ToolUseBlock)]
             text_parts = [b for b in msg.content if isinstance(b, TextBlock)]
-            text = "".join(b.text for b in text_parts) or None
+            text = "".join(b.text for b in text_parts)
 
             if tool_calls:
                 oai_tool_calls = [
@@ -139,12 +137,14 @@ def _serialize_messages(
 
             # Tool results become separate messages in OpenAI format
             for tr in tool_results:
-                content = tr.content if isinstance(tr.content, str) else json.dumps(tr.content)
-                result.append({
-                    "role": "tool",
-                    "tool_call_id": tr.tool_use_id,
-                    "content": content,
-                })
+                tool_content = tr.content if isinstance(tr.content, str) else json.dumps(tr.content)
+                result.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tr.tool_use_id,
+                        "content": tool_content,
+                    }
+                )
 
             # Remaining content as user message
             if other_blocks:
@@ -199,11 +199,13 @@ def _deserialize_response(response: Any) -> tuple[list[ContentBlock], StopReason
             except (json.JSONDecodeError, TypeError):
                 args = {"_raw": tc.function.arguments}
 
-            blocks.append(ToolUseBlock(
-                id=tc.id,
-                name=tc.function.name,
-                input=args,
-            ))
+            blocks.append(
+                ToolUseBlock(
+                    id=tc.id,
+                    name=tc.function.name,
+                    input=args,
+                )
+            )
 
     # Legacy function_call support
     if hasattr(message, "function_call") and message.function_call:
@@ -212,28 +214,39 @@ def _deserialize_response(response: Any) -> tuple[list[ContentBlock], StopReason
             args = json.loads(fc.arguments)
         except (json.JSONDecodeError, TypeError):
             args = {"_raw": fc.arguments}
-        blocks.append(ToolUseBlock(
-            id=f"fc_{fc.name}",
-            name=fc.name,
-            input=args,
-        ))
+        blocks.append(
+            ToolUseBlock(
+                id=f"fc_{fc.name}",
+                name=fc.name,
+                input=args,
+            )
+        )
 
-    # Usage
-    raw_usage = response.usage
-    prompt_details = getattr(raw_usage, "prompt_tokens_details", None) if raw_usage else None
-    cached_tokens = getattr(prompt_details, "cached_tokens", 0) if prompt_details else 0
-
-    usage = Usage(
-        input_tokens=raw_usage.prompt_tokens if raw_usage else 0,
-        output_tokens=raw_usage.completion_tokens if raw_usage else 0,
-        cache_read_tokens=cached_tokens,
-        reasoning_tokens=getattr(raw_usage, "completion_tokens_details", {}).get("reasoning_tokens", 0) if raw_usage else 0,
-        source="provider_reported",
-        provider_raw=raw_usage.model_dump() if raw_usage and hasattr(raw_usage, "model_dump") else {},
-    )
+    reasoning = getattr(message, "reasoning_content", None)
+    if reasoning:
+        blocks.insert(0, ThinkingBlock(thinking=reasoning))
+    usage = _usage(response.usage)
 
     stop_reason = _map_stop_reason(choice.finish_reason)
     return blocks, stop_reason, usage
+
+
+def _field(value: Any, key: str, default: Any = 0) -> Any:
+    return value.get(key, default) if isinstance(value, dict) else getattr(value, key, default)
+
+
+def _usage(raw: Any) -> Usage:
+    """OpenAI and DeepSeek both include cache hits in prompt_tokens."""
+    details = _field(raw, "prompt_tokens_details", None)
+    completion = _field(raw, "completion_tokens_details", None)
+    return Usage(
+        input_tokens=_field(raw, "prompt_tokens"),
+        output_tokens=_field(raw, "completion_tokens"),
+        cache_read_tokens=_field(raw, "prompt_cache_hit_tokens", _field(details, "cached_tokens"))
+        or 0,
+        reasoning_tokens=_field(completion, "reasoning_tokens") or 0,
+        provider_raw=raw.model_dump() if raw and hasattr(raw, "model_dump") else {},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +285,7 @@ class OpenAIProvider:
                 kwargs["base_url"] = self._base_url
             if self._organization:
                 kwargs["organization"] = self._organization
+            kwargs["max_retries"] = 0
             self._client = openai.AsyncOpenAI(**kwargs)
         return self._client
 
@@ -303,6 +317,36 @@ class OpenAIProvider:
             output_per_mtok=Decimal("10.00"),
         )
 
+    token_parameter = "max_completion_tokens"
+
+    def serialize_messages(
+        self, messages: list[Message], system: str | None
+    ) -> list[dict[str, Any]]:
+        return _serialize_messages(messages, system=system)
+
+    def _request(
+        self,
+        messages: list[Message],
+        *,
+        system: str | None,
+        tools: list[dict[str, Any]] | None,
+        max_tokens: int | None,
+        temperature: float | None,
+        stop_sequences: list[str] | None,
+    ) -> dict[str, Any]:
+        request: dict[str, Any] = {
+            "model": self._model,
+            "messages": self.serialize_messages(messages, system),
+            self.token_parameter: max_tokens or self._default_max_tokens,
+        }
+        if tools:
+            request["tools"] = _serialize_tools(tools)
+        if temperature is not None:
+            request["temperature"] = temperature
+        if stop_sequences:
+            request["stop"] = stop_sequences
+        return request
+
     async def complete(
         self,
         messages: list[Message],
@@ -317,20 +361,14 @@ class OpenAIProvider:
         """Send a completion request to OpenAI."""
         client = self._get_client()
 
-        request: dict[str, Any] = {
-            "model": self._model,
-            "messages": _serialize_messages(messages, system=system),
-            "max_completion_tokens": max_tokens or self._default_max_tokens,
-        }
-
-        if tools:
-            request["tools"] = _serialize_tools(tools)
-
-        if temperature is not None:
-            request["temperature"] = temperature
-
-        if stop_sequences:
-            request["stop"] = stop_sequences
+        request = self._request(
+            messages,
+            system=system,
+            tools=tools,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stop_sequences=stop_sequences,
+        )
 
         response = await client.chat.completions.create(**request)
         blocks, stop_reason, usage = _deserialize_response(response)
@@ -357,26 +395,17 @@ class OpenAIProvider:
         """Stream a response from OpenAI."""
         client = self._get_client()
 
-        request: dict[str, Any] = {
-            "model": self._model,
-            "messages": _serialize_messages(messages, system=system),
-            "max_completion_tokens": max_tokens or self._default_max_tokens,
-            "stream": True,
-            "stream_options": {"include_usage": True},
-        }
-
-        if tools:
-            request["tools"] = _serialize_tools(tools)
-
-        if temperature is not None:
-            request["temperature"] = temperature
-
-        if stop_sequences:
-            request["stop"] = stop_sequences
+        request = self._request(
+            messages,
+            system=system,
+            tools=tools,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            stop_sequences=stop_sequences,
+        )
+        request.update(stream=True, stream_options={"include_usage": True})
 
         stream = await client.chat.completions.create(**request)
-
-        yield MessageStart(id="", model=self._model)
 
         current_block_index = 0
         text_started = False
@@ -384,92 +413,105 @@ class OpenAIProvider:
         tc_to_block_index: dict[int, int] = {}  # tc_delta.index -> block index
         open_blocks: set[int] = set()
 
-        async for chunk in stream:
-            if not chunk.choices:
-                # Usage-only chunk at the end
-                if chunk.usage:
-                    yield UsageUpdate(
-                        input_tokens=chunk.usage.prompt_tokens,
-                        output_tokens=chunk.usage.completion_tokens,
-                    )
-                continue
+        finish_reason = StopReason.UNKNOWN
+        try:
+            yield MessageStart(id="", model=self._model)
+            async for chunk in stream:
+                if not chunk.choices:
+                    # Usage-only chunk at the end
+                    if chunk.usage:
+                        usage = _usage(chunk.usage)
+                        yield UsageUpdate(
+                            input_tokens=usage.input_tokens,
+                            output_tokens=usage.output_tokens,
+                            cache_read_tokens=usage.cache_read_tokens,
+                            reasoning_tokens=usage.reasoning_tokens,
+                        )
+                    continue
 
-            choice = chunk.choices[0]
-            delta = choice.delta
+                choice = chunk.choices[0]
+                delta = choice.delta
 
-            # Reasoning / thinking content
-            reasoning = getattr(delta, "reasoning", None) or getattr(delta, "reasoning_content", None)
-            if reasoning:
-                if not thinking_started:
-                    yield BlockStart(index=current_block_index, block_type="thinking")
-                    open_blocks.add(current_block_index)
-                    thinking_started = True
-                yield BlockDelta(index=current_block_index, delta=reasoning)
-
-            # Text content
-            if delta and delta.content:
-                if thinking_started:
-                    yield BlockStop(index=current_block_index)
-                    open_blocks.discard(current_block_index)
-                    current_block_index += 1
-                    thinking_started = False
-                if not text_started:
-                    yield BlockStart(index=current_block_index, block_type="text")
-                    open_blocks.add(current_block_index)
-                    text_started = True
-                yield BlockDelta(index=current_block_index, delta=delta.content)
-
-            # Tool calls
-            if delta and delta.tool_calls:
-                if thinking_started:
-                    yield BlockStop(index=current_block_index)
-                    open_blocks.discard(current_block_index)
-                    current_block_index += 1
-                    thinking_started = False
-
-                for tc_delta in delta.tool_calls:
-                    tc_idx = tc_delta.index
-
-                    if tc_idx not in tc_to_block_index:
-                        # Close text block if open
-                        if text_started:
-                            yield BlockStop(index=current_block_index)
-                            open_blocks.discard(current_block_index)
-                            current_block_index += 1
-                            text_started = False
-                        elif open_blocks:
-                            # Start a new block index after previous tool
-                            current_block_index = max(open_blocks) + 1
-
-                        tc_to_block_index[tc_idx] = current_block_index
+                # Reasoning / thinking content
+                reasoning = getattr(delta, "reasoning", None) or getattr(
+                    delta, "reasoning_content", None
+                )
+                if reasoning:
+                    if not thinking_started:
+                        yield BlockStart(index=current_block_index, block_type="thinking")
                         open_blocks.add(current_block_index)
-                        yield BlockStart(
-                            index=current_block_index,
-                            block_type="tool_use",
-                            tool_use_id=tc_delta.id,
-                            tool_name=tc_delta.function.name if tc_delta.function else None,
-                        )
+                        thinking_started = True
+                    yield BlockDelta(index=current_block_index, delta=reasoning)
+
+                # Text content
+                if delta and delta.content:
+                    if thinking_started:
+                        yield BlockStop(index=current_block_index)
+                        open_blocks.discard(current_block_index)
                         current_block_index += 1
+                        thinking_started = False
+                    if not text_started:
+                        yield BlockStart(index=current_block_index, block_type="text")
+                        open_blocks.add(current_block_index)
+                        text_started = True
+                    yield BlockDelta(index=current_block_index, delta=delta.content)
 
-                    # Route delta to the correct block index
-                    blk_idx = tc_to_block_index[tc_idx]
-                    if tc_delta.function and tc_delta.function.arguments:
-                        yield BlockDelta(
-                            index=blk_idx,
-                            delta=tc_delta.function.arguments,
-                        )
+                # Tool calls
+                if delta and delta.tool_calls:
+                    if thinking_started:
+                        yield BlockStop(index=current_block_index)
+                        open_blocks.discard(current_block_index)
+                        current_block_index += 1
+                        thinking_started = False
 
-            # Finish reason
-            if choice.finish_reason:
-                # Close all open blocks
-                if text_started:
-                    yield BlockStop(index=current_block_index)
-                    open_blocks.discard(current_block_index)
-                for blk_idx in sorted(open_blocks):
-                    yield BlockStop(index=blk_idx)
-                open_blocks.clear()
+                    for tc_delta in delta.tool_calls:
+                        tc_idx = tc_delta.index
 
-                yield MessageStop(stop_reason=_map_stop_reason(choice.finish_reason))
+                        if tc_idx not in tc_to_block_index:
+                            # Close text block if open
+                            if text_started:
+                                yield BlockStop(index=current_block_index)
+                                open_blocks.discard(current_block_index)
+                                current_block_index += 1
+                                text_started = False
+                            elif open_blocks:
+                                # Start a new block index after previous tool
+                                current_block_index = max(open_blocks) + 1
+
+                            tc_to_block_index[tc_idx] = current_block_index
+                            open_blocks.add(current_block_index)
+                            yield BlockStart(
+                                index=current_block_index,
+                                block_type="tool_use",
+                                tool_use_id=tc_delta.id,
+                                tool_name=tc_delta.function.name if tc_delta.function else None,
+                            )
+                            current_block_index += 1
+
+                        # Route delta to the correct block index
+                        blk_idx = tc_to_block_index[tc_idx]
+                        if tc_delta.function and tc_delta.function.arguments:
+                            yield BlockDelta(
+                                index=blk_idx,
+                                delta=tc_delta.function.arguments,
+                            )
+
+                # Finish reason
+                if choice.finish_reason:
+                    # Close all open blocks
+                    if text_started:
+                        yield BlockStop(index=current_block_index)
+                        open_blocks.discard(current_block_index)
+                    for blk_idx in sorted(open_blocks):
+                        yield BlockStop(index=blk_idx)
+                    open_blocks.clear()
+
+                    finish_reason = _map_stop_reason(choice.finish_reason)
+
+        finally:
+            await stream.close()
+
+        yield MessageStop(stop_reason=finish_reason)
 
     async def close(self) -> None:
         """Close the HTTP client."""

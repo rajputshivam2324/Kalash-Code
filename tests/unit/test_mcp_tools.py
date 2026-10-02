@@ -120,8 +120,8 @@ async def test_wire_mcp_tools_registers_connected_tools(monkeypatch) -> None:
         lambda self: [fake_entry],
     )
     monkeypatch.setattr(
-        "kalash.mcp.load._entry_to_config",
-        lambda entry: MagicMock(name="cfg"),
+        "kalash.mcp.load.MCPRegistry._to_config",
+        lambda self, entry: MagicMock(name="cfg"),
     )
     monkeypatch.setattr(mcp_load, "MCPManager", FakeManager)
 
@@ -129,3 +129,91 @@ async def test_wire_mcp_tools_registers_connected_tools(monkeypatch) -> None:
     manager = await mcp_load.wire_mcp_tools(registry)
     assert manager is not None
     assert registry.has("mcp__srv__ping")
+
+
+async def test_http_initialization_session_headers_and_sse_result(monkeypatch):
+    import httpx
+
+    from kalash.mcp.client import MCPClient, MCPServerConfig, TransportType
+    from kalash.mcp.http import HTTPTransport
+
+    requests = []
+
+    def server(request):
+        import json
+
+        payload = json.loads(request.content)
+        requests.append((request, payload))
+        if payload["method"] == "initialize":
+            return httpx.Response(
+                200,
+                headers={"Mcp-Session-Id": "session-test"},
+                json={
+                    "jsonrpc": "2.0",
+                    "id": payload["id"],
+                    "result": {"protocolVersion": "2025-06-18", "capabilities": {}},
+                },
+            )
+        assert request.headers["Mcp-Session-Id"] == "session-test"
+        assert request.headers["MCP-Protocol-Version"] == "2025-06-18"
+        assert "text/event-stream" in request.headers["Accept"]
+        if "id" not in payload:
+            return httpx.Response(202)
+        data = {"jsonrpc": "2.0", "id": payload["id"], "result": {"tools": []}}
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/event-stream"},
+            text="data: " + json.dumps(data) + "\n\n",
+        )
+
+    def transport(url, timeout):
+        result = HTTPTransport(url, timeout)
+        result.client = httpx.AsyncClient(transport=httpx.MockTransport(server))
+        return result
+
+    monkeypatch.setattr("kalash.mcp.http.HTTPTransport", transport)
+    client = MCPClient(
+        MCPServerConfig(name="test", transport=TransportType.HTTP, url="https://mcp.test/mcp")
+    )
+    await client.connect()
+    assert client.is_connected
+    assert [payload["method"] for _, payload in requests] == [
+        "initialize",
+        "notifications/initialized",
+        "tools/list",
+    ]
+    # Skip the optional DELETE handler, whose request has no JSON body.
+    client._http.session = None
+    await client.disconnect()
+
+
+def test_project_configuration_requires_trust_and_invalidates_on_edit(tmp_path):
+    from kalash.core.trust import is_trusted, trust_file
+
+    path = tmp_path / "mcp.json"
+    path.write_text('{"servers": {}}')
+    assert not is_trusted(path)
+    trust_file(path)
+    assert is_trusted(path)
+    path.write_text('{"servers": {"changed": {}}}')
+    assert not is_trusted(path)
+
+
+def test_mcp_command_args_and_secret_environment_references(tmp_path, monkeypatch):
+    from kalash.mcp.registry import MCPRegistry, MCPServerEntry
+
+    monkeypatch.setenv("TEST_MCP_TOKEN", "test-only-value")
+    registry = MCPRegistry(tmp_path)
+    config = registry._to_config(
+        MCPServerEntry(
+            name="test",
+            transport="stdio",
+            url="",
+            command="python",
+            args=["server.py"],
+            env={"TOKEN": "${env:TEST_MCP_TOKEN}"},
+        )
+    )
+    assert config.command == "python"
+    assert config.args == ["server.py"]
+    assert config.env == {"TOKEN": "test-only-value"}

@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import asyncio
 import threading
-import tempfile
-from pathlib import Path
 
 import pytest
 
 from kalash.storage.engine import StorageEngine
-
 
 # ---------------------------------------------------------------------------
 # StorageEngine unit tests
@@ -77,9 +73,7 @@ class TestStorageEngine:
         conn = engine._get_connection()
         conn.execute("CREATE TABLE IF NOT EXISTS test_sync (id INTEGER, val TEXT)")
 
-        engine.execute_write_sync(
-            "INSERT INTO test_sync (id, val) VALUES (?, ?)", (1, "hello")
-        )
+        engine.execute_write_sync("INSERT INTO test_sync (id, val) VALUES (?, ?)", (1, "hello"))
 
         rows = engine.execute_read("SELECT val FROM test_sync WHERE id = 1")
         assert len(rows) == 1
@@ -127,9 +121,7 @@ class TestStorageEngine:
     async def test_execute_many(self, engine):
         conn = engine._get_connection()
         conn.execute("CREATE TABLE IF NOT EXISTS test_em (id INTEGER)")
-        await engine.execute_many(
-            "INSERT INTO test_em VALUES (?)", [(1,), (2,), (3,)]
-        )
+        await engine.execute_many("INSERT INTO test_em VALUES (?)", [(1,), (2,), (3,)])
         rows = engine.execute_read("SELECT id FROM test_em ORDER BY id")
         assert [r["id"] for r in rows] == [1, 2, 3]
 
@@ -155,9 +147,7 @@ class TestStorageEngine:
         def writer(start):
             try:
                 for i in range(start, start + 20):
-                    engine.execute_write_sync(
-                        "INSERT INTO test_conc VALUES (?)", (i,)
-                    )
+                    engine.execute_write_sync("INSERT INTO test_conc VALUES (?)", (i,))
             except Exception as e:
                 errors.append(e)
 
@@ -182,29 +172,34 @@ class TestMCPManagerBasic:
 
     def test_import(self):
         from kalash.mcp.manager import MCPManager, ServerState
+
         assert MCPManager is not None
         assert ServerState.CONFIGURED == "CONFIGURED"
 
     def test_initial_state_empty(self):
         from kalash.mcp.manager import MCPManager
+
         mgr = MCPManager()
         assert mgr.servers == {}
         assert mgr.all_tools == {}
 
     def test_get_status_nonexistent(self):
         from kalash.mcp.manager import MCPManager
+
         mgr = MCPManager()
         assert mgr.get_status("nonexistent") is None
 
     def test_resolve_server_unknown_tool(self):
         from kalash.mcp.manager import MCPManager
+
         mgr = MCPManager()
         assert mgr.resolve_server("mcp__x__y") is None
 
     @pytest.mark.asyncio
     async def test_call_tool_unknown_raises(self):
-        from kalash.mcp.manager import MCPManager
         from kalash.core.errors import KalashError
+        from kalash.mcp.manager import MCPManager
+
         mgr = MCPManager()
         with pytest.raises(KalashError, match="not found"):
             await mgr.call_tool("mcp__fake__tool", {})
@@ -212,6 +207,7 @@ class TestMCPManagerBasic:
     @pytest.mark.asyncio
     async def test_disconnect_all_when_empty(self):
         from kalash.mcp.manager import MCPManager
+
         mgr = MCPManager()
         await mgr.disconnect_all()  # should not raise
 
@@ -225,7 +221,8 @@ class TestAuthStoreCache:
     """Tests for credential caching (P-1 fix)."""
 
     def test_load_empty_returns_empty(self, tmp_path, monkeypatch):
-        from kalash.tui import auth_store
+        from kalash.models import auth_store
+
         monkeypatch.setattr(auth_store, "_auth_path", lambda: tmp_path / "auth.json")
         # Reset cache
         auth_store._auth_cache = None
@@ -235,7 +232,8 @@ class TestAuthStoreCache:
         assert result == {}
 
     def test_cache_invalidation_on_save(self, tmp_path, monkeypatch):
-        from kalash.tui import auth_store
+        from kalash.models import auth_store
+
         monkeypatch.setattr(auth_store, "_auth_path", lambda: tmp_path / "auth.json")
         auth_store._auth_cache = {"old": "data"}
         auth_store._auth_cache_mtime = 12345.0

@@ -1,19 +1,4 @@
-"""Single place that turns stored credentials into a live provider.
-
-Both the TUI and headless mode go through this. They previously resolved
-providers independently, so `kalash -p` ignored whatever `/connect` had saved
-and only looked at environment variables — connecting in the TUI appeared to
-do nothing for scripted runs.
-
-Resolution order for a credential, highest priority first:
-
-1. the value saved by `/connect`
-2. the provider's environment variable
-
-Note: the provider catalog and credential store currently live under
-``kalash.tui``. They are not UI concerns and belong in ``models``/``core``;
-they are imported lazily here so that headless callers do not pull in Textual.
-"""
+"""Resolve configured model providers using shared catalog and credential storage."""
 
 from __future__ import annotations
 
@@ -38,8 +23,8 @@ class Resolution:
 
 def active_selection() -> tuple[str | None, str | None]:
     """Return the saved (provider_id, model_id), falling back to the environment."""
-    from kalash.tui.auth_store import get_active_provider
-    from kalash.tui.providers import PROVIDERS
+    from kalash.models.auth_store import get_active_provider
+    from kalash.models.catalog import PROVIDERS
 
     saved = get_active_provider()
     if saved and saved[0]:
@@ -57,8 +42,8 @@ def active_selection() -> tuple[str | None, str | None]:
 
 def credential_for(provider_id: str) -> str:
     """Return the API key for a provider, preferring the saved value."""
-    from kalash.tui.auth_store import get_credential
-    from kalash.tui.providers import get_provider
+    from kalash.models.auth_store import get_credential
+    from kalash.models.catalog import get_provider
 
     saved = get_credential(provider_id)
     if saved:
@@ -74,8 +59,8 @@ def credential_for(provider_id: str) -> str:
 
 def base_url_for(provider_id: str) -> str:
     """Return the base URL for a provider, honouring a custom override."""
-    from kalash.tui.auth_store import get_credential
-    from kalash.tui.providers import get_provider
+    from kalash.models.auth_store import get_credential
+    from kalash.models.catalog import get_provider
 
     override = get_credential(f"{provider_id}:base_url")
     if override:
@@ -93,7 +78,7 @@ def build_provider(
     With no arguments the saved selection is used. Never raises: a failure is
     reported through ``Resolution.reason`` so callers can present it.
     """
-    from kalash.tui.providers import get_provider
+    from kalash.models.catalog import get_provider
 
     # Only fall back to the saved selection when no provider was named.
     # Treating "provider given, model omitted" as "resolve everything from
@@ -153,6 +138,12 @@ def build_provider(
             from kalash.models.providers.openai import OpenAIProvider
 
             provider = OpenAIProvider(api_key=api_key, model=model_id)
+        elif provider_id == "sarvam":
+            from kalash.models.providers.sarvam import SarvamProvider
+
+            provider = SarvamProvider(
+                api_key=api_key, model=model_id, base_url=base_url_for(provider_id)
+            )
         else:
             from kalash.models.providers.openai_compatible import (
                 OpenAICompatibleProvider,
@@ -166,33 +157,34 @@ def build_provider(
                 context_window=info.context_window,
                 provider_name=info.id,
             )
-    except ImportError as exc:
+    except (ImportError, ValueError) as exc:
         return Resolution(
             provider=None,
             provider_id=provider_id,
             model_id=model_id,
-            reason=f"provider package not installed: {exc}",
+            reason=f"provider could not be configured: {exc}",
         )
 
     return Resolution(provider=provider, provider_id=provider_id, model_id=model_id)
 
+
 def build_gateway(model_identifiers: list[str]) -> Resolution:
     """Construct a ModelGateway with primary and fallback providers.
-    
+
     Each identifier can be 'provider/model' or just 'provider'.
     If an identifier is just 'provider', it uses the default model for that provider.
     """
     if not model_identifiers:
         return build_provider()
-        
+
     providers: list[Any] = []
-    
+
     for identifier in model_identifiers:
         if "/" in identifier:
             provider_id, model_id = identifier.split("/", 1)
         else:
             provider_id, model_id = identifier, None
-            
+
         res = build_provider(provider_id=provider_id, model_id=model_id)
         if res.ok:
             providers.append(res.provider)
@@ -206,11 +198,11 @@ def build_gateway(model_identifiers: list[str]) -> Resolution:
     valid_providers = [p for p in providers if p is not None]
     if not valid_providers:
         return Resolution(None, None, None, "No providers could be built")
-        
+
     from kalash.models.gateway import ModelGateway
-    
+
     gateway = ModelGateway(primary=valid_providers[0], fallbacks=valid_providers[1:])
-    
+
     # Return resolution with the gateway as the provider
     # provider_id and model_id are from the primary provider
     primary_id = model_identifiers[0]
@@ -218,5 +210,5 @@ def build_gateway(model_identifiers: list[str]) -> Resolution:
         p_id, m_id = primary_id.split("/", 1)
     else:
         p_id, m_id = primary_id, None
-        
+
     return Resolution(provider=gateway, provider_id=p_id, model_id=m_id)

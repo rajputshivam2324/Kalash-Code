@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -14,11 +14,9 @@ console = Console()
 
 @session_app.command("ls")
 def ls(
-    limit: Annotated[
-        int, typer.Option("--limit", "-n", help="Max sessions to show")
-    ] = 20,
+    limit: Annotated[int, typer.Option("--limit", "-n", help="Max sessions to show")] = 20,
     status: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--status", "-s", help="Filter by status (active, completed, abandoned)"),
     ] = None,
 ) -> None:
@@ -56,7 +54,7 @@ def ls(
 def show(
     session_id: Annotated[str, typer.Argument(help="Session ID to inspect")],
     turns: Annotated[
-        Optional[int],
+        int | None,
         typer.Option("--turns", "-t", help="Number of recent turns to display"),
     ] = None,
 ) -> None:
@@ -88,9 +86,10 @@ def show(
             role = str(row.get("role", "?"))
             color = {"user": "blue", "assistant": "green"}.get(role, "yellow")
             blocks = deserialize_blocks(row.get("content"))
-            text = " ".join(
-                b.text for b in blocks if isinstance(b, TextBlock)
-            ).strip() or f"({len(blocks)} non-text block(s))"
+            text = (
+                " ".join(b.text for b in blocks if isinstance(b, TextBlock)).strip()
+                or f"({len(blocks)} non-text block(s))"
+            )
             console.print(f"  [{color}]{role}:[/{color}] {text[:160]}")
 
 
@@ -98,7 +97,7 @@ def show(
 def export(
     session_id: Annotated[str, typer.Argument(help="Session ID to export")],
     output: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--output", "-o", help="Output file path (defaults to stdout)"),
     ] = None,
     format: Annotated[
@@ -128,9 +127,7 @@ def export(
 @session_app.command("rm")
 def rm(
     session_id: Annotated[str, typer.Argument(help="Session ID to delete")],
-    force: Annotated[
-        bool, typer.Option("--force", "-f", help="Skip confirmation")
-    ] = False,
+    force: Annotated[bool, typer.Option("--force", "-f", help="Skip confirmation")] = False,
 ) -> None:
     """Delete a session permanently."""
     from kalash.runtime.session import SessionManager

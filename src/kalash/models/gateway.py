@@ -1,14 +1,4 @@
-"""Unified model gateway — single interface for all LLM providers.
-
-The gateway handles:
-- Provider routing (primary + fallback chain)
-- Proactive sliding-window TPM/RPM rate pacing (preventing 429 overages before calling)
-- Dynamic runtime limit learning & constraint caching
-- Retry with jittered exponential backoff (4 attempts, 60s budget)
-- Error classification (transient vs permanent vs context exceeded)
-- Usage tracking and token budget enforcement
-- Streaming normalization
-"""
+"""Normalized provider calls, bounded transient retries and usage totals."""
 
 from __future__ import annotations
 
@@ -17,26 +7,20 @@ import logging
 import random
 import re
 import time
-from collections import deque
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-from kalash.core.budget import Pricing, Usage, estimate_tokens
+from kalash.core.budget import Pricing, Usage
 from kalash.core.errors import (
     ModelAllFailedError,
     ModelContextExceededError,
-    ModelError,
 )
-from kalash.models import limits
-from kalash.models.limits import ConstraintCache, effective_limits
 
 from .normalize import (
-    ContentBlock,
     Message,
     ModelCapabilities,
     ModelResponse,
-    StopReason,
     StreamError,
     StreamEvent,
 )
@@ -73,7 +57,7 @@ class ProviderProtocol(Protocol):
         **kwargs: Any,
     ) -> ModelResponse: ...
 
-    async def stream(
+    def stream(
         self,
         messages: list[Message],
         *,
@@ -89,7 +73,7 @@ class ProviderProtocol(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# Error classification & dynamic limit learning
+# Error classification
 # ---------------------------------------------------------------------------
 
 
@@ -104,32 +88,53 @@ class ErrorKind:
 
 
 def classify_error(exc: Exception, model_id: str = "") -> str:
-    """Classify an exception into an ErrorKind and learn constraints if present."""
+    """Classify provider failures without changing request content."""
     msg = str(exc).lower()
 
     # Context window exceeded
-    if any(s in msg for s in ("context length", "context_length", "too many tokens", "maximum context")):
+    if any(
+        s in msg for s in ("context length", "context_length", "too many tokens", "maximum context")
+    ):
         return ErrorKind.CONTEXT_EXCEEDED
 
     # Auth failures
-    if any(s in msg for s in ("authentication", "unauthorized", "invalid api key", "permission denied")):
+    if any(
+        s in msg for s in ("authentication", "unauthorized", "invalid api key", "permission denied")
+    ):
         return ErrorKind.AUTH
 
-    # Rate limits (TPM / RPM)
-    if any(s in msg for s in ("rate limit", "429", "tpm", "tokens per minute", "overloaded", "503", "502", "500", "timeout", "connection")):
-        # Extract TPM limit from error if provider supplied it: e.g. "Limit 8000, Requested 10692"
-        match = re.search(r"limit\s+(\d[\d,]*)", msg, re.I)
-        if match and model_id:
-            try:
-                tpm_val = int(match.group(1).replace(",", ""))
-                ConstraintCache.record_tpm(model_id, tpm_val)
-                logger.info("Learned dynamic TPM constraint for %s: %d", model_id, tpm_val)
-            except Exception:
-                pass
+    if "413" in msg or ("tokens per minute" in msg and "request too large" in msg):
+        return ErrorKind.PERMANENT
+
+    # Transient rate limits and service errors
+    if any(
+        s in msg
+        for s in (
+            "rate limit",
+            "429",
+            "tpm",
+            "tokens per minute",
+            "overloaded",
+            "503",
+            "502",
+            "500",
+            "timeout",
+            "connection",
+        )
+    ):
         return ErrorKind.TRANSIENT
 
     # Tool argument parse failure (Groq / OpenAI upstream) — retryable with remedy
-    if any(s in msg for s in ("failed to parse tool call", "parse tool call arguments", "failed to call a function", "failed_generation", "cutoff by max_tokens")):
+    if any(
+        s in msg
+        for s in (
+            "failed to parse tool call",
+            "parse tool call arguments",
+            "failed to call a function",
+            "failed_generation",
+            "cutoff by max_tokens",
+        )
+    ):
         return ErrorKind.TRANSIENT
 
     # Bad request — permanent
@@ -139,93 +144,16 @@ def classify_error(exc: Exception, model_id: str = "") -> str:
     return ErrorKind.UNKNOWN
 
 
-# ---------------------------------------------------------------------------
-# Proactive Sliding-Window Rate Pacer
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class SlidingWindowRatePacer:
-    """Sliding 60-second window token and request rate pacer across all providers.
-    
-    Prevents 429 TPM/RPM ceiling breaches proactively before sending requests.
-    """
-
-    _window_tokens: dict[str, deque[tuple[float, int]]] = field(default_factory=dict)
-    _window_requests: dict[str, deque[float]] = field(default_factory=dict)
-
-    def record_usage(self, model_id: str, tokens: int) -> None:
-        """Record consumed tokens into the sliding window."""
-        if tokens <= 0:
-            return
-        now = time.monotonic()
-        key = model_id.strip().lower()
-        if key not in self._window_tokens:
-            self._window_tokens[key] = deque()
-            self._window_requests[key] = deque()
-
-        self._window_tokens[key].append((now, tokens))
-        self._window_requests[key].append(now)
-        self._cleanup(key, now)
-
-    def _cleanup(self, key: str, now: float) -> None:
-        cutoff = now - 60.0
-        t_queue = self._window_tokens.get(key)
-        if t_queue:
-            while t_queue and t_queue[0][0] < cutoff:
-                t_queue.popleft()
-        r_queue = self._window_requests.get(key)
-        if r_queue:
-            while r_queue and r_queue[0] < cutoff:
-                r_queue.popleft()
-
-    async def pace(self, model_id: str, estimated_tokens: int, tpm_limit: int | None) -> float:
-        """Calculate necessary proactive sleep time to avoid TPM breach, and sleep if needed."""
-        if not tpm_limit or tpm_limit <= 0:
-            return 0.0
-
-        now = time.monotonic()
-        key = model_id.strip().lower()
-        self._cleanup(key, now)
-
-        t_queue = self._window_tokens.get(key, deque())
-        used_in_window = sum(count for _, count in t_queue)
-
-        # Leave 5% safety margin
-        effective_ceiling = int(tpm_limit * 0.95)
-        if used_in_window + estimated_tokens > effective_ceiling:
-            needed_reduction = (used_in_window + estimated_tokens) - effective_ceiling
-            freed = 0
-            wait_time = 0.0
-            for ts, count in t_queue:
-                freed += count
-                wait_time = max(wait_time, 60.0 - (now - ts) + 0.05)
-                if freed >= needed_reduction:
-                    break
-
-            if wait_time > 0:
-                logger.info(
-                    "Pacing request for %s: %d tokens in window + %d requested exceeds TPM %d. Pacing for %.2fs",
-                    model_id, used_in_window, estimated_tokens, tpm_limit, wait_time,
-                )
-                await asyncio.sleep(min(wait_time, 60.0))
-                return wait_time
-        return 0.0
-
-
-# ---------------------------------------------------------------------------
-# Retry configuration
-# ---------------------------------------------------------------------------
-
-
 def _extract_retry_after(exc: Exception) -> float | None:
     """Extract retry-after delay from provider error messages and HTTP headers."""
     # Check HTTP Retry-After header if response object exists
     resp = getattr(exc, "response", None)
     if resp and hasattr(resp, "headers"):
-        header = (resp.headers.get("retry-after")
-                  or resp.headers.get("Retry-After")
-                  or resp.headers.get("retry-after-ms"))
+        header = (
+            resp.headers.get("retry-after")
+            or resp.headers.get("Retry-After")
+            or resp.headers.get("retry-after-ms")
+        )
         if header:
             try:
                 val = float(header)
@@ -233,7 +161,7 @@ def _extract_retry_after(exc: Exception) -> float | None:
                 return val / 1000.0 if val > 1000 else val
             except ValueError:
                 pass
-    
+
     # Parse from error message text
     msg = str(exc)
     patterns = [
@@ -269,9 +197,9 @@ class RetryConfig:
 
     def delay_for_attempt(self, attempt: int) -> float:
         """Compute delay with exponential backoff and jitter."""
-        base = min(self.initial_delay_s * (2 ** attempt), self.max_delay_s)
+        base = min(self.initial_delay_s * (2**attempt), self.max_delay_s)
         jitter = base * self.jitter_factor * random.random()
-        return base + jitter
+        return float(base + jitter)
 
 
 @dataclass
@@ -287,7 +215,7 @@ class ProviderAttemptResult:
 
 
 class ModelGateway:
-    """Unified interface to LLM providers with retry, proactive rate pacing, and fallback."""
+    """Unified interface to LLM providers with bounded retries and fallback."""
 
     def __init__(
         self,
@@ -300,7 +228,6 @@ class ModelGateway:
         self._retry = retry_config or RetryConfig()
         self._total_usage = Usage()
         self._call_count = 0
-        self._pacer = SlidingWindowRatePacer()
 
     @property
     def primary(self) -> ProviderProtocol:
@@ -329,9 +256,6 @@ class ModelGateway:
             source="aggregated",
         )
         self._call_count += 1
-        if model_id:
-            total_call_tokens = usage.input_tokens + usage.output_tokens
-            self._pacer.record_usage(model_id, total_call_tokens)
 
     # --- Retry loop for a single provider ---
 
@@ -357,9 +281,14 @@ class ModelGateway:
 
             try:
                 stream = provider.stream(messages, **kwargs)
-                async for event in stream:
-                    yielded_any = True
-                    yield event
+                try:
+                    async for event in stream:
+                        yielded_any = True
+                        yield event
+                finally:
+                    close = getattr(stream, "aclose", None)
+                    if close is not None:
+                        await close()
                 return
             except Exception as exc:
                 last_exc = exc
@@ -384,7 +313,10 @@ class ModelGateway:
                     if delay > 0:
                         logger.info(
                             "Retrying stream %s in %.2fs (attempt %d, %s)",
-                            provider.name, delay, attempt + 1, last_kind
+                            provider.name,
+                            delay,
+                            attempt + 1,
+                            last_kind,
                         )
                         await asyncio.sleep(delay)
 
@@ -399,7 +331,7 @@ class ModelGateway:
         mode: str = "complete",
         **kwargs: Any,
     ) -> ProviderAttemptResult:
-        """Try a provider with proactive rate pacing and retry logic."""
+        """Try a provider without changing the requested prompt or output budget and retry logic."""
         start = time.monotonic()
         last_exc: Exception | None = None
         last_kind = ErrorKind.UNKNOWN
@@ -423,9 +355,8 @@ class ModelGateway:
                         response=response,
                         usage=response.usage,
                     )
-                else:
-                    stream = self._stream_with_retry(provider, messages, **kwargs)
-                    return ProviderAttemptResult(success=True, stream=stream)
+                stream = self._stream_with_retry(provider, messages, **kwargs)
+                return ProviderAttemptResult(success=True, stream=stream)
 
             except Exception as exc:
                 last_exc = exc
@@ -485,7 +416,6 @@ class ModelGateway:
         **kwargs: Any,
     ) -> ModelResponse:
         """Send messages to the model and get a complete response."""
-        prompt_tokens = _estimate_message_tokens(messages)
 
         call_kwargs: dict[str, Any] = {
             "system": system,
@@ -500,14 +430,8 @@ class ModelGateway:
 
         for provider in providers:
             provider_kwargs = dict(call_kwargs)
-            adjusted_max, _ = limits.fit_request_size(
-                provider.name, prompt_tokens, max_tokens or 4096
-            )
-            provider_kwargs["max_tokens"] = adjusted_max
-
-            # Proactive sliding-window rate pacing
-            model_lims = effective_limits(provider.name)
-            await self._pacer.pace(provider.name, prompt_tokens + min(adjusted_max, 1024), model_lims.tokens_per_minute)
+            if max_tokens is not None:
+                provider_kwargs["max_tokens"] = max_tokens
 
             result = await self._attempt_with_retry(
                 provider, messages, mode="complete", **provider_kwargs
@@ -531,9 +455,7 @@ class ModelGateway:
                     logger.warning("Auth failed for %s, trying next", provider.name)
                     continue
 
-        error_summary = "; ".join(
-            f"{name}: {exc} ({kind})" for name, exc, kind in errors
-        )
+        error_summary = "; ".join(f"{name}: {exc} ({kind})" for name, exc, kind in errors)
         raise ModelAllFailedError(
             f"All providers failed: {error_summary}",
             recoverable=False,
@@ -550,8 +472,7 @@ class ModelGateway:
         stop_sequences: list[str] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamEvent]:
-        """Stream responses from the model with proactive rate pacing."""
-        prompt_tokens = _estimate_message_tokens(messages)
+        """Stream responses from the model without changing the requested prompt or output budget."""
 
         call_kwargs: dict[str, Any] = {
             "system": system,
@@ -566,22 +487,22 @@ class ModelGateway:
 
         for provider in providers:
             provider_kwargs = dict(call_kwargs)
-            adjusted_max, _ = limits.fit_request_size(
-                provider.name, prompt_tokens, max_tokens or 4096
-            )
-            provider_kwargs["max_tokens"] = adjusted_max
-
-            # Proactive sliding-window rate pacing
-            model_lims = effective_limits(provider.name)
-            await self._pacer.pace(provider.name, prompt_tokens + min(adjusted_max, 1024), model_lims.tokens_per_minute)
+            if max_tokens is not None:
+                provider_kwargs["max_tokens"] = max_tokens
 
             result = await self._attempt_with_retry(
                 provider, messages, mode="stream", **provider_kwargs
             )
 
             if result.success and result.stream is not None:
-                async for event in self._track_stream_usage(result.stream, model_id=provider.name):
-                    yield event
+                tracked = self._track_stream_usage(result.stream, model_id=provider.name)
+                try:
+                    async for event in tracked:
+                        yield event
+                finally:
+                    close = getattr(tracked, "aclose", None)
+                    if close is not None:
+                        await close()
                 return
 
             if result.error:
@@ -602,16 +523,22 @@ class ModelGateway:
         """Wrap a stream to accumulate usage from UsageUpdate events."""
         from .normalize import UsageUpdate as _UsageUpdate
 
-        async for event in stream:
-            if isinstance(event, _UsageUpdate):
-                usage = Usage(
-                    input_tokens=event.input_tokens,
-                    output_tokens=event.output_tokens,
-                    cache_read_tokens=event.cache_read_tokens,
-                    cache_write_tokens=event.cache_write_tokens,
-                )
-                self._accumulate_usage(usage, model_id=model_id)
-            yield event
+        try:
+            async for event in stream:
+                if isinstance(event, _UsageUpdate):
+                    usage = Usage(
+                        input_tokens=event.input_tokens,
+                        output_tokens=event.output_tokens,
+                        cache_read_tokens=event.cache_read_tokens,
+                        cache_write_tokens=event.cache_write_tokens,
+                        reasoning_tokens=event.reasoning_tokens,
+                    )
+                    self._accumulate_usage(usage, model_id=model_id)
+                yield event
+        finally:
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                await close()
 
     async def close(self) -> None:
         """Close all provider connections."""
@@ -621,20 +548,3 @@ class ModelGateway:
                 await provider.close()
             except Exception as exc:
                 logger.warning("Error closing %s: %s", provider.name, exc)
-
-
-def _estimate_message_tokens(messages: list[Message]) -> int:
-    """Estimate total tokens across a list of normalized messages."""
-    import json
-    total = 0
-    for m in messages:
-        for b in m.content:
-            if hasattr(b, "text") and getattr(b, "text"):
-                total += estimate_tokens(getattr(b, "text"))
-            elif hasattr(b, "input") and isinstance(getattr(b, "input"), dict):
-                total += estimate_tokens(json.dumps(getattr(b, "input")))
-            elif hasattr(b, "content") and isinstance(getattr(b, "content"), str):
-                total += estimate_tokens(getattr(b, "content"))
-            else:
-                total += 40
-    return max(total, 10)

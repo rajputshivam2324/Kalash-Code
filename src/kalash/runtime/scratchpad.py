@@ -37,7 +37,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -222,7 +222,7 @@ class Scratchpad:
             digest=digest,
             size_bytes=len(payload),
             lines=body.count("\n") + 1 if body else 0,
-            created_at=datetime.now(timezone.utc).isoformat(),
+            created_at=datetime.now(UTC).isoformat(),
             metadata=dict(metadata or {}),
             inline=inline,
         )
@@ -333,7 +333,7 @@ class Scratchpad:
             ref=normalized,
             content=rendered,
             total_lines=total,
-            shown_lines=len(selected),
+            shown_lines=len(rendered.splitlines()),
             truncated=truncated,
         )
 
@@ -541,6 +541,14 @@ def _render_numbered(selected: list[tuple[int, str]], max_bytes: int) -> tuple[s
     truncated = False
     for number, text in selected:
         row = f"{number}|{text}"
+        encoded = row.encode("utf-8")
+        # One minified line must not hide all subsequent grep matches.
+        if len(encoded) > max_bytes:
+            allowance = max_bytes // 2
+            marker = " [line truncated]"
+            room = max(0, allowance - len(marker.encode("utf-8")))
+            row = encoded[:room].decode("utf-8", errors="ignore") + marker
+            truncated = True
         cost = len(row.encode("utf-8")) + 1
         if used + cost > max_bytes:
             truncated = True

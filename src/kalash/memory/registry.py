@@ -13,15 +13,18 @@ from __future__ import annotations
 import asyncio
 import importlib.metadata
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any, Callable
+from datetime import UTC, datetime
+from typing import Any
 
 try:
     import structlog
+
     logger = structlog.get_logger()
 except ImportError:
     import logging
+
     logger = logging.getLogger(__name__)
 
 from kalash.core.config import MemoryConfig
@@ -30,7 +33,6 @@ from kalash.memory.protocol import (
     ProviderCapability,
     ProviderHealth,
 )
-
 
 # Type for provider factory functions
 ProviderFactory = Callable[[dict[str, Any]], MemoryProvider]
@@ -46,7 +48,7 @@ class ProviderEntry:
     healthy: bool = True
     last_health_check: datetime | None = None
     consecutive_failures: int = 0
-    registered_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    registered_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 class MemoryRegistry:
@@ -65,11 +67,10 @@ class MemoryRegistry:
         self._config = config
         self._providers: dict[str, ProviderEntry] = {}
         self._factories: dict[str, ProviderFactory] = {}
-        self._health_task: asyncio.Task[None] | None = None
+        from kalash.memory.providers.local import create_local_provider
 
-    # ------------------------------------------------------------------
-    # Discovery
-    # ------------------------------------------------------------------
+        self._factories["local"] = create_local_provider
+        self._health_task: asyncio.Task[None] | None = None
 
     def discover_entry_points(self) -> dict[str, ProviderFactory]:
         """Scan installed packages for memory provider entry points.
@@ -97,10 +98,6 @@ class MemoryRegistry:
         self._factories.update(discovered)
         return discovered
 
-    # ------------------------------------------------------------------
-    # Registration
-    # ------------------------------------------------------------------
-
     def register_factory(self, name: str, factory: ProviderFactory) -> None:
         """Register a provider factory for later instantiation."""
         self._factories[name] = factory
@@ -120,7 +117,9 @@ class MemoryRegistry:
             capabilities=[c.value for c in provider.capabilities],
         )
 
-    async def instantiate(self, name: str, provider_config: dict[str, Any] | None = None) -> MemoryProvider:
+    async def instantiate(
+        self, name: str, provider_config: dict[str, Any] | None = None
+    ) -> MemoryProvider:
         """Instantiate a provider from a registered factory.
 
         Args:
@@ -139,13 +138,11 @@ class MemoryRegistry:
         factory = self._factories[name]
         config = provider_config or {}
         provider = factory(config)
-
+        initialize = getattr(provider, "initialize", None)
+        if initialize is not None:
+            await initialize()
         await self.register(provider)
         return provider
-
-    # ------------------------------------------------------------------
-    # Initialization
-    # ------------------------------------------------------------------
 
     async def initialize(self, provider_configs: dict[str, dict[str, Any]] | None = None) -> None:
         """Initialize the registry: discover, instantiate, and health-check.
@@ -161,6 +158,8 @@ class MemoryRegistry:
         for name in self._config.providers:
             if name in self._providers:
                 continue  # Already registered
+            if name not in self._factories:
+                raise ValueError(f"Unknown memory provider: {name}")
             if name in self._factories:
                 try:
                     await self.instantiate(name, configs.get(name))
@@ -173,10 +172,6 @@ class MemoryRegistry:
 
         # Initial health check
         await self.check_all_health()
-
-    # ------------------------------------------------------------------
-    # Health checking
-    # ------------------------------------------------------------------
 
     async def check_health(self, name: str) -> ProviderHealth:
         """Check health of a single provider."""
@@ -193,7 +188,7 @@ class MemoryRegistry:
             latency_ms = (time.perf_counter() - start) * 1000
 
             entry.healthy = health.healthy
-            entry.last_health_check = datetime.now(timezone.utc)
+            entry.last_health_check = datetime.now(UTC)
             if health.healthy:
                 entry.consecutive_failures = 0
             else:
@@ -210,9 +205,9 @@ class MemoryRegistry:
         except Exception as exc:  # includes TimeoutError
             entry.healthy = False
             entry.consecutive_failures += 1
-            entry.last_health_check = datetime.now(timezone.utc)
+            entry.last_health_check = datetime.now(UTC)
 
-            error_msg = f"timeout" if isinstance(exc, asyncio.TimeoutError) else str(exc)
+            error_msg = "timeout" if isinstance(exc, asyncio.TimeoutError) else str(exc)
             logger.warning(
                 "memory_provider_health_failed",
                 name=name,
@@ -232,10 +227,7 @@ class MemoryRegistry:
         if not self._providers:
             return results
 
-        tasks = {
-            name: asyncio.create_task(self.check_health(name))
-            for name in self._providers
-        }
+        tasks = {name: asyncio.create_task(self.check_health(name)) for name in self._providers}
         for name, task in tasks.items():
             results[name] = await task
 
@@ -262,10 +254,6 @@ class MemoryRegistry:
             self._health_task.cancel()
             self._health_task = None
 
-    # ------------------------------------------------------------------
-    # Accessors
-    # ------------------------------------------------------------------
-
     def get(self, name: str) -> MemoryProvider | None:
         """Get a provider by name (None if not registered)."""
         entry = self._providers.get(name)
@@ -273,11 +261,7 @@ class MemoryRegistry:
 
     def get_healthy(self) -> list[MemoryProvider]:
         """Get all healthy providers."""
-        return [
-            e.provider
-            for e in self._providers.values()
-            if e.healthy
-        ]
+        return [e.provider for e in self._providers.values() if e.healthy]
 
     def get_primary(self) -> MemoryProvider | None:
         """Get the configured primary provider."""
@@ -306,13 +290,13 @@ class MemoryRegistry:
         entry = self._providers.get(name)
         return entry.healthy if entry else False
 
-    # ------------------------------------------------------------------
-    # Cleanup
-    # ------------------------------------------------------------------
-
     async def shutdown(self) -> None:
         """Gracefully shut down all providers and stop monitoring."""
         self.stop_health_monitor()
+        for entry in self._providers.values():
+            close = getattr(entry.provider, "close", None)
+            if close is not None:
+                await close()
         self._providers.clear()
         self._factories.clear()
         logger.info("memory_registry_shutdown")

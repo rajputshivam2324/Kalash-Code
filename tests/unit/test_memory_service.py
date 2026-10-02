@@ -41,7 +41,7 @@ async def memory_service(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_remember_and_recall_via_router(memory_service, tmp_path):
-    session = get_session_memory("ses_mem", tmp_path)
+    session = get_session_memory("ses_mem", tmp_path, memory_service.config)
     mem_id = await session.remember("always use pnpm in this repo", scope="project")
     assert mem_id.startswith("mem_")
 
@@ -70,10 +70,9 @@ async def test_user_preference_extraction_and_capture(memory_service, tmp_path):
             Message(role=Role.USER, content=[TextBlock(text="setup deps")]),
         ],
         turn_seq=1,
+        config=memory_service.config,
     )
     assert count >= 1
 
-    hits = await memory_service.router.recall(
-        RecallQuery(text="pnpm", scope=scope, limit=5)
-    )
+    hits = await memory_service.router.recall(RecallQuery(text="pnpm", scope=scope, limit=5))
     assert hits

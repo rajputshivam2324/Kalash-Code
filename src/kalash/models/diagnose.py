@@ -55,9 +55,7 @@ class Diagnosis:
     @property
     def retryable(self) -> bool:
         return (
-            self.adjust_max_output is not None
-            or self.reduce_input
-            or self.kind == "invalid_tool"
+            self.adjust_max_output is not None or self.reduce_input or self.kind == "invalid_tool"
         )
 
 
@@ -123,9 +121,7 @@ def diagnose(raw: str, model_id: str = "") -> Diagnosis:
         )
 
     # Model cannot accept a tools array at all.
-    if "tool" in lowered and (
-        "not supported" in lowered or "unsupported" in lowered
-    ):
+    if "tool" in lowered and ("not supported" in lowered or "unsupported" in lowered):
         return Diagnosis(
             summary=f"{label} does not support tool calling.",
             remedy=(
@@ -153,9 +149,9 @@ def diagnose(raw: str, model_id: str = "") -> Diagnosis:
     # Model hallucinated a tool name not present in the request schema.
     if "tool call validation failed" in lowered or "not in request.tools" in lowered:
         bad = "unknown"
-        if match := re.search(r"tool '([^']+)'", text, re.IGNORECASE):
-            bad = match.group(1)
-        elif match := re.search(r'tool "([^"]+)"', text, re.IGNORECASE):
+        if (match := re.search(r"tool '([^']+)'", text, re.IGNORECASE)) or (
+            match := re.search(r'tool "([^"]+)"', text, re.IGNORECASE)
+        ):
             bad = match.group(1)
         return Diagnosis(
             summary=f"The model tried to call `{bad}`, which is not loaded.",

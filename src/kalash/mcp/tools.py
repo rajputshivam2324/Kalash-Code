@@ -32,7 +32,7 @@ def _params_model(schema: dict[str, Any]) -> type[BaseModel]:
         return create_model("MCPParams", __base__=BaseModel)
 
     required = set(schema.get("required", []))
-    fields: dict[str, tuple[Any, Any]] = {}
+    fields: dict[str, Any] = {}
     for name, prop in properties.items():
         default = ... if name in required else None
         fields[name] = (Any, default)
@@ -52,7 +52,7 @@ def _infer_side_effect(schema: MCPToolSchema) -> SideEffect:
             return SideEffect(annotations.lower())
         except ValueError:
             pass
-    return SideEffect.READ
+    return SideEffect.EXEC
 
 
 def _render_mcp_result(result: Any) -> str:
@@ -65,11 +65,7 @@ def _render_mcp_result(result: Any) -> str:
         except (TypeError, ValueError):
             body = str(result)
 
-    return (
-        "--- MCP tool result (untrusted external data) ---\n"
-        f"{body}\n"
-        "--- end MCP result ---"
-    )
+    return f"--- MCP tool result (untrusted external data) ---\n{body}\n--- end MCP result ---"
 
 
 class MCPToolAdapter:
@@ -148,7 +144,7 @@ class MCPToolAdapter:
         try:
             result = await self._manager.call_tool(
                 self._schema.namespaced_name,
-                args.model_dump(exclude_none=True),
+                args.model_dump(exclude_unset=True),
             )
         except Exception as exc:
             return ToolEnvelope.fail(
@@ -157,6 +153,10 @@ class MCPToolAdapter:
                 recoverable=True,
             )
 
+        if isinstance(result, dict) and result.get("isError") is True:
+            return ToolEnvelope.fail(
+                code="KALASH_MCP_TOOL_ERROR", message=_render_mcp_result(result), recoverable=True
+            )
         return ToolEnvelope.success(
             content=_render_mcp_result(result),
             metadata={"server": self._schema.server_name, "tool": self._schema.name},

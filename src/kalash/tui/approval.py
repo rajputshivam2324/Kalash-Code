@@ -165,7 +165,7 @@ class TuiApprovalAdapter:
                 response=ApprovalResponse.DENY,
                 reason="approval dialog unavailable",
             )
-        if result is None:
+        if not isinstance(result, PromptResult):
             return PromptResult(
                 response=ApprovalResponse.DENY,
                 reason="approval dialog dismissed",

@@ -2,31 +2,25 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
-import time
-from dataclasses import dataclass
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from kalash.hooks.events import (
+    PAYLOAD_REGISTRY,
+    CompactPayload,
+    FileEditPayload,
     HookEvent,
     HookPayload,
-    SessionStartPayload,
-    SessionEndPayload,
-    ToolUsePayload,
-    FileEditPayload,
-    CompactPayload,
-    RecallPayload,
-    SubagentPayload,
     NotificationPayload,
-    StopPayload,
     PluginLoadPayload,
-    PAYLOAD_REGISTRY,
+    RecallPayload,
+    SessionEndPayload,
+    SessionStartPayload,
+    StopPayload,
+    SubagentPayload,
+    ToolUsePayload,
 )
-
 
 # ---------------------------------------------------------------------------
 # Event / payload unit tests
@@ -166,19 +160,22 @@ class TestHookRunnerImport:
     """Verify runner module imports and basic runner setup."""
 
     def test_runner_importable(self):
-        from kalash.hooks.runner import HookRunner, HookConfig, HookResult
+        from kalash.hooks.runner import HookConfig, HookResult, HookRunner
+
         assert HookRunner is not None
         assert HookConfig is not None
         assert HookResult is not None
 
     def test_runner_max_chain_depth(self):
         from kalash.hooks.runner import HookRunner
+
         runner = HookRunner(engine=MagicMock())
         assert runner.MAX_CHAIN_DEPTH >= 1
 
     @pytest.mark.asyncio
     async def test_empty_dispatch_returns_empty(self):
         from kalash.hooks.runner import HookRunner
+
         runner = HookRunner(engine=MagicMock())
         payload = HookPayload(event=HookEvent.SESSION_START)
         results = await runner.dispatch(payload)
@@ -188,6 +185,7 @@ class TestHookRunnerImport:
     async def test_loop_protection_fires(self):
         """If chain depth exceeds MAX_CHAIN_DEPTH, dispatch returns empty."""
         from kalash.hooks.runner import HookRunner
+
         runner = HookRunner(engine=MagicMock())
         # Artificially exceed depth
         chain_id = "test_chain"
@@ -197,7 +195,8 @@ class TestHookRunnerImport:
         assert results == []
 
     def test_register_hook(self):
-        from kalash.hooks.runner import HookRunner, HookConfig, HandlerType
+        from kalash.hooks.runner import HandlerType, HookConfig, HookRunner
+
         runner = HookRunner(engine=MagicMock())
         config = HookConfig(
             id="hook_1",
@@ -211,6 +210,7 @@ class TestHookRunnerImport:
 
     def test_register_python_handler(self):
         from kalash.hooks.runner import HookRunner
+
         runner = HookRunner(engine=MagicMock())
 
         async def my_handler(payload):
@@ -218,3 +218,32 @@ class TestHookRunnerImport:
 
         runner.register_python("test", HookEvent.PRE_TOOL_USE, my_handler)
         assert HookEvent.PRE_TOOL_USE in runner._hooks
+
+
+async def test_runtime_hooks_require_pinned_source_and_recheck_changes(tmp_path):
+    import json
+
+    from kalash.core.errors import HookDeniedError
+    from kalash.core.trust import trust_file
+    from kalash.hooks.load import build_hook_runner
+
+    directory = tmp_path / ".kalash" / "hooks"
+    directory.mkdir(parents=True)
+    path = directory / "test.json"
+    config = {
+        "hooks": [
+            {
+                "name": "test",
+                "trigger": "PreToolUse",
+                "action": {"type": "command", "command": "echo authorized"},
+            }
+        ]
+    }
+    path.write_text(json.dumps(config))
+    assert build_hook_runner(tmp_path) is None
+    trust_file(path)
+    runner = build_hook_runner(tmp_path)
+    assert runner is not None
+    path.write_text(json.dumps({"hooks": []}))
+    with pytest.raises(HookDeniedError):
+        await runner.dispatch(ToolUsePayload(event=HookEvent.PRE_TOOL_USE, tool_name="read"))

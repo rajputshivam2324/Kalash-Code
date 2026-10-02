@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from kalash.core.ids import generate_id
@@ -24,19 +24,26 @@ class SessionRepository:
     ) -> str:
         """Create a new session. Returns the session ID."""
         session_id = generate_id("ses_")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         await self._engine.execute_write(
             """INSERT INTO sessions (id, title, project_dir, agent, state, created_at, updated_at, metadata)
                VALUES (?, ?, ?, ?, 'CREATED', ?, ?, ?)""",
-            (session_id, title, project_dir, agent, now, now,
-             _json_dumps(metadata) if metadata else None),
+            (
+                session_id,
+                title,
+                project_dir,
+                agent,
+                now,
+                now,
+                _json_dumps(metadata) if metadata else None,
+            ),
         )
         return session_id
 
     async def update_state(self, session_id: str, state: str) -> None:
         """Update session state."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._engine.execute_write(
             "UPDATE sessions SET state = ?, updated_at = ? WHERE id = ?",
             (state, now, session_id),
@@ -49,7 +56,9 @@ class SessionRepository:
         )
         return dict(rows[0]) if rows else None
 
-    async def list_sessions(self, limit: int = 50, include_archived: bool = False) -> list[dict[str, Any]]:
+    async def list_sessions(
+        self, limit: int = 50, include_archived: bool = False
+    ) -> list[dict[str, Any]]:
         """List recent sessions."""
         sql = "SELECT * FROM sessions"
         if not include_archived:
@@ -57,6 +66,37 @@ class SessionRepository:
         sql += " ORDER BY updated_at DESC LIMIT ?"
         rows = await self._engine.execute_read_async(sql, (limit,))
         return [dict(r) for r in rows]
+
+    async def append_turn(
+        self,
+        *,
+        session_id: str,
+        role: str,
+        content: str,
+        model: str | None = None,
+        token_count: int | None = None,
+        content_type: str = "blocks",
+    ) -> str:
+        """Allocate sequence and persist one complete turn in a single transaction."""
+        turn_id = generate_id("trn_")
+        message_id = generate_id("msg_")
+        now = datetime.now(UTC).isoformat()
+        async with self._engine.write() as connection:
+            row = connection.execute(
+                "SELECT COALESCE(MAX(seq), -1) + 1 FROM turns WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+            connection.execute(
+                """INSERT INTO turns (id, session_id, seq, role, state, started_at, finished_at, model, token_count)
+                   VALUES (?, ?, ?, ?, 'COMPLETED', ?, ?, ?, ?)""",
+                (turn_id, session_id, row[0], role, now, now, model, token_count),
+            )
+            connection.execute(
+                """INSERT INTO messages (id, turn_id, seq, role, content_type, content, created_at)
+                   VALUES (?, ?, 0, ?, ?, ?, ?)""",
+                (message_id, turn_id, role, content_type, content, now),
+            )
+        return turn_id
 
     async def create_turn(
         self,
@@ -67,7 +107,7 @@ class SessionRepository:
     ) -> str:
         """Create a new turn. Returns the turn ID."""
         turn_id = generate_id("trn_")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         await self._engine.execute_write(
             """INSERT INTO turns (id, session_id, seq, role, state, started_at, model)
@@ -84,7 +124,7 @@ class SessionRepository:
         cost_usd: float | None = None,
     ) -> None:
         """Mark a turn as completed."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._engine.execute_write(
             """UPDATE turns SET state = ?, finished_at = ?, token_count = ?, cost_usd = ?
                WHERE id = ?""",
@@ -103,13 +143,22 @@ class SessionRepository:
     ) -> str:
         """Add a message to a turn. Append-only (I-021)."""
         msg_id = generate_id("msg_")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         await self._engine.execute_write(
             """INSERT INTO messages (id, turn_id, seq, role, content_type, content, blob_ref, metadata, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (msg_id, turn_id, seq, role, content_type, content, blob_ref,
-             _json_dumps(metadata) if metadata else None, now),
+            (
+                msg_id,
+                turn_id,
+                seq,
+                role,
+                content_type,
+                content,
+                blob_ref,
+                _json_dumps(metadata) if metadata else None,
+                now,
+            ),
         )
         return msg_id
 
@@ -133,7 +182,9 @@ class SessionRepository:
         )
         return [dict(r) for r in rows]
 
-    async def get_session_messages(self, session_id: str, limit: int | None = None) -> list[dict[str, Any]]:
+    async def get_session_messages(
+        self, session_id: str, limit: int | None = None
+    ) -> list[dict[str, Any]]:
         """Get all messages for a session, ordered by turn seq then message seq."""
         sql = """
             SELECT m.*, t.seq as turn_seq, t.role as turn_role
@@ -158,7 +209,7 @@ class SessionRepository:
     ) -> str:
         """Record a tool call."""
         call_id = generate_id("tc_")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         await self._engine.execute_write(
             """INSERT INTO tool_calls (id, message_id, turn_id, tool_name, arguments, state, started_at)
@@ -176,12 +227,19 @@ class SessionRepository:
         duration_ms: int | None = None,
     ) -> None:
         """Complete a tool call with results."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._engine.execute_write(
             """UPDATE tool_calls SET result = ?, state = ?, status = ?,
                error_code = ?, duration_ms = ?, finished_at = ? WHERE id = ?""",
-            (result, state, "completed" if state == "RETURNED" else "failed",
-             error_code, duration_ms, now, call_id),
+            (
+                result,
+                state,
+                "completed" if state == "RETURNED" else "failed",
+                error_code,
+                duration_ms,
+                now,
+                call_id,
+            ),
         )
 
 
@@ -190,4 +248,5 @@ def _json_dumps(data: Any) -> str | None:
     if data is None:
         return None
     import json
+
     return json.dumps(data)

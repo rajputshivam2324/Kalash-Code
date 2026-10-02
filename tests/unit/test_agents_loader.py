@@ -25,7 +25,7 @@ Review the diff carefully and list findings.
 
     from kalash.agents import loader as agents_loader
 
-    monkeypatch.setattr(agents_loader, "agents_dirs", lambda: [agents_dir])
+    monkeypatch.setattr(agents_loader, "agents_dirs", lambda cwd=None: [agents_dir])
 
     defn = load_agent_definition("reviewer")
     assert defn is not None
@@ -41,6 +41,6 @@ def test_unknown_agent_returns_none(tmp_path, monkeypatch):
     from kalash.agents import loader as agents_loader
 
     monkeypatch.setattr(
-        agents_loader, "agents_dirs", lambda: [tmp_path / ".kalash" / "agents"]
+        agents_loader, "agents_dirs", lambda cwd=None: [tmp_path / ".kalash" / "agents"]
     )
     assert load_agent_definition("missing") is None

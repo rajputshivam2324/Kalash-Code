@@ -3,22 +3,24 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass
-from typing import Any
 
 try:
     import structlog
+
     logger = structlog.get_logger()
 except ImportError:
     import logging
+
     logger = logging.getLogger(__name__)
 
 from kalash.core.config import KalashConfig, load_config
+from kalash.core.paths import kalash_db_path
 from kalash.memory.registry import MemoryRegistry
 from kalash.memory.router import MemoryRouter, ReadPolicy, WritePolicy
 
-
-_service: MemoryService | None = None
+_services: dict[str, MemoryService] = {}
 _init_lock = asyncio.Lock()
 
 
@@ -38,18 +40,19 @@ def _policy_from_config(config: KalashConfig) -> tuple[WritePolicy, ReadPolicy]:
 
 
 async def get_memory_service(*, config: KalashConfig | None = None) -> MemoryService:
-    """Return the process-wide memory service, initializing on first use."""
-    global _service
-    if _service is not None:
-        return _service
+    """Reuse only services with identical storage and memory configuration."""
+    cfg = config or load_config()
+    if not cfg.memory.enabled:
+        raise RuntimeError("memory layer is disabled")
+    from dataclasses import asdict
+
+    key = json.dumps([str(kalash_db_path()), asdict(cfg.memory)], sort_keys=True)
+    if key in _services:
+        return _services[key]
 
     async with _init_lock:
-        if _service is not None:
-            return _service
-
-        cfg = config or load_config()
-        if not cfg.memory.enabled:
-            raise RuntimeError("memory layer is disabled")
+        if key in _services:
+            return _services[key]
 
         registry = MemoryRegistry(cfg.memory)
         await registry.initialize(cfg.memory.provider_configs)
@@ -60,17 +63,19 @@ async def get_memory_service(*, config: KalashConfig | None = None) -> MemorySer
             write_policy=write_policy,
             read_policy=read_policy,
         )
-        _service = MemoryService(registry=registry, router=router, config=cfg)
+        service = MemoryService(registry=registry, router=router, config=cfg)
+        _services[key] = service
         logger.info(
             "memory_service_ready",
             providers=[p.name for p in registry.get_healthy()],
             primary=cfg.memory.primary,
         )
-        return _service
+        return service
 
 
 async def reset_memory_service() -> None:
     """Clear the singleton (tests only)."""
-    global _service
     async with _init_lock:
-        _service = None
+        for service in _services.values():
+            await service.registry.shutdown()
+        _services.clear()

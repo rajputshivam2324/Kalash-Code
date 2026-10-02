@@ -118,12 +118,12 @@ class TestSubagents:
     @pytest.mark.asyncio
     async def test_task_tool_actually_delegates(self, workspace, monkeypatch):
         install_provider(monkeypatch, [final("child findings here")])
+        from kalash.runtime.agent import build_agent
         from kalash.tools.task import TaskParams, TaskTool
 
-        ctx = ToolContext(
-            session_id="s", run_id="r", cwd=workspace,
-            writable_roots=(workspace,), capabilities=frozenset({"task.spawn"}),
-        )
+        agent, reason = build_agent(cwd=workspace, persist=False, extensions=False)
+        assert agent is not None, reason
+        ctx = agent.host.build_context()
         env = await TaskTool().execute(
             TaskParams(prompt="find the bug", capabilities=["task.spawn"]), ctx
         )
@@ -138,9 +138,13 @@ class TestSubagents:
         from kalash.tools.task import TaskParams, TaskTool
 
         ctx = ToolContext(
-            session_id="s", run_id="r", cwd=workspace,
-            writable_roots=(workspace,), capabilities=frozenset({"task.spawn"}),
-            spawn_depth=3, max_spawn_depth=3,
+            session_id="s",
+            run_id="r",
+            cwd=workspace,
+            writable_roots=(workspace,),
+            capabilities=frozenset({"task.spawn"}),
+            spawn_depth=3,
+            max_spawn_depth=3,
         )
         env = await TaskTool().execute(TaskParams(prompt="go deeper"), ctx)
 
@@ -162,12 +166,12 @@ class TestSubagents:
         from kalash.tools.task import TaskParams, TaskTool
 
         ctx = ToolContext(
-            session_id="s", run_id="r", cwd=workspace,
+            session_id="s",
+            run_id="r",
+            cwd=workspace,
             capabilities=frozenset({"fs.read"}),
         )
-        env = await TaskTool().execute(
-            TaskParams(prompt="x", capabilities=["fs.write"]), ctx
-        )
+        env = await TaskTool().execute(TaskParams(prompt="x", capabilities=["fs.write"]), ctx)
         assert env.ok is False
         assert env.error.code == "KALASH_PERMISSION_DENIED"
 
@@ -177,9 +181,9 @@ class TestSubagents:
 
 class TestSkills:
     def write_skill(self, workspace, name, description, body):
-        directory = workspace / ".kalash" / "skills"
+        directory = workspace / ".kalash" / "skills" / name
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / f"{name}.md").write_text(
+        (directory / "SKILL.md").write_text(
             f"---\nname: {name}\ndescription: {description}\n---\n\n{body}\n",
             encoding="utf-8",
         )
@@ -264,9 +268,7 @@ class TestSandboxManager:
     def test_wrap_degrades_instead_of_raising(self, workspace):
         from kalash.sandbox.manager import get_sandbox_manager
 
-        manager = get_sandbox_manager(
-            workspace_root=workspace, writable_roots=(workspace,)
-        )
+        manager = get_sandbox_manager(workspace_root=workspace, writable_roots=(workspace,))
         argv, wrapped = manager.wrap(["/bin/bash", "-c", "echo hi"])
 
         assert argv, "an unavailable sandbox must return a runnable argv"
@@ -284,12 +286,8 @@ class TestSandboxManager:
     async def test_shell_reports_whether_it_was_sandboxed(self, workspace):
         from kalash.tools.shell import ShellParams, ShellTool
 
-        ctx = ToolContext(
-            session_id="s", run_id="r", cwd=workspace, writable_roots=(workspace,)
-        )
-        env = await ShellTool().execute(
-            ShellParams(command="echo sandbox-probe"), ctx
-        )
+        ctx = ToolContext(session_id="s", run_id="r", cwd=workspace, writable_roots=(workspace,))
+        env = await ShellTool().execute(ShellParams(command="echo sandbox-probe"), ctx)
 
         assert env.ok
         assert "sandbox-probe" in env.content
@@ -306,15 +304,20 @@ class TestHooks:
         (target / "h.json").write_text(json.dumps(payload), encoding="utf-8")
 
     def test_hooks_are_discovered(self, workspace):
-        self.write_hook(workspace, {
-            "version": "v1",
-            "hooks": [{
-                "name": "lint",
-                "trigger": "PostToolUse",
-                "matcher": "write|edit",
-                "action": {"type": "command", "command": "echo linted"},
-            }],
-        })
+        self.write_hook(
+            workspace,
+            {
+                "version": "v1",
+                "hooks": [
+                    {
+                        "name": "lint",
+                        "trigger": "PostToolUse",
+                        "matcher": "write|edit",
+                        "action": {"type": "command", "command": "echo linted"},
+                    }
+                ],
+            },
+        )
         from kalash.hooks.load import discover_hooks
 
         found = discover_hooks(workspace)
@@ -324,16 +327,34 @@ class TestHooks:
         assert found[0].matcher == "write|edit"
 
     def test_both_hook_directories_are_read(self, workspace):
-        self.write_hook(workspace, {
-            "version": "v1",
-            "hooks": [{"name": "a", "trigger": "Stop",
-                       "action": {"type": "command", "command": "echo a"}}],
-        }, directory=".kiro/hooks")
-        self.write_hook(workspace, {
-            "version": "v1",
-            "hooks": [{"name": "b", "trigger": "Stop",
-                       "action": {"type": "command", "command": "echo b"}}],
-        }, directory=".kalash/hooks")
+        self.write_hook(
+            workspace,
+            {
+                "version": "v1",
+                "hooks": [
+                    {
+                        "name": "a",
+                        "trigger": "Stop",
+                        "action": {"type": "command", "command": "echo a"},
+                    }
+                ],
+            },
+            directory=".kiro/hooks",
+        )
+        self.write_hook(
+            workspace,
+            {
+                "version": "v1",
+                "hooks": [
+                    {
+                        "name": "b",
+                        "trigger": "Stop",
+                        "action": {"type": "command", "command": "echo b"},
+                    }
+                ],
+            },
+            directory=".kalash/hooks",
+        )
 
         from kalash.hooks.load import discover_hooks
 
@@ -344,11 +365,21 @@ class TestHooks:
         target = workspace / ".kiro" / "hooks"
         target.mkdir(parents=True)
         (target / "bad.json").write_text("{not json", encoding="utf-8")
-        (target / "ok.json").write_text(json.dumps({
-            "version": "v1",
-            "hooks": [{"name": "good", "trigger": "Stop",
-                       "action": {"type": "command", "command": "echo ok"}}],
-        }), encoding="utf-8")
+        (target / "ok.json").write_text(
+            json.dumps(
+                {
+                    "version": "v1",
+                    "hooks": [
+                        {
+                            "name": "good",
+                            "trigger": "Stop",
+                            "action": {"type": "command", "command": "echo ok"},
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
 
         from kalash.hooks.load import discover_hooks
 
@@ -356,11 +387,19 @@ class TestHooks:
         assert [h.name for h in found] == ["good"]
 
     def test_unknown_trigger_is_skipped(self, workspace):
-        self.write_hook(workspace, {
-            "version": "v1",
-            "hooks": [{"name": "x", "trigger": "NotARealTrigger",
-                       "action": {"type": "command", "command": "echo x"}}],
-        })
+        self.write_hook(
+            workspace,
+            {
+                "version": "v1",
+                "hooks": [
+                    {
+                        "name": "x",
+                        "trigger": "NotARealTrigger",
+                        "action": {"type": "command", "command": "echo x"},
+                    }
+                ],
+            },
+        )
         from kalash.hooks.load import discover_hooks
 
         assert discover_hooks(workspace) == []
@@ -382,11 +421,15 @@ class TestHooks:
         class BlockingRunner:
             async def dispatch(self, payload, *, chain_id=None):
                 if payload.event is HookEvent.PRE_TOOL_USE:
-                    return [HookResult(
-                        hook_id="h", event=payload.event, exit_code=2,
-                        stderr="writes to that path are not allowed here",
-                        blocked=True,
-                    )]
+                    return [
+                        HookResult(
+                            hook_id="h",
+                            event=payload.event,
+                            exit_code=2,
+                            stderr="writes to that path are not allowed here",
+                            blocked=True,
+                        )
+                    ]
                 return []
 
         host = ToolHost(
@@ -397,9 +440,7 @@ class TestHooks:
             hooks=BlockingRunner(),
         )
         target = workspace / "blocked.txt"
-        out = await host.execute(
-            "write", {"path": str(target), "content": "x"}, tool_use_id="t"
-        )
+        out = await host.execute("write", {"path": str(target), "content": "x"}, tool_use_id="t")
 
         assert out.startswith("REFUSED by a PreToolUse hook")
         assert "not allowed here" in out
@@ -428,9 +469,7 @@ class TestHooks:
             hooks=ExplodingRunner(),
         )
         target = workspace / "written.txt"
-        out = await host.execute(
-            "write", {"path": str(target), "content": "x"}, tool_use_id="t"
-        )
+        out = await host.execute("write", {"path": str(target), "content": "x"}, tool_use_id="t")
 
         assert target.exists(), "a PostToolUse failure must not undo the work"
         assert "REFUSED" not in out
@@ -454,9 +493,7 @@ class TestSandboxCorrectness:
         from kalash.tools.shell import ShellParams, ShellTool
 
         (workspace / "marker.txt").write_text("here\n")
-        ctx = ToolContext(
-            session_id="s", run_id="r", cwd=workspace, writable_roots=(workspace,)
-        )
+        ctx = ToolContext(session_id="s", run_id="r", cwd=workspace, writable_roots=(workspace,))
         env = await ShellTool().execute(ShellParams(command="ls -1"), ctx)
 
         assert env.ok
@@ -468,12 +505,8 @@ class TestSandboxCorrectness:
     async def test_shell_can_write_in_the_workspace(self, workspace):
         from kalash.tools.shell import ShellParams, ShellTool
 
-        ctx = ToolContext(
-            session_id="s", run_id="r", cwd=workspace, writable_roots=(workspace,)
-        )
-        env = await ShellTool().execute(
-            ShellParams(command="printf 'written\\n' > out.txt"), ctx
-        )
+        ctx = ToolContext(session_id="s", run_id="r", cwd=workspace, writable_roots=(workspace,))
+        env = await ShellTool().execute(ShellParams(command="printf 'written\\n' > out.txt"), ctx)
 
         assert env.ok, env.error.message if env.error else ""
         assert (workspace / "out.txt").read_text() == "written\n"
@@ -484,9 +517,7 @@ class TestSandboxCorrectness:
 
         (workspace / "sub").mkdir()
         (workspace / "sub" / "deep.txt").write_text("found\n")
-        ctx = ToolContext(
-            session_id="s", run_id="r", cwd=workspace, writable_roots=(workspace,)
-        )
+        ctx = ToolContext(session_id="s", run_id="r", cwd=workspace, writable_roots=(workspace,))
         env = await ShellTool().execute(ShellParams(command="cat sub/deep.txt"), ctx)
 
         assert env.ok
@@ -498,12 +529,8 @@ class TestSandboxCorrectness:
 
         outside = tmp_path / "outside"
         outside.mkdir()
-        ctx = ToolContext(
-            session_id="s", run_id="r", cwd=workspace, writable_roots=(workspace,)
-        )
-        env = await ShellTool().execute(
-            ShellParams(command="echo hi", cwd=str(outside)), ctx
-        )
+        ctx = ToolContext(session_id="s", run_id="r", cwd=workspace, writable_roots=(workspace,))
+        env = await ShellTool().execute(ShellParams(command="echo hi", cwd=str(outside)), ctx)
 
         assert not env.ok
         assert "outside allowed roots" in env.error.message  # type: ignore[union-attr]
@@ -512,12 +539,8 @@ class TestSandboxCorrectness:
     async def test_shell_timeout_terminates_without_crashing(self, workspace):
         from kalash.tools.shell import ShellParams, ShellTool
 
-        ctx = ToolContext(
-            session_id="s", run_id="r", cwd=workspace, writable_roots=(workspace,)
-        )
-        env = await ShellTool().execute(
-            ShellParams(command="sleep 30", timeout=0.3), ctx
-        )
+        ctx = ToolContext(session_id="s", run_id="r", cwd=workspace, writable_roots=(workspace,))
+        env = await ShellTool().execute(ShellParams(command="sleep 30", timeout=0.3), ctx)
 
         assert not env.ok
         assert env.error is not None
@@ -564,9 +587,7 @@ class TestSandboxCorrectness:
 
         # tmp_path is under /tmp on Linux, which is the case that regressed.
         assert str(tmp_path).startswith("/tmp")
-        policy = SandboxPolicy(
-            mode=SandboxMode.WORKSPACE_WRITE, workspace_root=tmp_path
-        )
+        policy = SandboxPolicy(mode=SandboxMode.WORKSPACE_WRITE, workspace_root=tmp_path)
         argv = LinuxSandbox(policy=policy).wrap_command(
             ["/bin/bash", "-c", "true"], cwd=str(tmp_path)
         )
@@ -588,9 +609,7 @@ class TestSandboxCorrectness:
         from kalash.sandbox.linux import LinuxSandbox
         from kalash.sandbox.policy import SandboxMode, SandboxPolicy
 
-        policy = SandboxPolicy(
-            mode=SandboxMode.WORKSPACE_WRITE, workspace_root=tmp_path
-        )
+        policy = SandboxPolicy(mode=SandboxMode.WORKSPACE_WRITE, workspace_root=tmp_path)
         with pytest.raises(RuntimeError, match="does not exist"):
             LinuxSandbox(policy=policy).wrap_command(
                 ["/bin/bash", "-c", "true"], cwd=str(tmp_path / "gone")
@@ -600,9 +619,7 @@ class TestSandboxCorrectness:
         """Running in the wrong directory is worse than not sandboxing."""
         from kalash.sandbox.manager import get_sandbox_manager
 
-        manager = get_sandbox_manager(
-            workspace_root=workspace, writable_roots=(workspace,)
-        )
+        manager = get_sandbox_manager(workspace_root=workspace, writable_roots=(workspace,))
 
         class NoCwd:
             def wrap_command(self, cmd):  # no cwd parameter

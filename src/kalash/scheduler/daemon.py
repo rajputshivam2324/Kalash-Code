@@ -7,17 +7,16 @@ and catchup_policy. Creates headless agent sessions for each run.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any, Callable, Coroutine
+from typing import Any
 
-from kalash.core.errors import KalashError
 from kalash.core.events import Event, EventType, get_event_bus
 from kalash.core.ids import generate_id
+from kalash.scheduler.cron import CronExpression
 from kalash.storage.engine import StorageEngine
-
-from kalash.scheduler.cron import CronExpression, IntervalSpec, OnceSpec
 
 
 class OverlapPolicy(StrEnum):
@@ -124,6 +123,7 @@ class SchedulerDaemon:
                 break
             except Exception as e:
                 import logging as _log
+
                 _log.getLogger(__name__).error("scheduler_tick_error", exc_info=e)
 
             await asyncio.sleep(self._tick_interval)
@@ -140,16 +140,15 @@ class SchedulerDaemon:
                 break
             except Exception as e:
                 import logging as _log
+
                 _log.getLogger(__name__).error("scheduler_heartbeat_error", exc_info=e)
 
             await asyncio.sleep(self._heartbeat_interval)
 
     async def _try_acquire_lease(self) -> bool:
         """Try to acquire the scheduler advisory lock with a lease."""
-        now = datetime.now(timezone.utc).isoformat()
-        expires = (
-            datetime.now(timezone.utc) + timedelta(seconds=self._lease_duration)
-        ).isoformat()
+        now = datetime.now(UTC).isoformat()
+        expires = (datetime.now(UTC) + timedelta(seconds=self._lease_duration)).isoformat()
 
         # Try to insert or claim an expired lease
         try:
@@ -186,6 +185,7 @@ class SchedulerDaemon:
 
         except Exception as e:
             import logging as _log
+
             _log.getLogger(__name__).error("scheduler_lease_error", exc_info=e)
 
         self._leader = False
@@ -193,10 +193,8 @@ class SchedulerDaemon:
 
     async def _renew_lease(self) -> None:
         """Renew the advisory lock lease."""
-        now = datetime.now(timezone.utc).isoformat()
-        expires = (
-            datetime.now(timezone.utc) + timedelta(seconds=self._lease_duration)
-        ).isoformat()
+        now = datetime.now(UTC).isoformat()
+        expires = (datetime.now(UTC) + timedelta(seconds=self._lease_duration)).isoformat()
         await self._engine.execute_write(
             """UPDATE scheduler_lock
                SET lease_expires_at = ?, heartbeat_at = ?
@@ -214,7 +212,7 @@ class SchedulerDaemon:
 
     async def _process_due_schedules(self) -> None:
         """Find and fire all due schedules."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         rows = await self._engine.execute_read_async(
             """SELECT * FROM schedules
@@ -247,11 +245,11 @@ class SchedulerDaemon:
             await self._engine.execute_write(
                 """UPDATE schedule_runs SET status = 'cancelled', finished_at = ?
                    WHERE schedule_id = ? AND status = 'running'""",
-                (datetime.now(timezone.utc).isoformat(), schedule_id),
+                (datetime.now(UTC).isoformat(), schedule_id),
             )
 
         run_id = generate_id("sr_")
-        started = datetime.now(timezone.utc).isoformat()
+        started = datetime.now(UTC).isoformat()
         await self._engine.execute_write(
             """INSERT INTO schedule_runs
                (id, schedule_id, status, started_at, trigger_source)
@@ -261,14 +259,16 @@ class SchedulerDaemon:
 
         try:
             bus = get_event_bus()
-            await bus.emit(Event(
-                type=EventType.SCHEDULE_FIRE,
-                data={
-                    "schedule_id": schedule_id,
-                    "run_id": run_id,
-                    "agent": schedule.get("agent", "default"),
-                },
-            ))
+            await bus.emit(
+                Event(
+                    type=EventType.SCHEDULE_FIRE,
+                    data={
+                        "schedule_id": schedule_id,
+                        "run_id": run_id,
+                        "agent": schedule.get("agent", "default"),
+                    },
+                )
+            )
 
             prompt = str(schedule.get("prompt", "")).strip()
             if not prompt:
@@ -278,17 +278,29 @@ class SchedulerDaemon:
             from kalash.runtime.bootstrap import prepare_agent
 
             sandbox_mode = str(schedule.get("sandbox_mode", "read-only"))
+            from kalash.core.config import load_config
+
+            config = load_config(overrides={"permissions": {"sandbox": sandbox_mode}})
             agent, reason = build_agent(
+                config=config,
                 mode="plan" if sandbox_mode == "read-only" else "build",
                 interactive=False,
             )
             if agent is None:
                 raise RuntimeError(reason or "could not build agent")
 
-            await prepare_agent(agent)
+            try:
+                await prepare_agent(agent)
+                result = await agent.send(prompt)
+            finally:
+                await agent.close()
+            from kalash.runtime.loop import TerminationReason
 
-            result = await agent.send(prompt)
-            finished = datetime.now(timezone.utc).isoformat()
+            if result.termination_reason is not TerminationReason.NO_TOOL_CALLS or result.error:
+                raise RuntimeError(
+                    result.error or f"Run stopped: {result.termination_reason.value}"
+                )
+            finished = datetime.now(UTC).isoformat()
             await self._engine.execute_write(
                 """UPDATE schedule_runs SET status = 'succeeded', finished_at = ?,
                    tokens_used = ? WHERE id = ?""",
@@ -302,7 +314,7 @@ class SchedulerDaemon:
             await self._notify("success", schedule_id, {"run_id": run_id})
 
         except Exception as e:
-            finished = datetime.now(timezone.utc).isoformat()
+            finished = datetime.now(UTC).isoformat()
             await self._engine.execute_write(
                 """UPDATE schedule_runs SET status = 'failed', finished_at = ?,
                    error_code = ? WHERE id = ?""",
@@ -358,4 +370,5 @@ class SchedulerDaemon:
                 await hook(event, schedule_id, data)
             except Exception as e:
                 import logging as _log
+
                 _log.getLogger(__name__).warning("Notification hook failed", exc_info=e)

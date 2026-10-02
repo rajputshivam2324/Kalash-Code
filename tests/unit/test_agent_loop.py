@@ -58,7 +58,6 @@ from kalash.runtime.toolhost import (
 )
 from kalash.tools.builtins import default_registry
 
-
 # --- fakes -----------------------------------------------------------------
 
 
@@ -75,9 +74,7 @@ class FakeGateway:
         self.calls: list[dict] = []
 
     async def stream(self, messages, *, system=None, tools=None, **kwargs):
-        self.calls.append(
-            {"messages": messages, "system": system, "tools": tools, **kwargs}
-        )
+        self.calls.append({"messages": messages, "system": system, "tools": tools, **kwargs})
         events = self.turns.pop(0) if self.turns else [MessageStop(StopReason.END_TURN)]
         for event in events:
             yield event
@@ -176,14 +173,19 @@ class TestAgentActuallyActs:
     @pytest.mark.asyncio
     async def test_model_tool_call_creates_a_real_file(self, tmp_path):
         target = tmp_path / "app" / "index.js"
-        gateway = FakeGateway([
-            tool_turn("write", {
-                "path": str(target),
-                "content": "console.log('hello');\n",
-                "create_dirs": True,
-            }),
-            text_turn("Created app/index.js."),
-        ])
+        gateway = FakeGateway(
+            [
+                tool_turn(
+                    "write",
+                    {
+                        "path": str(target),
+                        "content": "console.log('hello');\n",
+                        "create_dirs": True,
+                    },
+                ),
+                text_turn("Created app/index.js."),
+            ]
+        )
         host = make_host(tmp_path, ui=AutoApprover())
         loop = make_loop(gateway, host)
 
@@ -225,21 +227,19 @@ class TestAgentActuallyActs:
     @pytest.mark.asyncio
     async def test_tool_result_is_fed_back_and_loop_continues(self, tmp_path):
         (tmp_path / "a.txt").write_text("contents\n")
-        gateway = FakeGateway([
-            tool_turn("read", {"path": str(tmp_path / "a.txt")}),
-            text_turn("done"),
-        ])
+        gateway = FakeGateway(
+            [
+                tool_turn("read", {"path": str(tmp_path / "a.txt")}),
+                text_turn("done"),
+            ]
+        )
         loop = make_loop(gateway, make_host(tmp_path, ui=AutoApprover()))
         await send(loop, "read it")
 
         # Second request must carry the assistant tool_use and the tool_result.
         second = gateway.calls[1]["messages"]
-        assert any(
-            isinstance(b, ToolUseBlock) for m in second for b in m.content
-        )
-        assert any(
-            isinstance(b, ToolResultBlock) for m in second for b in m.content
-        )
+        assert any(isinstance(b, ToolUseBlock) for m in second for b in m.content)
+        assert any(isinstance(b, ToolResultBlock) for m in second for b in m.content)
 
     @pytest.mark.asyncio
     async def test_history_carries_across_turns(self, tmp_path):
@@ -299,9 +299,7 @@ class TestPermissionGate:
         victim = tmp_path / "victim.txt"
         victim.write_text("keep me")
 
-        out = await host.execute(
-            "shell", {"command": f"rm -rf {victim}"}, tool_use_id="t1"
-        )
+        out = await host.execute("shell", {"command": f"rm -rf {victim}"}, tool_use_id="t1")
         assert out.startswith("REFUSED by the user")
         assert victim.exists(), "a denied command must not have run"
 
@@ -311,9 +309,7 @@ class TestPermissionGate:
         victim = tmp_path / "victim.txt"
         victim.write_text("keep me")
 
-        out = await host.execute(
-            "shell", {"command": f"rm -rf {victim}"}, tool_use_id="t1"
-        )
+        out = await host.execute("shell", {"command": f"rm -rf {victim}"}, tool_use_id="t1")
         assert out.startswith("REFUSED")
         assert victim.exists()
 
@@ -331,9 +327,7 @@ class TestPermissionGate:
         for index in range(3):
             target = tmp_path / f"f{index}.txt"
             target.write_text("x")
-            await host.execute(
-                "shell", {"command": f"rm -rf {target}"}, tool_use_id=f"t{index}"
-            )
+            await host.execute("shell", {"command": f"rm -rf {target}"}, tool_use_id=f"t{index}")
         assert len(ui.seen) == 1, "an allow-session grant must not re-prompt"
 
     @pytest.mark.asyncio
@@ -349,7 +343,8 @@ class TestPermissionGate:
     async def test_protected_path_is_refused_even_when_approved(self, tmp_path):
         host = make_host(tmp_path, ui=AutoApprover(ApprovalResponse.ALLOW_ALWAYS))
         out = await host.execute(
-            "write", {"path": str(tmp_path / ".env"), "content": "SECRET=1"},
+            "write",
+            {"path": str(tmp_path / ".env"), "content": "SECRET=1"},
             tool_use_id="t1",
         )
         assert "protected" in out.lower()
@@ -359,9 +354,7 @@ class TestPermissionGate:
     async def test_write_outside_workspace_is_refused(self, tmp_path):
         host = make_host(tmp_path, ui=AutoApprover())
         outside = tmp_path.parent / "escaped.txt"
-        out = await host.execute(
-            "write", {"path": str(outside), "content": "x"}, tool_use_id="t1"
-        )
+        out = await host.execute("write", {"path": str(outside), "content": "x"}, tool_use_id="t1")
         assert "REFUSED" in out or "DENIED" in out.upper()
         assert not outside.exists()
 
@@ -369,9 +362,7 @@ class TestPermissionGate:
     async def test_dangerous_command_reaches_the_prompt_with_context(self, tmp_path):
         ui = AutoApprover(ApprovalResponse.DENY)
         host = make_host(tmp_path, ui=ui)
-        await host.execute(
-            "shell", {"command": "git push --force origin main"}, tool_use_id="t1"
-        )
+        await host.execute("shell", {"command": "git push --force origin main"}, tool_use_id="t1")
         assert ui.seen, "a force push must prompt"
         context = ui.seen[0]
         assert context.risk_class == RiskClass.WRITE_REMOTE.value
@@ -512,27 +503,43 @@ class TestSerialization:
         assert [m.role for m in messages] == [Role.USER, Role.ASSISTANT, Role.USER]
         assert len(messages[2].content) == 2
 
-    def test_rehydrate_drops_unanswered_tool_calls(self):
+    def test_rehydrate_marks_unknown_tool_outcomes(self):
         rows = [
-            {"role": "assistant", "content": serialize_blocks([
-                TextBlock(text="working"),
-                ToolUseBlock(id="tu_orphan", name="read", input={}),
-            ])},
+            {
+                "role": "assistant",
+                "content": serialize_blocks(
+                    [
+                        TextBlock(text="working"),
+                        ToolUseBlock(id="tu_orphan", name="read", input={}),
+                    ]
+                ),
+            },
         ]
         messages = rehydrate_messages(rows)
-        # An unanswered tool_use would make the provider reject the request.
-        assert all(
-            not isinstance(b, ToolUseBlock) for m in messages for b in m.content
-        )
+        assert isinstance(messages[0].content[-1], ToolUseBlock)
+        outcome = messages[1].content[0]
+        assert isinstance(outcome, ToolResultBlock)
+        assert outcome.tool_use_id == "tu_orphan" and outcome.is_error
+        assert "Outcome unknown" in outcome.content
 
     def test_rehydrate_keeps_answered_tool_calls(self):
         rows = [
-            {"role": "assistant", "content": serialize_blocks([
-                ToolUseBlock(id="tu_1", name="read", input={}),
-            ])},
-            {"role": "user", "content": serialize_blocks([
-                ToolResultBlock(tool_use_id="tu_1", content="ok"),
-            ])},
+            {
+                "role": "assistant",
+                "content": serialize_blocks(
+                    [
+                        ToolUseBlock(id="tu_1", name="read", input={}),
+                    ]
+                ),
+            },
+            {
+                "role": "user",
+                "content": serialize_blocks(
+                    [
+                        ToolResultBlock(tool_use_id="tu_1", content="ok"),
+                    ]
+                ),
+            },
         ]
         messages = rehydrate_messages(rows)
         assert any(isinstance(b, ToolUseBlock) for m in messages for b in m.content)

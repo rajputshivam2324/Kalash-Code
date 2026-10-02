@@ -72,17 +72,17 @@ def doctor() -> None:
     if critical_fail:
         console.print("\n[red bold]Status: UNHEALTHY[/red bold] — critical issues detected")
         raise typer.Exit(code=2)
-    elif has_warning:
+    if has_warning:
         console.print("\n[yellow bold]Status: DEGRADED[/yellow bold] — non-critical warnings")
         raise typer.Exit(code=1)
-    else:
-        console.print("\n[green bold]Status: HEALTHY[/green bold] — all checks passed")
-        raise typer.Exit(code=0)
+    console.print("\n[green bold]Status: HEALTHY[/green bold] — all checks passed")
+    raise typer.Exit(code=0)
 
 
 # ---------------------------------------------------------------------------
 # Internal check helpers
 # ---------------------------------------------------------------------------
+
 
 class _CheckResult:
     """Result of a single diagnostic check."""
@@ -101,8 +101,6 @@ def _check_platform() -> _CheckResult:
     os_info = f"{platform.system()} {platform.release()}"
     detail = f"Python {py_version} on {os_info}"
 
-    if sys.version_info < (3, 12):
-        return _CheckResult("Platform", "warn", f"{detail} (Python 3.12+ recommended)")
     return _CheckResult("Platform", "pass", detail)
 
 
@@ -132,9 +130,7 @@ def _check_provider() -> _CheckResult:
         return _CheckResult("Provider", "fail", f"Error: {exc}")
 
     if not resolution.ok:
-        return _CheckResult(
-            "Provider", "fail", resolution.reason or "no provider configured"
-        )
+        return _CheckResult("Provider", "fail", resolution.reason or "no provider configured")
 
     name = getattr(resolution.provider, "name", "unknown")
     return _CheckResult("Provider", "pass", f"resolved: {name}")
@@ -227,9 +223,7 @@ def _check_ripgrep() -> _CheckResult:
 
     if shutil.which("rg"):
         return _CheckResult("ripgrep", "pass", "rg found on PATH")
-    return _CheckResult(
-        "ripgrep", "warn", "rg not on PATH — the `search` tool will be unavailable"
-    )
+    return _CheckResult("ripgrep", "warn", "rg not on PATH — the `search` tool will be unavailable")
 
 
 def _check_hooks() -> _CheckResult:
@@ -271,9 +265,7 @@ def _check_instructions() -> _CheckResult:
         return _CheckResult("Instructions", "fail", f"Error: {exc}")
 
     if not found.sources:
-        return _CheckResult(
-            "Instructions", "pass", "no KALASH.md found (run /init to create one)"
-        )
+        return _CheckResult("Instructions", "pass", "no KALASH.md found (run /init to create one)")
     names = ", ".join(str(p) for p in found.sources)
     return _CheckResult("Instructions", "pass", names)
 

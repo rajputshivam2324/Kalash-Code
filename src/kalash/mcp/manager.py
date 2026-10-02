@@ -7,15 +7,15 @@ health monitoring, reconnection, and config precedence.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from datetime import UTC
 from enum import StrEnum
 from typing import Any
 
 from kalash.core.errors import KalashError
 from kalash.core.events import Event, EventType, get_event_bus
+from kalash.mcp.client import MCPClient, MCPServerConfig, MCPToolSchema
 from kalash.storage.engine import StorageEngine
-
-from kalash.mcp.client import MCPClient, MCPServerConfig, MCPToolSchema, TransportType
 
 
 class ServerState(StrEnum):
@@ -185,13 +185,15 @@ class MCPManager:
             self._tools.update(client.tools)
 
         except Exception as e:
+            await client.disconnect()
             status.state = ServerState.FAILED
             status.error = str(e)
             import logging as _log
 
             _log.getLogger(__name__).warning(
                 "mcp_server_connect_failed: server=%s error=%s",
-                name, str(e),
+                name,
+                str(e),
             )
 
     def _detect_collisions(self) -> None:
@@ -222,9 +224,9 @@ class MCPManager:
 
     async def _check_health(self) -> None:
         """Check health of all servers and attempt reconnection for failed ones."""
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         for name, status in self._status.items():
             status.last_health_check = now
@@ -242,12 +244,14 @@ class MCPManager:
                     status.reconnect_attempts += 1
                     await self._connect_server(name)
 
-                    if status.state == ServerState.READY:
+                    if self._clients[name].is_connected:
                         bus = get_event_bus()
-                        await bus.emit(Event(
-                            type=EventType.NOTIFICATION,
-                            data={
-                                "level": "info",
-                                "message": f"MCP server '{name}' reconnected",
-                            },
-                        ))
+                        await bus.emit(
+                            Event(
+                                type=EventType.NOTIFICATION,
+                                data={
+                                    "level": "info",
+                                    "message": f"MCP server '{name}' reconnected",
+                                },
+                            )
+                        )

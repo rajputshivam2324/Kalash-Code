@@ -13,8 +13,7 @@ import secrets
 import time
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlencode, urlparse, parse_qs
-
+from urllib.parse import parse_qs, urlencode, urlparse
 
 SERVICE_NAME = "kalash-mcp"
 
@@ -88,6 +87,13 @@ class MCPAuth:
 
         return token_data.access_token
 
+    async def get_headers(self, server_name: str) -> dict[str, str]:
+        from kalash.models.auth_store import get_credential
+
+        saved = get_credential(f"mcp:{server_name}")
+        token = saved or await self.get_token(server_name)
+        return {"Authorization": f"Bearer {token}"} if token else {}
+
     async def authenticate(self, server_name: str) -> TokenData:
         """Run the OAuth authorization_code flow for a server.
 
@@ -136,7 +142,8 @@ class MCPAuth:
 
             _log.getLogger(__name__).warning(
                 "mcp_oauth_open_browser_manually: server=%s url=%s",
-                server_name, auth_url,
+                server_name,
+                auth_url,
             )
 
         # Wait for the callback with authorization code
@@ -166,14 +173,16 @@ class MCPAuth:
         if not config or not token_data.refresh_token:
             return None
 
-        import urllib.request
         import urllib.error
+        import urllib.request
 
-        body = urlencode({
-            "grant_type": "refresh_token",
-            "refresh_token": token_data.refresh_token,
-            "client_id": config.client_id,
-        }).encode()
+        body = urlencode(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": token_data.refresh_token,
+                "client_id": config.client_id,
+            }
+        ).encode()
 
         if config.client_secret:
             body += f"&client_secret={config.client_secret}".encode()
@@ -207,13 +216,15 @@ class MCPAuth:
         """Exchange an authorization code for tokens."""
         import urllib.request
 
-        body = urlencode({
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": config.redirect_uri,
-            "client_id": config.client_id,
-            "code_verifier": code_verifier,
-        }).encode()
+        body = urlencode(
+            {
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": config.redirect_uri,
+                "client_id": config.client_id,
+                "code_verifier": code_verifier,
+            }
+        ).encode()
 
         if config.client_secret:
             body += f"&client_secret={config.client_secret}".encode()
@@ -241,7 +252,7 @@ class MCPAuth:
 
         Returns the authorization code from the callback.
         """
-        from http.server import HTTPServer, BaseHTTPRequestHandler
+        from http.server import BaseHTTPRequestHandler, HTTPServer
 
         parsed = urlparse(redirect_uri)
         port = parsed.port or 9374
@@ -293,15 +304,19 @@ class MCPAuth:
     async def _store_token(self, server_name: str, token_data: TokenData) -> None:
         """Store token in OS keyring."""
         try:
-            import keyring
+            import importlib
 
-            payload = json.dumps({
-                "access_token": token_data.access_token,
-                "refresh_token": token_data.refresh_token,
-                "expires_at": token_data.expires_at,
-                "token_type": token_data.token_type,
-                "scopes": token_data.scopes,
-            })
+            keyring = importlib.import_module("keyring")
+
+            payload = json.dumps(
+                {
+                    "access_token": token_data.access_token,
+                    "refresh_token": token_data.refresh_token,
+                    "expires_at": token_data.expires_at,
+                    "token_type": token_data.token_type,
+                    "scopes": token_data.scopes,
+                }
+            )
             await asyncio.to_thread(keyring.set_password, SERVICE_NAME, server_name, payload)
         except ImportError:
             # keyring not available — fallback to in-memory only
@@ -310,7 +325,9 @@ class MCPAuth:
     async def _load_token(self, server_name: str) -> TokenData | None:
         """Load token from OS keyring."""
         try:
-            import keyring
+            import importlib
+
+            keyring = importlib.import_module("keyring")
 
             payload = await asyncio.to_thread(keyring.get_password, SERVICE_NAME, server_name)
             if not payload:
@@ -329,7 +346,9 @@ class MCPAuth:
     async def _delete_token(self, server_name: str) -> None:
         """Delete token from OS keyring."""
         try:
-            import keyring
+            import importlib
+
+            keyring = importlib.import_module("keyring")
 
             await asyncio.to_thread(keyring.delete_password, SERVICE_NAME, server_name)
         except Exception:  # keyring missing or backend unavailable

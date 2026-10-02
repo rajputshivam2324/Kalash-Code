@@ -1,11 +1,9 @@
 """Tests for the tools layer."""
 
 import pytest
-import tempfile
-from pathlib import Path
 
-from kalash.tools.base import ToolEnvelope, SideEffect, ToolContext
-from kalash.tools.fs import ReadTool, WriteTool, EditTool, GlobTool, ListTool
+from kalash.tools.base import ToolContext, ToolEnvelope
+from kalash.tools.fs import EditTool, ReadTool, WriteTool
 from kalash.tools.registry import ToolRegistry
 from kalash.tools.todo import TodoTool
 
@@ -96,6 +94,7 @@ class TestReadTool:
 
         tool = ReadTool()
         from kalash.tools.fs import ReadParams
+
         args = ReadParams(path=str(test_file))
         result = await tool.execute(args, ctx)
 
@@ -107,6 +106,7 @@ class TestReadTool:
     async def test_read_nonexistent(self, ctx):
         tool = ReadTool()
         from kalash.tools.fs import ReadParams
+
         args = ReadParams(path="/nonexistent/file.txt")
         result = await tool.execute(args, ctx)
 
@@ -120,6 +120,7 @@ class TestReadTool:
 
         tool = ReadTool()
         from kalash.tools.fs import ReadParams
+
         args = ReadParams(path=str(test_file), offset=2, limit=1)
         result = await tool.execute(args, ctx)
 
@@ -138,6 +139,7 @@ class TestWriteTool:
 
         tool = WriteTool()
         from kalash.tools.fs import WriteParams
+
         args = WriteParams(path=str(target), content="hello world")
         result = await tool.execute(args, ctx)
 
@@ -151,6 +153,7 @@ class TestWriteTool:
 
         tool = WriteTool()
         from kalash.tools.fs import WriteParams
+
         # Without digest
         args = WriteParams(path=str(target), content="new content")
         result = await tool.execute(args, ctx)
@@ -166,6 +169,7 @@ class TestEditTool:
     @pytest.mark.asyncio
     async def test_edit_exact_match(self, ctx, tmp_path):
         import hashlib
+
         target = tmp_path / "edit.txt"
         content = "hello world\ngoodbye world\n"
         target.write_text(content)
@@ -173,6 +177,7 @@ class TestEditTool:
 
         tool = EditTool()
         from kalash.tools.fs import EditParams
+
         args = EditParams(
             path=str(target),
             old_str="hello world",
@@ -192,7 +197,7 @@ class TestTodoTool:
     @pytest.mark.asyncio
     async def test_create_and_list(self, ctx):
         tool = TodoTool()
-        from kalash.tools.todo import TodoParams, TaskDef
+        from kalash.tools.todo import TaskDef, TodoParams
 
         # Create
         args = TodoParams(

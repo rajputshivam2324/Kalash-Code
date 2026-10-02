@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -14,15 +14,13 @@ console = Console()
 
 @provider_app.command("ls")
 def ls(
-    verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Show model lists")
-    ] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show model lists")] = False,
 ) -> None:
     """List configured model providers and credential status."""
     import os
 
+    from kalash.models.catalog import PROVIDERS
     from kalash.models.resolve import active_selection, credential_for
-    from kalash.tui.providers import PROVIDERS
 
     active_provider, active_model = active_selection()
 
@@ -35,9 +33,11 @@ def ls(
         table.add_column("Models", style="dim")
 
     for info in PROVIDERS:
-        has_key = bool(credential_for(info.id)) or (
-            not info.requires_key
-        ) or bool(os.environ.get(info.env_key))
+        has_key = (
+            bool(credential_for(info.id))
+            or (not info.requires_key)
+            or bool(os.environ.get(info.env_key))
+        )
         key_status = "[green]✓[/green]" if has_key else "[red]✗[/red]"
         is_active = info.id == active_provider
         active = "[green]●[/green]" if is_active else ""
@@ -57,7 +57,7 @@ def ls(
 @provider_app.command("test")
 def test(
     provider_id: Annotated[
-        Optional[str],
+        str | None,
         typer.Argument(help="Provider to test (defaults to active)"),
     ] = None,
 ) -> None:
@@ -67,7 +67,9 @@ def test(
     pid, mid = active_selection()
     target = provider_id or pid
     if not target:
-        console.print("[red]No provider configured. Run /connect in the TUI or set an API key.[/red]")
+        console.print(
+            "[red]No provider configured. Run /connect in the TUI or set an API key.[/red]"
+        )
         raise typer.Exit(code=1)
 
     resolution = build_provider(target, mid if provider_id is None else None)
@@ -83,7 +85,7 @@ def test(
 @provider_app.command("bench")
 def bench(
     provider_id: Annotated[
-        Optional[str],
+        str | None,
         typer.Argument(help="Provider to benchmark"),
     ] = None,
 ) -> None:

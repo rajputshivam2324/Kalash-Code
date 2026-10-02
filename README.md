@@ -1,197 +1,127 @@
-<p align="center">
-  <strong>Kalash</strong><br/>
-  Terminal-native AI coding agent — multi-provider, permissioned, and memory-aware.
-</p>
+# Kalash Code
 
-<p align="center">
-  <a href="#quick-start">Quick start</a> ·
-  <a href="#why-kalash">Why Kalash</a> ·
-  <a href="#features">Features</a> ·
-  <a href="#providers--limits">Providers</a> ·
-  <a href="#memory">Memory</a> ·
-  <a href="#development">Development</a>
-</p>
+A Python 3.12 coding-agent runtime with a terminal UI, headless CLI and SDK.
+The runtime owns permissions, tools, session history, context and run limits.
 
----
-
-## Why Kalash
-
-Most coding agents assume unlimited context and a single cloud provider. Real workflows hit **TPM ceilings**, **tool permission boundaries**, and **sessions that need to remember what you decided yesterday**.
-
-Kalash is built for that reality: a fully agentic loop in your terminal that works across Anthropic, OpenAI, Groq, Google, and OpenAI-compatible endpoints — with sandboxed execution, explicit approvals, MCP tools, and a first-class memory layer.
-
-Use it like Cursor or OpenCode, but **you own the runtime**: headless CI, interactive TUI, or Python SDK.
-
----
-
-## Quick start
-
-**Requirements:** Python 3.12+, [uv](https://docs.astral.sh/uv/)
+## Start
 
 ```bash
-git clone https://github.com/your-org/kalash-code.git
-cd kalash-code
 uv sync --all-extras
-uv run kalash
-```
-
-Connect a provider in the TUI with `/connect`, or run headless:
-
-```bash
-export GROQ_API_KEY=gsk_...
-kalash -p "explain this repo and suggest next steps"
-
-echo "fix the failing test" | kalash
-kalash -p "continue" --resume ses_abc123 --output-format json
-```
-
-Verify your setup:
-
-```bash
 uv run kalash doctor
-uv run kalash status
+uv run kalash
+uv run kalash -p "Inspect this repository and fix the failing test"
 ```
 
----
+Configure a provider with `kalash provider add` or its environment variable.
+Provider credentials and user settings live under `~/.kalash/`; project guidance
+and definitions live under `.kalash/`.
 
-## Features
+## Sarvam
 
-### Interactive TUI
-Rich terminal UI with live tool output, diff previews, session resume, model switching, and a status line that reflects **provider constraints** (context window, TPM, active tool profile).
-
-### Headless & scriptable
-Same agent core as the TUI — pipe prompts, stream JSON events, resume sessions, and pin model/sandbox/approval mode from the CLI.
+Set `SARVAM_API_KEY` locally, then select `sarvam/glm5.3` with the model picker or:
 
 ```bash
-kalash -p "task" --output-format stream-json
-kalash -p "task" --model anthropic/claude-sonnet-4-5
-kalash -p "task" --sandbox read-only --approval never
+uv run kalash -p "Review this repository" --model sarvam/glm5.3
 ```
 
-### Multi-provider, limit-aware
-Per-model caps for output tokens, context window, and **tokens-per-minute** are resolved before each request. Throughput-limited models (e.g. Groq free tier) use **phased iterations**: fixed token budget per step, context rollup between steps, and a **final synthesis pass** when a long task completes.
+Sarvam 105B uses the V1 chat route; GLM-5.3 and the other supported open models
+use V2. GLM-5.3 requires access on the API key. The adapter preserves reasoning
+and usage, uses the subscription-key header, and defaults to `max` reasoning
+with a 32,768-token output allowance. This allowance is configurable and includes
+reasoning. There is no automatic reasoning downgrade for provider quotas.
+See [Sarvam's model contract](https://docs.sarvam.ai/api/getting-started/models/openweight/glm-5-3).
 
-### Permission gate & sandbox
-Every tool call is classified, policy-checked, and optionally approved. Shell runs inside a Linux sandbox with configurable write roots and network grants for package managers.
+## Runtime behavior
 
-### Tools & MCP
-Built-in filesystem, shell, search, web, todo/plan, scratchpad, subagents, and skills. MCP servers extend the tool surface without forking the agent.
+- One loop: assemble context, request the model, execute tools, append results.
+- The full permitted tool set stays available; TPM policies and tool profiles
+  do not rewrite prompts or shorten replies.
+- Run ceilings bound tokens, cost where prices are supplied, model requests,
+  attempted tools and elapsed time. They also cover summary calls and child usage.
+- Independent reads can overlap; writes and execution form ordering barriers.
+- Plan mode and child capability/tool restrictions are enforced during dispatch.
+- Shell commands require a working OS sandbox unless full access is explicitly
+  configured. Subprocess environments exclude API keys by default.
+- Interrupted tool calls retain their intent and receive an unknown-outcome
+  result on resume. Inspect the workspace before retrying a mutation.
 
-### Memory layer
-Local SQLite + FTS recall/capture out of the box; optional mem0 backend. Memories inject at turn start and extract after turns — preferences, errors, and project facts persist across sessions.
+## Instructions, skills and context
 
-### Sessions & scheduling
-SQLite-backed transcripts, export/resume, grant persistence, cron-style scheduled runs, and a background serve daemon.
+The static system prompt is separate from instruction discovery. Both
+`AGENTS.md` and `KALASH.md` load from user and ancestor directories, broadest
+first. At the same directory, native `KALASH.md` comes last. Scoped guidance is
+loaded before the first change under a subdirectory.
 
----
+Skills are folders containing `SKILL.md` with YAML `name` and `description`.
+Only metadata loads initially; the `skill` tool loads a body and optional bounded
+references. Project definitions override user definitions, which override plugins.
+Loaded skill bodies and scoped guidance survive history compaction.
 
-## CLI reference
-
-| Command | Purpose |
-|---------|---------|
-| `kalash` | Interactive TUI |
-| `kalash -p "…"` | Headless one-shot prompt |
-| `kalash doctor` | Provider, sandbox, memory, tools health check |
-| `kalash status` | Config and session snapshot |
-| `kalash provider` | Manage model providers |
-| `kalash session` | List, export, resume sessions |
-| `kalash memory` | Add, search, export memories |
-| `kalash agents` | Subagent definitions (`.kalash/agents/*.md`) |
-| `kalash skills` | Project skills |
-| `kalash hooks` | Pre/post tool hooks |
-| `kalash mcp` | MCP server configuration |
-| `kalash cron` / `kalash serve` | Scheduled agent runs |
-
----
-
-## Project layout
-
-```
-.kalash/
-  agents/       Subagent definitions (*.md + YAML frontmatter)
-  skills/       SKILL.md files
-  hooks/        Hook configs
-  settings/     MCP and project settings
-
-~/.kalash/      User credentials, defaults, global skills/agents
-```
-
----
-
-## Providers & limits
-
-Kalash resolves model limits from a static catalog, **provider defaults** (e.g. Groq → 8k TPM), and **runtime learning** when an API returns an explicit ceiling. Tool profiles shrink automatically on small models; large models receive the full schema.
-
-Supported provider families (via optional extras):
-
-| Extra | Providers |
-|-------|-----------|
-| `anthropic` | Claude |
-| `openai` | GPT, o-series |
-| `google` | Gemini |
-| `openai_compatible` | Groq, Together, local OpenAI-compatible servers |
-
-Install everything:
-
-```bash
-uv sync --extra all
-```
-
----
+Context assembly keeps identity, catalog and root guidance stable. Environment
+and bounded memory are labeled separately from conversation. Near the actual
+model window, the runtime summarizes complete older exchanges with a charged
+model request and a labeled extractive fallback. User instructions remain
+verbatim; recent tool exchanges stay paired. Oversized observations can be
+retrieved through `expand`.
 
 ## Memory
 
-Built-in engine comparable to mem0/supermemory:
+The default backend is SQLite with FTS keyword retrieval. Records have scope,
+provenance and confidence; scope filtering happens before retrieval limits.
+Exact deduplication, updates, history and FTS changes are transactional.
 
-- **Recall** at turn start — relevant memories inject into context
-- **Capture** after turns — preferences, errors, tooling signals
-- **Tools** — `recall`, `remember`, `forget` in the agent loop
-- **CLI** — `kalash memory add|search|ls|forget|export|doctor`
+Turn capture saves bounded explicit preferences. Recall has a rendered token
+limit and is labeled as data. There is no built-in vector search, graph retrieval,
+mem0 adapter or background extraction queue. Existing database records are kept.
+Custom providers can implement the memory protocol and register an entry point.
 
-Configure in `.kalash/settings.json`:
+## MCP and hooks
+
+MCP settings merge from `~/.kalash/settings/mcp.json` and
+`.kalash/settings/mcp.json`, with project entries taking precedence:
 
 ```json
 {
-  "memory": {
-    "enabled": true,
-    "primary": "local",
-    "providers": ["local"],
-    "recall_budget": 0.08
+  "servers": {
+    "local": {
+      "transport": "stdio",
+      "command": "python",
+      "args": ["server.py"],
+      "env": {"TOKEN": "${env:MY_SERVER_TOKEN}"}
+    },
+    "remote": {
+      "transport": "streamable-http",
+      "url": "https://example.com/mcp",
+      "headers": {"Authorization": "Bearer ${env:MY_SERVER_TOKEN}"}
+    }
   }
 }
 ```
 
-Custom backends via the `kalash.memory_providers` entry point. Optional mem0: `uv sync --extra mem0`.
+After reviewing manual project configuration, run `kalash mcp trust`.
+`kalash mcp add` authorizes the configuration it writes. Changing the file
+invalidates its trust. `kalash mcp test NAME` checks a selected server explicitly.
+HTTP connections initialize the protocol and retain session headers. Legacy SSE
+is also supported, but lacks the same transport regression coverage.
 
----
+Review project hooks and authorize their current contents with
+`kalash hooks trust`. Changed files stop running until authorized again.
+Network permissions come from user settings; project configuration cannot widen
+security settings. OAuth login is not implemented; token/header configuration is.
 
-## Architecture (high level)
+## Repository map and checks
 
-```
-CLI / TUI / SDK
-      │
-      ▼
-  Agent (build_agent)
-      │
-      ├── ModelGateway ──► Anthropic / OpenAI / Groq / …
-      ├── ToolHost ──────► permissions → sandbox → tools / MCP
-      ├── ContextAssembler
-      ├── AgentLoop ─────► assemble → stream → tools → repeat
-      │                      └── phased iterations + synthesis
-      └── MemoryRouter ──► local FTS / mem0 / custom providers
-```
-
----
-
-## Development
+See [architecture](docs/ARCHITECTURE.md) for module responsibilities and
+[review](docs/HARNESS_REVIEW.md) for findings, fixes and remaining gates.
 
 ```bash
-uv run pytest -q          # 424+ tests
+uv run pytest -q
+uv run mypy src
 uv run ruff check src tests
+uv build
 ```
 
----
-
-## License
-
-MIT
+Regression tests validate runtime contracts. Scripted evaluations validate runner
+mechanics. Neither establishes a public coding benchmark score. The performance
+reference is the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness).
+Public comparison requires matched trials and an independent official grader.

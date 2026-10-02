@@ -6,6 +6,7 @@ The registry is the single point of tool discovery and invocation.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any
 
@@ -43,7 +44,9 @@ class ToolRegistry:
             ValueError: If source is unrecognized.
         """
         if source not in self._SOURCE_PRIORITY:
-            raise ValueError(f"Unknown source '{source}'; expected one of {list(self._SOURCE_PRIORITY)}")
+            raise ValueError(
+                f"Unknown source '{source}'; expected one of {list(self._SOURCE_PRIORITY)}"
+            )
 
         entries = self._tools.setdefault(tool.name, [])
         entries.append((source, tool))
@@ -155,9 +158,23 @@ class ToolRegistry:
                 remediation="Check the tool's parameter schema.",
             )
 
+        missing = tool.capabilities - ctx.capabilities
+        if missing:
+            return ToolEnvelope.fail(
+                code="KALASH_CAPABILITY_DENIED",
+                message=f"{name} requires unavailable capabilities: {', '.join(sorted(missing))}",
+                recoverable=True,
+            )
+
         # Execute
         try:
-            return await tool.execute(validated, ctx)
+            return await asyncio.wait_for(tool.execute(validated, ctx), timeout=tool.timeout_s)
+        except TimeoutError:
+            return ToolEnvelope.fail(
+                code="KALASH_TOOL_TIMEOUT",
+                message=f"{name} exceeded {tool.timeout_s}s",
+                recoverable=True,
+            )
         except Exception as exc:
             logger.exception("Unhandled exception in tool '%s'", name)
             return ToolEnvelope.fail(

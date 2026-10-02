@@ -20,6 +20,7 @@ from kalash.core.diff import (
 from kalash.runtime.scratchpad import reset_cache
 from kalash.tools.base import ToolContext
 from kalash.tools.fs import EditParams, EditTool, WriteParams, WriteTool
+from tests.render import plain as render_plain
 
 
 @pytest.fixture
@@ -89,9 +90,7 @@ class TestDiffGeneration:
 class TestToolsReportDiffs:
     @pytest.mark.asyncio
     async def test_write_returns_a_diff(self, ctx, workspace):
-        env = await WriteTool().execute(
-            WriteParams(path="new.py", content="print('hi')\n"), ctx
-        )
+        env = await WriteTool().execute(WriteParams(path="new.py", content="print('hi')\n"), ctx)
         assert env.ok
         assert env.metadata["diff"]
         assert "+ print('hi')" in env.metadata["diff"]
@@ -137,18 +136,13 @@ class TestToolsReportDiffs:
     async def test_diff_failure_never_blocks_the_write(self, ctx, workspace, monkeypatch):
         """The write is the contract; the diff is a display nicety."""
         monkeypatch.setattr(
-            "kalash.tools.fs.make_diff",
+            "kalash.tools.fs.write.make_diff",
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("diff exploded")),
         )
         with pytest.raises(RuntimeError):
-            await WriteTool().execute(
-                WriteParams(path="z.py", content="content\n"), ctx
-            )
+            await WriteTool().execute(WriteParams(path="z.py", content="content\n"), ctx)
         # The bytes still landed before the diff was attempted.
         assert (workspace / "z.py").exists()
-
-
-
 
 
 class TestSubagentWidget:
@@ -156,9 +150,9 @@ class TestSubagentWidget:
         from kalash.tui.messages import SubagentLine
 
         line = SubagentLine("find the bug")
-        assert "running" in line.renderable.plain
+        assert "running" in render_plain(line.renderable)
         line.finish(turns=3, tokens=12_000)
-        plain = line.renderable.plain
+        plain = render_plain(line.renderable)
         assert "done" in plain
         assert "3 turns" in plain
         assert "12,000" in plain
@@ -168,7 +162,7 @@ class TestSubagentWidget:
 
         line = SubagentLine("x")
         line.finish(failed=True)
-        assert "failed" in line.renderable.plain
+        assert "failed" in render_plain(line.renderable)
 
 
 class TestToolCallVisibility:
@@ -193,23 +187,23 @@ class TestToolCallVisibility:
 
         line = ToolCallLine("shell  npm install")
         line.tick(0.5)
-        assert "s\n" not in line.renderable.plain
+        assert "s\n" not in render_plain(line.renderable)
         line.tick(9.0)
-        assert "9s" in line.renderable.plain
-        assert "ctrl+c" in line.renderable.plain
+        assert "9s" in render_plain(line.renderable)
+        assert "ctrl+c" in render_plain(line.renderable)
 
     def test_finished_line_stops_ticking(self):
         from kalash.tui.messages import ToolCallLine
 
         line = ToolCallLine("shell  build")
         line.finish(duration_ms=4200)
-        before = line.renderable.plain
+        before = render_plain(line.renderable)
         line.tick(30.0)
-        assert line.renderable.plain == before
+        assert render_plain(line.renderable) == before
         assert "4.2s" in before
 
     def test_shell_summary_includes_sandbox_warning(self):
-        from kalash.tui.app import summarize_tool_result
+        from kalash.tui.formatting import summarize_tool_result
 
         summary = summarize_tool_result(
             "shell",
@@ -222,7 +216,7 @@ class TestToolCallVisibility:
 
         line = ToolCallLine("$ npm test", tool_name="shell")
         line.set_summary("runs unwrapped (OS sandbox unavailable)")
-        plain = line.renderable.plain
+        plain = render_plain(line.renderable)
         assert "unwrapped" in plain
 
     def test_assistant_shows_working_state(self):
@@ -244,8 +238,8 @@ class TestToolCallVisibility:
         line = ToolCallLine("$ pytest")
         line.append_output("\n".join(f"line {i}" for i in range(20)) + "\n")
         line.finish(duration_ms=1500)
-        plain = line.renderable.plain
+        plain = render_plain(line.renderable)
         assert "output lines hidden" in plain
         assert "ctrl+o" in plain
         line.toggle_expand()
-        assert "line 19" in line.renderable.plain
+        assert "line 19" in render_plain(line.renderable)

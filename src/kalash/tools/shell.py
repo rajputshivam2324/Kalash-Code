@@ -22,6 +22,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from kalash.sandbox.environment import safe_environment as _safe_env
 from kalash.tools.base import (
     SideEffect,
     SideEffectRecord,
@@ -29,7 +30,6 @@ from kalash.tools.base import (
     ToolEnvelope,
     TruncationInfo,
 )
-
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -57,21 +57,6 @@ def list_background_pids(session_id: str) -> list[int]:
     """Return PIDs of background shells still running for a session."""
     return list(_BACKGROUND.get(session_id, {}).keys())
 
-# Environment variables stripped for safety
-_STRIPPED_ENV_VARS = frozenset({
-    "LD_PRELOAD",
-    "LD_LIBRARY_PATH",
-    "DYLD_INSERT_LIBRARIES",
-    "DYLD_LIBRARY_PATH",
-    "NODE_OPTIONS",
-    "PYTHONSTARTUP",
-    "PYTHONPATH",
-    "PERL5OPT",
-    "RUBYOPT",
-    "BASH_ENV",
-    "ENV",
-    "CDPATH",
-})
 
 # Command patterns that require elevated capabilities
 _DANGEROUS_PATTERNS = {
@@ -120,7 +105,7 @@ for _pat, _cap in _DANGEROUS_PATTERNS.items():
     if " " in _pat:
         _MULTI_WORD_PATTERNS.append((_pat, _cap))
     else:
-        _COMPILED_PATTERNS.append((_re.compile(rf'\b{_re.escape(_pat)}\b'), _cap))
+        _COMPILED_PATTERNS.append((_re.compile(rf"\b{_re.escape(_pat)}\b"), _cap))
 
 
 def _classify_command(command: str) -> frozenset[str]:
@@ -138,14 +123,6 @@ def _classify_command(command: str) -> frozenset[str]:
         if pattern in cmd_lower:
             caps.add(cap)
     return frozenset(caps)
-
-
-def _safe_env() -> dict[str, str]:
-    """Create a sanitized environment, stripping dangerous variables."""
-    env = dict(os.environ)
-    for var in _STRIPPED_ENV_VARS:
-        env.pop(var, None)
-    return env
 
 
 def _wrap_sandboxed(
@@ -170,10 +147,10 @@ def _wrap_sandboxed(
             return argv, True, None
         status = manager.status()
         if status.available:
-            return argv, False, "sandbox preflight failed — command runs unwrapped"
-        return argv, False, f"OS sandbox unavailable ({status.detail}) — command runs unwrapped"
+            return argv, False, "sandbox preflight failed"
+        return argv, False, f"OS sandbox unavailable ({status.detail})"
     except Exception:
-        return argv, False, "sandbox backend error — command runs unwrapped"
+        return argv, False, "sandbox backend error"
 
 
 # ---------------------------------------------------------------------------
@@ -186,7 +163,9 @@ class ShellParams(BaseModel):
 
     command: str = Field(description="Shell command to execute (passed to bash -c)")
     cwd: str = Field(default="", description="Working directory (never use cd; use this instead)")
-    timeout: float = Field(default=_DEFAULT_TIMEOUT_S, gt=0, le=1800, description="Timeout in seconds")
+    timeout: float = Field(
+        default=_DEFAULT_TIMEOUT_S, gt=0, le=1800, description="Timeout in seconds"
+    )
     background: bool = Field(default=False, description="Run in background (returns immediately)")
 
 
@@ -281,26 +260,35 @@ class ShellTool:
                 "cwd": str(cwd),
                 "env": env,
                 "stdin": asyncio.subprocess.DEVNULL,
-                "stdout": asyncio.subprocess.PIPE,
-                "stderr": asyncio.subprocess.PIPE,
+                "stdout": asyncio.subprocess.DEVNULL
+                if args.background
+                else asyncio.subprocess.PIPE,
+                "stderr": asyncio.subprocess.DEVNULL
+                if args.background
+                else asyncio.subprocess.PIPE,
             }
             if sys.platform != "win32":
                 kwargs["preexec_fn"] = os.setsid
 
             if sys.platform == "win32":
-                process = await asyncio.create_subprocess_shell(
-                    args.command, **kwargs
-                )
+                if ctx.require_sandbox:
+                    return ToolEnvelope.fail(
+                        code="KALASH_SANDBOX_UNAVAILABLE",
+                        message="No enforced Windows sandbox backend is available",
+                    )
+                process = await asyncio.create_subprocess_shell(args.command, **kwargs)
             else:
-                # Wrap in the platform sandbox when one is available. This is
-                # defence in depth behind the permission gate, not a substitute
-                # for it: an unavailable backend returns the argv unchanged and
-                # the degradation shows up in `kalash doctor` rather than being
-                # silently assumed.
+                # Require a verified platform sandbox unless full access was explicitly granted.
                 argv, wrapped, sandbox_warning = _wrap_sandboxed(
                     [shell, "-c", args.command], ctx, cwd
                 )
                 sandboxed = wrapped
+                if ctx.require_sandbox and not wrapped:
+                    return ToolEnvelope.fail(
+                        code="KALASH_SANDBOX_UNAVAILABLE",
+                        message=sandbox_warning or "No enforced sandbox is available",
+                        remediation="Install a working sandbox backend, or explicitly use danger-full-access for trusted work.",
+                    )
                 process = await asyncio.create_subprocess_exec(*argv, **kwargs)
 
             # Background mode: return immediately
@@ -317,27 +305,28 @@ class ShellTool:
                 return ToolEnvelope.success(
                     content=(
                         f"Background process started (PID: {process.pid}). "
-                        "Use `shell` foreground commands to check output; "
+                        "Background output is discarded; redirect to a workspace log file if needed. "
                         "background jobs stop when the session is interrupted."
                     ),
                     metadata=meta,
-                    side_effects=(
-                        SideEffectRecord(kind="executed", path=args.command),
-                    ),
+                    side_effects=(SideEffectRecord(kind="executed", path=args.command),),
                 )
 
             # Wait with timeout — stream output live to the TUI / headless sink
             try:
-                stdout_data, stderr_data, stdout_truncated, stderr_truncated = (
-                    await _run_with_timeout(process, ctx=ctx, timeout=args.timeout)
-                )
+                (
+                    stdout_data,
+                    stderr_data,
+                    stdout_truncated,
+                    stderr_truncated,
+                ) = await _run_with_timeout(process, ctx=ctx, timeout=args.timeout)
             except _ShellCancelled:
                 return ToolEnvelope.fail(
                     code="KALASH_CANCELLED",
                     message=f"Command cancelled: {args.command}",
                     recoverable=True,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 return ToolEnvelope.fail(
                     code="KALASH_TOOL_TIMEOUT",
                     message=f"Command timed out after {args.timeout}s: {args.command}",
@@ -463,16 +452,14 @@ async def _collect_stream(
             break
         try:
             data = await asyncio.wait_for(reader.read(4096), timeout=0.25)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             continue
         if not data:
             break
         total += len(data)
         if total <= limit:
             chunks.append(data)
-            await _emit_stream_chunk(
-                ctx, stream, data.decode("utf-8", errors="replace")
-            )
+            await _emit_stream_chunk(ctx, stream, data.decode("utf-8", errors="replace"))
         else:
             truncated = True
     return b"".join(chunks), truncated
@@ -496,50 +483,50 @@ async def _run_with_timeout(
         while process.returncode is None:
             if ctx.cancel_event is not None and ctx.cancel_event.is_set():
                 await _terminate_process(process)
-                raise _ShellCancelled()
+                raise _ShellCancelled
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 await _terminate_process(process)
-                raise asyncio.TimeoutError()
+                raise TimeoutError
             try:
                 await asyncio.wait_for(process.wait(), timeout=min(0.2, remaining))
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
-    except (asyncio.TimeoutError, _ShellCancelled):
+    except (TimeoutError, _ShellCancelled, asyncio.CancelledError):
+        await _terminate_process(process)
         stdout_task.cancel()
         stderr_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await stdout_task
             await stderr_task
         raise
-    stdout_data, stdout_trunc = await stdout_task
-    stderr_data, stderr_trunc = await stderr_task
+    try:
+        async with asyncio.timeout(max(0.01, deadline - asyncio.get_running_loop().time())):
+            stdout_data, stdout_trunc = await stdout_task
+            stderr_data, stderr_trunc = await stderr_task
+    finally:
+        await _terminate_process(process)
+        stdout_task.cancel()
+        stderr_task.cancel()
+        await asyncio.gather(stdout_task, stderr_task, return_exceptions=True)
     return stdout_data, stderr_data, stdout_trunc, stderr_trunc
 
 
 async def _terminate_process(process: asyncio.subprocess.Process) -> None:
-    """Graceful termination: SIGTERM -> 5s -> SIGKILL."""
-    if process.returncode is not None:
-        return
-
-    try:
-        if sys.platform != "win32":
-            pgid = os.getpgid(process.pid)
-            os.killpg(pgid, signal.SIGTERM)
-        else:
-            process.terminate()
-    except (ProcessLookupError, OSError):
-        return
-
+    """Terminate the process group, including descendants of an exited shell."""
+    if sys.platform != "win32":
+        # Shell processes start a new session, so the leader PID is also the PGID.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(process.pid, signal.SIGTERM)
+    elif process.returncode is None:
+        process.terminate()
     try:
         await asyncio.wait_for(process.wait(), timeout=_GRACE_PERIOD_S)
-    except asyncio.TimeoutError:
-        try:
-            if sys.platform != "win32":
-                pgid = os.getpgid(process.pid)
-                os.killpg(pgid, signal.SIGKILL)
-            else:
-                process.kill()
-        except (ProcessLookupError, OSError):
-            pass
-        await process.wait()
+    except TimeoutError:
+        if sys.platform == "win32":
+            process.kill()
+    finally:
+        if sys.platform != "win32":
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+    await process.wait()

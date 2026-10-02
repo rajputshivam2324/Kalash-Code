@@ -1,27 +1,16 @@
-"""Sandbox backend selection.
-
-``linux.py`` implements real Landlock syscalls and bubblewrap wrapping;
-``macos.py`` generates real Seatbelt profiles. Neither was ever invoked, and
-``cli/doctor.py`` imported this module — which did not exist — so the sandbox
-health check could only ever report failure.
-
-This picks a backend for the platform and exposes the two things callers need:
-whether enforcement is available, and how to wrap a command so it runs under it.
-
-Wrapping degrades rather than failing. A missing ``bwrap`` binary should not stop
-the agent from running tests; it should mean the command runs unwrapped, with the
-degradation visible in ``kalash doctor`` instead of silently assumed. The
-permission gate and the filesystem tools' own path checks still apply either way,
-so an unavailable OS sandbox reduces defence in depth rather than removing all
-enforcement.
-"""
+"""Platform sandbox selection and preflight. Callers must enforce wrapped=True."""
 
 from __future__ import annotations
 
+import logging
 import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+
+from kalash.sandbox.policy import SandboxPolicy
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,22 +44,16 @@ class SandboxManager:
 
     # -- selection ---------------------------------------------------------
 
-    def _policy(self):
+    def _policy(self) -> SandboxPolicy:
         """Build the SandboxPolicy the backends take."""
         from kalash.sandbox.policy import NetworkPolicy, SandboxMode, SandboxPolicy
 
-        extra = [
-            root
-            for root in self.writable_roots
-            if root.resolve() != self.workspace_root
-        ]
+        extra = [root for root in self.writable_roots if root.resolve() != self.workspace_root]
         return SandboxPolicy(
             mode=SandboxMode.WORKSPACE_WRITE,
             workspace_root=self.workspace_root,
             additional_writable=extra,
-            network_policy=(
-                NetworkPolicy.ALLOW_ALL if self.allow_network else NetworkPolicy.DENY
-            ),
+            network_policy=(NetworkPolicy.ALLOW_ALL if self.allow_network else NetworkPolicy.DENY),
         )
 
     def _select(self) -> object | None:
@@ -100,7 +83,7 @@ class SandboxManager:
                 logger.debug("landlock support probe failed", exc_info=e)
                 landlock = False
 
-            if has_bwrap or landlock:
+            if has_bwrap:
                 parts = []
                 if landlock:
                     parts.append("landlock kernel support")
@@ -116,7 +99,7 @@ class SandboxManager:
                 platform="linux",
                 backend="landlock/bubblewrap",
                 available=False,
-                detail="no landlock support and bwrap not on PATH",
+                detail="bwrap not on PATH; Landlock is not applied to child commands",
             )
 
         if sys.platform == "darwin":
@@ -306,4 +289,4 @@ def preflight_report(*, allow_network: bool = False) -> str:
     if preflight_ok(allow_network=allow_network):
         scope = "filesystem + network" if allow_network else "filesystem"
         return f"verified ({scope})"
-    return "probe failed — commands will run unwrapped"
+    return "probe failed — sandboxed commands will be refused"

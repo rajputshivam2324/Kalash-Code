@@ -7,8 +7,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel, Field
 
 from kalash.runtime.scratchpad import get_scratchpad
@@ -24,7 +22,6 @@ from kalash.tools.search_providers import (
     run_search,
 )
 
-
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -32,17 +29,19 @@ from kalash.tools.search_providers import (
 _MAX_RESPONSE_BYTES = 5_242_880  # 5 MiB
 _MAX_REDIRECTS = 5
 _REQUEST_TIMEOUT_S = 30.0
-_ALLOWED_CONTENT_TYPES = frozenset({
-    "text/html",
-    "text/plain",
-    "text/css",
-    "text/javascript",
-    "application/json",
-    "application/xml",
-    "text/xml",
-    "text/markdown",
-    "text/csv",
-})
+_ALLOWED_CONTENT_TYPES = frozenset(
+    {
+        "text/html",
+        "text/plain",
+        "text/css",
+        "text/javascript",
+        "application/json",
+        "application/xml",
+        "text/xml",
+        "text/markdown",
+        "text/csv",
+    }
+)
 
 
 # ---------------------------------------------------------------------------
@@ -155,7 +154,9 @@ class FetchTool:
                     )
 
                 # Check content type
-                content_type = response.headers.get("content-type", "").split(";")[0].strip().lower()
+                content_type = (
+                    response.headers.get("content-type", "").split(";")[0].strip().lower()
+                )
                 if content_type and not any(ct in content_type for ct in _ALLOWED_CONTENT_TYPES):
                     return ToolEnvelope.fail(
                         code="KALASH_TOOL_ERROR",
@@ -409,8 +410,7 @@ class WebSearchTool:
             lines.append(row)
 
         header = (
-            f'web_search "{args.query}" · {len(response.results)} results '
-            f"· {response.provider}"
+            f'web_search "{args.query}" · {len(response.results)} results · {response.provider}'
         )
         footer = "expand(ref) for the stored snippet · fetch(url) for the live page"
         content = "[UNTRUSTED EXTERNAL CONTENT]\n" + "\n".join([header, *lines, footer])

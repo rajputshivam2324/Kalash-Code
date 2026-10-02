@@ -114,7 +114,6 @@ class TestBuildProvider:
 
 class TestAuthEncryption:
     def test_credentials_are_not_stored_in_plaintext(self, isolated_store, tmp_path, monkeypatch):
-        from kalash.core.paths import kalash_home
         from kalash.tui import auth_store
 
         monkeypatch.setattr(auth_store, "kalash_home", lambda: tmp_path)

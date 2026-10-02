@@ -3,20 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-import tempfile
-from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from kalash.scheduler.cron import (
-    CronField,
     CronExpression,
+    CronField,
+    EventSpec,
     IntervalSpec,
     OnceSpec,
-    EventSpec,
 )
-
 
 # ---------------------------------------------------------------------------
 # CronField
@@ -28,7 +25,7 @@ class TestCronField:
 
     def test_wildcard(self):
         f = CronField.parse("*", 0, 59)
-        assert f.values == set(range(0, 60))
+        assert f.values == set(range(60))
 
     def test_single_value(self):
         f = CronField.parse("5", 0, 59)
@@ -86,17 +83,17 @@ class TestCronExpression:
 
     def test_matches_specific_time(self):
         expr = CronExpression.parse("0 12 * * *")
-        noon = datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc)
+        noon = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
         assert expr.matches(noon)
 
     def test_does_not_match_wrong_time(self):
         expr = CronExpression.parse("0 12 * * *")
-        morning = datetime(2026, 8, 21, 9, 0, tzinfo=timezone.utc)
+        morning = datetime(2026, 8, 21, 9, 0, tzinfo=UTC)
         assert not expr.matches(morning)
 
     def test_next_fire_advances_past_current(self):
         expr = CronExpression.parse("0 * * * *")
-        now = datetime(2026, 8, 21, 10, 30, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 21, 10, 30, tzinfo=UTC)
         nxt = expr.next_fire(after=now)
         assert nxt > now
         assert nxt.minute == 0
@@ -104,14 +101,14 @@ class TestCronExpression:
 
     def test_next_fire_every_minute(self):
         expr = CronExpression.parse("* * * * *")
-        now = datetime(2026, 8, 21, 10, 30, 45, tzinfo=timezone.utc)
+        now = datetime(2026, 8, 21, 10, 30, 45, tzinfo=UTC)
         nxt = expr.next_fire(after=now)
         assert nxt.minute == 31
 
     def test_next_fire_specific_day(self):
         # Every Monday at 9:00
         expr = CronExpression.parse("0 9 * * 1")
-        friday = datetime(2026, 8, 21, 12, 0, tzinfo=timezone.utc)  # This is a Friday
+        friday = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)  # This is a Friday
         nxt = expr.next_fire(after=friday)
         # Should be the following Monday
         assert nxt > friday
@@ -123,7 +120,7 @@ class TestCronExpression:
     def test_next_fire_returns_utc(self):
         expr = CronExpression.parse("0 0 * * *", tz="Asia/Kolkata")
         nxt = expr.next_fire()
-        assert nxt.tzinfo == timezone.utc
+        assert nxt.tzinfo == UTC
 
 
 # ---------------------------------------------------------------------------
@@ -136,14 +133,14 @@ class TestIntervalSpec:
 
     def test_next_fire_from_last(self):
         spec = IntervalSpec(seconds=300)
-        base = datetime(2026, 8, 21, 10, 0, tzinfo=timezone.utc)
+        base = datetime(2026, 8, 21, 10, 0, tzinfo=UTC)
         nxt = spec.next_fire(last_fire=base)
         assert nxt == base + timedelta(seconds=300)
 
     def test_next_fire_default_is_now_plus_interval(self):
         spec = IntervalSpec(seconds=60)
         nxt = spec.next_fire()
-        assert nxt > datetime.now(timezone.utc) - timedelta(seconds=5)
+        assert nxt > datetime.now(UTC) - timedelta(seconds=5)
 
 
 # ---------------------------------------------------------------------------
@@ -155,12 +152,12 @@ class TestOnceSpec:
     """Tests for one-shot scheduling."""
 
     def test_future_returns_fire_at(self):
-        future = datetime.now(timezone.utc) + timedelta(hours=1)
+        future = datetime.now(UTC) + timedelta(hours=1)
         spec = OnceSpec(fire_at=future)
         assert spec.next_fire() == future
 
     def test_past_returns_none(self):
-        past = datetime.now(timezone.utc) - timedelta(hours=1)
+        past = datetime.now(UTC) - timedelta(hours=1)
         spec = OnceSpec(fire_at=past)
         assert spec.next_fire() is None
 
@@ -209,6 +206,7 @@ class TestSchedulerManager:
 
         # Monkeypatch get_engine to return our test engine
         import kalash.scheduler.manager as mgr_mod
+
         self._orig = mgr_mod.get_engine
         mgr_mod.get_engine = lambda: self.engine
         yield
@@ -217,6 +215,7 @@ class TestSchedulerManager:
 
     def test_add_and_list(self):
         from kalash.scheduler.manager import SchedulerManager
+
         mgr = SchedulerManager()
         job = mgr.add(name="daily_review", schedule="0 9 * * *", prompt="review code")
         assert job.name == "daily_review"
@@ -227,6 +226,7 @@ class TestSchedulerManager:
 
     def test_get_by_id(self):
         from kalash.scheduler.manager import SchedulerManager
+
         mgr = SchedulerManager()
         job = mgr.add(name="test_get", schedule="* * * * *", prompt="test")
         found = mgr.get(job.id)
@@ -235,11 +235,13 @@ class TestSchedulerManager:
 
     def test_get_nonexistent_returns_none(self):
         from kalash.scheduler.manager import SchedulerManager
+
         mgr = SchedulerManager()
         assert mgr.get("nonexistent_id") is None
 
     def test_delete(self):
         from kalash.scheduler.manager import SchedulerManager
+
         mgr = SchedulerManager()
         job = mgr.add(name="to_delete", schedule="* * * * *", prompt="test")
         result = mgr.delete(job.id)
@@ -248,6 +250,7 @@ class TestSchedulerManager:
 
     def test_set_enabled(self):
         from kalash.scheduler.manager import SchedulerManager
+
         mgr = SchedulerManager()
         job = mgr.add(name="toggle", schedule="* * * * *", prompt="test")
         mgr.set_enabled(job.id, enabled=False)
@@ -260,6 +263,7 @@ class TestSchedulerManager:
 
     def test_trigger(self):
         from kalash.scheduler.manager import SchedulerManager
+
         mgr = SchedulerManager()
         job = mgr.add(name="trigger_test", schedule="* * * * *", prompt="test")
         result = mgr.trigger(job.id)
@@ -268,11 +272,13 @@ class TestSchedulerManager:
 
     def test_trigger_nonexistent_returns_none(self):
         from kalash.scheduler.manager import SchedulerManager
+
         mgr = SchedulerManager()
         assert mgr.trigger("nonexistent") is None
 
     def test_logs_empty_initially(self):
         from kalash.scheduler.manager import SchedulerManager
+
         mgr = SchedulerManager()
         logs = mgr.get_logs()
         assert isinstance(logs, list)

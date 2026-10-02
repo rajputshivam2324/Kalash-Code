@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -86,13 +86,12 @@ def test(
 @hooks_app.command("trust")
 def trust(
     path: Annotated[
-        Optional[str],
+        str | None,
         typer.Argument(help="Hook file or project directory"),
     ] = None,
 ) -> None:
-    """Show hook files and content hashes for trust pinning."""
-    import hashlib
-
+    """Authorize the current contents of the selected project hook files."""
+    from kalash.core.trust import trust_file
     from kalash.hooks.load import HOOK_DIRS
 
     base = Path(path) if path else Path.cwd()
@@ -115,7 +114,7 @@ def trust(
     table.add_column("SHA-256", style="dim")
 
     for hook_file in targets:
-        digest = hashlib.sha256(hook_file.read_bytes()).hexdigest()[:16]
+        digest = trust_file(hook_file)[:16]
         table.add_row(str(hook_file), digest)
 
     console.print(table)

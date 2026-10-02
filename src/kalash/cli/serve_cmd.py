@@ -44,9 +44,8 @@ def serve(
 
 
 async def _run_daemon(*, tick_interval: float) -> None:
-    from kalash.storage.engine import get_engine
-
     from kalash.scheduler.daemon import SchedulerDaemon
+    from kalash.storage.engine import get_engine
 
     daemon = SchedulerDaemon(get_engine(), tick_interval_s=tick_interval)
     await daemon.start()

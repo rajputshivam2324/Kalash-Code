@@ -9,12 +9,11 @@ Uses conservative defaults since we can't know provider capabilities.
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from decimal import Decimal
 from typing import Any
 
-from collections.abc import AsyncIterator
-
-from kalash.core.budget import Pricing, Usage
+from kalash.core.budget import Pricing
 
 from ..normalize import (
     Message,
@@ -40,6 +39,8 @@ class OpenAICompatibleProvider(OpenAIProvider):
             api_key="ollama",  # some endpoints require a dummy key
         )
     """
+
+    token_parameter = "max_tokens"
 
     def __init__(
         self,
@@ -118,7 +119,7 @@ class OpenAICompatibleProvider(OpenAIProvider):
         """Send completion, stripping unsupported features."""
         # Don't send tools if provider doesn't support them
         effective_tools = tools if self._tool_use else None
-        
+
         if tools and not self._tool_use:
             note = "\n\n[NOTE: Tool calling is not available for this model. You must respond with plain text only and cannot execute functions.]"
             system = (system or "") + note
@@ -157,6 +158,8 @@ class OpenAICompatibleProvider(OpenAIProvider):
                 **kwargs,
             )
             # Synthesize stream events from the complete response
+            import json
+
             from ..normalize import (
                 BlockDelta,
                 BlockStart,
@@ -167,7 +170,6 @@ class OpenAICompatibleProvider(OpenAIProvider):
                 ToolUseBlock,
                 UsageUpdate,
             )
-            import json
 
             yield MessageStart(id=response.id, model=response.model)
 
@@ -201,7 +203,7 @@ class OpenAICompatibleProvider(OpenAIProvider):
             note = "\n\n[NOTE: Tool calling is not available for this model. You must respond with plain text only and cannot execute functions.]"
             system = (system or "") + note
 
-        async for event in super().stream(
+        stream = super().stream(
             messages,
             system=system,
             tools=effective_tools,
@@ -209,5 +211,11 @@ class OpenAICompatibleProvider(OpenAIProvider):
             temperature=temperature,
             stop_sequences=stop_sequences,
             **kwargs,
-        ):
-            yield event
+        )
+        try:
+            async for event in stream:
+                yield event
+        finally:
+            close = getattr(stream, "aclose", None)
+            if close is not None:
+                await close()

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import json
-from typing import Any
-
 from pydantic import BaseModel, Field
 
 from kalash.tools.base import (
@@ -70,14 +67,11 @@ class RecallTool:
         assert isinstance(args, RecallParams)
         from kalash.memory.session import get_session_memory
 
-        mem = get_session_memory(ctx.session_id, ctx.cwd)
+        mem = get_session_memory(ctx.session_id, ctx.cwd, config=ctx.config)
         hits = await mem.recall_tool(args.query, limit=args.limit, scope=args.scope)
         if not hits:
             return ToolEnvelope.success(content="No matching memories found.")
-        lines = [
-            f"- [{h['id']}] (score {h['score']:.2f}) {h['content'][:300]}"
-            for h in hits
-        ]
+        lines = [f"- [{h['id']}] (score {h['score']:.2f}) {h['content'][:300]}" for h in hits]
         return ToolEnvelope.success(content="\n".join(lines), metadata={"count": len(hits)})
 
 
@@ -143,7 +137,7 @@ class RememberTool:
             )
         from kalash.memory.session import get_session_memory
 
-        mem = get_session_memory(ctx.session_id, ctx.cwd)
+        mem = get_session_memory(ctx.session_id, ctx.cwd, config=ctx.config)
         mem_id = await mem.remember(
             args.content.strip(),
             scope=args.scope,
@@ -217,7 +211,7 @@ class ForgetTool:
             )
         from kalash.memory.session import get_session_memory
 
-        mem = get_session_memory(ctx.session_id, ctx.cwd)
+        mem = get_session_memory(ctx.session_id, ctx.cwd, config=ctx.config)
         count = await mem.forget(
             memory_id=args.memory_id,
             content_match=args.content_match,

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
@@ -51,10 +51,10 @@ class RetryConfig:
 
     def compute_delay(self, attempt: int) -> float:
         """Compute delay for a given attempt number (0-indexed)."""
-        delay = self.base_delay_s * (self.multiplier ** attempt)
+        delay = self.base_delay_s * (self.multiplier**attempt)
         delay = min(delay, self.max_delay_s)
         if self.jitter:
-            delay *= (0.5 + random.random())
+            delay *= 0.5 + random.random()
         return delay
 
 
@@ -87,27 +87,23 @@ class ScheduleRun:
         valid = _TRANSITIONS.get(self.status, set())
         if new_state not in valid:
             raise StateError(
-                f"Invalid transition: {self.status} → {new_state}. "
-                f"Valid targets: {valid}",
+                f"Invalid transition: {self.status} → {new_state}. Valid targets: {valid}",
                 recoverable=True,
             )
 
         self.status = new_state
         if new_state == RunState.RUNNING:
-            self.started_at = datetime.now(timezone.utc)
+            self.started_at = datetime.now(UTC)
         elif new_state in (
             RunState.SUCCEEDED,
             RunState.FAILED,
             RunState.SKIPPED,
             RunState.CANCELLED,
         ):
-            self.finished_at = datetime.now(timezone.utc)
+            self.finished_at = datetime.now(UTC)
 
     def should_retry(self) -> bool:
-        return (
-            self.status == RunState.FAILED
-            and self.attempt < self.retry_config.max_retries
-        )
+        return self.status == RunState.FAILED and self.attempt < self.retry_config.max_retries
 
     def schedule_retry(self) -> None:
         if not self.should_retry():
@@ -116,7 +112,7 @@ class ScheduleRun:
                 recoverable=True,
             )
         delay = self.retry_config.compute_delay(self.attempt)
-        self.next_retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
+        self.next_retry_at = datetime.now(UTC) + timedelta(seconds=delay)
         self.attempt += 1
         self.transition(RunState.RUNNING)
 
@@ -155,9 +151,7 @@ class ScheduleRun:
             schedule_id=row["schedule_id"],
             agent_run_id=row.get("agent_run_id"),
             status=RunState(row["status"]),
-            started_at=datetime.fromisoformat(row["started_at"])
-            if row.get("started_at")
-            else None,
+            started_at=datetime.fromisoformat(row["started_at"]) if row.get("started_at") else None,
             finished_at=datetime.fromisoformat(row["finished_at"])
             if row.get("finished_at")
             else None,

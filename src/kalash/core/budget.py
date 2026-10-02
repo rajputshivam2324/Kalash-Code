@@ -116,14 +116,29 @@ class BudgetState:
 
         if pricing:
             cost = Decimal(0)
-            cost += Decimal(usage.input_tokens) * pricing.input_per_mtok / Decimal(1_000_000)
+            uncached = usage.input_tokens
+            if pricing.cache_read_per_mtok is not None:
+                uncached = max(0, uncached - usage.cache_read_tokens)
+            cost += Decimal(uncached) * pricing.input_per_mtok / Decimal(1_000_000)
             cost += Decimal(usage.output_tokens) * pricing.output_per_mtok / Decimal(1_000_000)
             if pricing.cache_read_per_mtok and usage.cache_read_tokens:
-                cost += Decimal(usage.cache_read_tokens) * pricing.cache_read_per_mtok / Decimal(1_000_000)
+                cost += (
+                    Decimal(usage.cache_read_tokens)
+                    * pricing.cache_read_per_mtok
+                    / Decimal(1_000_000)
+                )
             if pricing.cache_write_per_mtok and usage.cache_write_tokens:
-                cost += Decimal(usage.cache_write_tokens) * pricing.cache_write_per_mtok / Decimal(1_000_000)
+                cost += (
+                    Decimal(usage.cache_write_tokens)
+                    * pricing.cache_write_per_mtok
+                    / Decimal(1_000_000)
+                )
             if pricing.reasoning_per_mtok and usage.reasoning_tokens:
-                cost += Decimal(usage.reasoning_tokens) * pricing.reasoning_per_mtok / Decimal(1_000_000)
+                cost += (
+                    Decimal(usage.reasoning_tokens)
+                    * pricing.reasoning_per_mtok
+                    / Decimal(1_000_000)
+                )
             self.cost_used += cost
 
     def reserve_for_child(self, tokens: int, cost: Decimal) -> bool:
@@ -134,7 +149,9 @@ class BudgetState:
         self.cost_reserved += cost
         return True
 
-    def release_reservation(self, tokens: int, cost: Decimal, actual_tokens: int, actual_cost: Decimal) -> None:
+    def release_reservation(
+        self, tokens: int, cost: Decimal, actual_tokens: int, actual_cost: Decimal
+    ) -> None:
         """Release a child's reservation and debit actual spend."""
         self.tokens_reserved -= tokens
         self.cost_reserved -= cost

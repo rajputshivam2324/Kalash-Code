@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -213,6 +212,7 @@ class UsageUpdate:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
     type: str = field(default="usage_update", init=False)
 
 
@@ -236,13 +236,7 @@ class StreamError:
 
 # Union of all stream event types
 StreamEvent = (
-    MessageStart
-    | BlockStart
-    | BlockDelta
-    | BlockStop
-    | UsageUpdate
-    | MessageStop
-    | StreamError
+    MessageStart | BlockStart | BlockDelta | BlockStop | UsageUpdate | MessageStop | StreamError
 )
 
 

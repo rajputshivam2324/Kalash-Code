@@ -3,17 +3,31 @@
 These exercise multi-component flows end-to-end with a fake LLM provider
 but real tools, real persistence, and real serialization.
 """
+
 from __future__ import annotations
-import json, pytest
-from pathlib import Path
+
+import json
+
+import pytest
+
 from kalash.core.budget import BudgetState
 from kalash.core.events import EventBus
 from kalash.models.normalize import (
-    BlockDelta, BlockStart, BlockStop, Message, MessageStart, MessageStop,
-    Role, StopReason, TextBlock, ToolResultBlock, ToolUseBlock, UsageUpdate,
+    BlockDelta,
+    BlockStart,
+    BlockStop,
+    Message,
+    MessageStart,
+    MessageStop,
+    Role,
+    StopReason,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UsageUpdate,
 )
 from kalash.permissions.policy import PermissionPolicy
-from kalash.permissions.prompt import ApprovalPrompt, ApprovalResponse, PromptContext, PromptResult
+from kalash.permissions.prompt import ApprovalPrompt, ApprovalResponse, PromptResult
 from kalash.runtime.context import ContextAssembler
 from kalash.runtime.loop import AgentLoop, TerminationReason
 from kalash.runtime.prompt import build_system_prompt
@@ -24,55 +38,105 @@ from kalash.tools.builtins import default_registry
 
 # ── Shared Fixtures ──────────────────────────────────────────────────────
 
+
 class FakeGateway:
     def __init__(self, turns):
         self.turns, self.calls = list(turns), []
-        class P: name="fake"; context_window=200_000
+
+        class P:
+            name = "fake"
+            context_window = 200_000
+
         self.primary = P()
+
     async def stream(self, messages, *, system=None, tools=None, **kw):
         self.calls.append({"messages": messages, "system": system, "tools": tools})
-        for e in (self.turns.pop(0) if self.turns else [MessageStop(StopReason.END_TURN)]):
+        for e in self.turns.pop(0) if self.turns else [MessageStop(StopReason.END_TURN)]:
             yield e
 
+
 def _text(t):
-    return [MessageStart(id="m",model="fake"),BlockStart(index=0,block_type="text"),
-            BlockDelta(index=0,delta=t),BlockStop(index=0),
-            UsageUpdate(input_tokens=50,output_tokens=10),MessageStop(StopReason.END_TURN)]
+    return [
+        MessageStart(id="m", model="fake"),
+        BlockStart(index=0, block_type="text"),
+        BlockDelta(index=0, delta=t),
+        BlockStop(index=0),
+        UsageUpdate(input_tokens=50, output_tokens=10),
+        MessageStop(StopReason.END_TURN),
+    ]
+
 
 def _tool(name, args, cid="tu_1"):
-    return [MessageStart(id="m",model="fake"),
-            BlockStart(index=0,block_type="tool_use",tool_use_id=cid,tool_name=name),
-            BlockDelta(index=0,delta=json.dumps(args)),BlockStop(index=0),
-            UsageUpdate(input_tokens=50,output_tokens=20),MessageStop(StopReason.TOOL_USE)]
+    return [
+        MessageStart(id="m", model="fake"),
+        BlockStart(index=0, block_type="tool_use", tool_use_id=cid, tool_name=name),
+        BlockDelta(index=0, delta=json.dumps(args)),
+        BlockStop(index=0),
+        UsageUpdate(input_tokens=50, output_tokens=20),
+        MessageStop(StopReason.TOOL_USE),
+    ]
+
 
 class AutoApprover:
-    def __init__(self, r=ApprovalResponse.ALLOW_ONCE): self.response=r; self.seen=[]
-    async def show_approval_prompt(self, ctx): self.seen.append(ctx); return PromptResult(response=self.response)
-    async def show_info(self, msg): pass
+    def __init__(self, r=ApprovalResponse.ALLOW_ONCE):
+        self.response = r
+        self.seen = []
+
+    async def show_approval_prompt(self, ctx):
+        self.seen.append(ctx)
+        return PromptResult(response=self.response)
+
+    async def show_info(self, msg):
+        pass
+
 
 @pytest.fixture(autouse=True)
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("KALASH_HOME", str(tmp_path / "home"))
-    reset_cache(); yield; reset_cache()
+    reset_cache()
+    yield
+    reset_cache()
+
 
 def _host(tmp_path, *, mode="build", ui=None):
     bus = EventBus()
-    return ToolHost(registry=default_registry(), event_bus=bus, session_id="ses",
-                    cwd=tmp_path, sandbox_mode="workspace-write", mode=mode,
-                    policy=PermissionPolicy(event_bus=bus, sandbox_mode=normalize_sandbox_mode("workspace-write")),
-                    approval=ApprovalPrompt(event_bus=bus, ui=ui, non_interactive=ui is None))
+    return ToolHost(
+        registry=default_registry(),
+        event_bus=bus,
+        session_id="ses",
+        cwd=tmp_path,
+        sandbox_mode="workspace-write",
+        mode=mode,
+        policy=PermissionPolicy(
+            event_bus=bus, sandbox_mode=normalize_sandbox_mode("workspace-write")
+        ),
+        approval=ApprovalPrompt(event_bus=bus, ui=ui, non_interactive=ui is None),
+    )
+
 
 def _loop(gw, host, *, repo=None):
     b = BudgetState(max_tokens=100_000)
-    return AgentLoop(gateway=gw, tool_registry=host, session_repo=repo, event_bus=host.event_bus,
-                     budget=b, assembler=ContextAssembler(budget=b, context_window=200_000),
-                     session_id="ses", system_prompt=build_system_prompt())
+    return AgentLoop(
+        gateway=gw,
+        tool_registry=host,
+        session_repo=repo,
+        event_bus=host.event_bus,
+        budget=b,
+        assembler=ContextAssembler(budget=b, context_window=200_000),
+        session_id="ses",
+        system_prompt=build_system_prompt(),
+    )
+
 
 async def _send(loop, text):
-    return await loop.run(user_message=Message(role=Role.USER, content=[TextBlock(text=text)]),
-                          system_identity=loop.system_prompt)
+    return await loop.run(
+        user_message=Message(role=Role.USER, content=[TextBlock(text=text)]),
+        system_identity=loop.system_prompt,
+    )
+
 
 # ── Integration: Full Agent Pipeline ─────────────────────────────────────
+
 
 class TestFullPipeline:
     """Build an agent, run multi-turn with tools, verify disk effects."""
@@ -80,10 +144,12 @@ class TestFullPipeline:
     @pytest.mark.asyncio
     async def test_write_then_read_roundtrip(self, tmp_path):
         target = tmp_path / "hello.txt"
-        gw = FakeGateway([
-            _tool("write", {"path": str(target), "content": "world\n"}),
-            _text("Created hello.txt."),
-        ])
+        gw = FakeGateway(
+            [
+                _tool("write", {"path": str(target), "content": "world\n"}),
+                _text("Created hello.txt."),
+            ]
+        )
         host = _host(tmp_path, ui=AutoApprover())
         result = await _send(_loop(gw, host), "create hello.txt")
         assert target.read_text() == "world\n"
@@ -93,11 +159,13 @@ class TestFullPipeline:
     async def test_multi_tool_chain(self, tmp_path):
         """read → edit → shell verification — the common agent workflow."""
         (tmp_path / "src.py").write_text("x = 1\ny = 2\n")
-        gw = FakeGateway([
-            _tool("read", {"path": str(tmp_path / "src.py")}),
-            _tool("shell", {"command": "cat " + str(tmp_path / "src.py")}),
-            _text("Inspected src.py."),
-        ])
+        gw = FakeGateway(
+            [
+                _tool("read", {"path": str(tmp_path / "src.py")}),
+                _tool("shell", {"command": "cat " + str(tmp_path / "src.py")}),
+                _text("Inspected src.py."),
+            ]
+        )
         host = _host(tmp_path, ui=AutoApprover())
         result = await _send(_loop(gw, host), "inspect src.py")
         assert result.iterations >= 2
@@ -109,8 +177,11 @@ class TestFullPipeline:
         host = _host(tmp_path)
         loop = _loop(gw, host)
         await _send(loop, "first")
-        r2 = await loop.run(user_message=Message(role=Role.USER, content=[TextBlock(text="second")]),
-                            system_identity=loop.system_prompt, recent_turns=loop.conversation)
+        await loop.run(
+            user_message=Message(role=Role.USER, content=[TextBlock(text="second")]),
+            system_identity=loop.system_prompt,
+            recent_turns=loop.conversation,
+        )
         assert len(gw.calls[1]["messages"]) > len(gw.calls[0]["messages"])
 
     @pytest.mark.asyncio
@@ -124,19 +195,21 @@ class TestFullPipeline:
 
     @pytest.mark.asyncio
     async def test_plan_mode_blocks_writes(self, tmp_path):
-        gw = FakeGateway([_text("plan only")])
         host = _host(tmp_path, mode="plan")
         names = {s["name"] for s in host.schemas()}
         assert "write" not in names
         assert "read" in names
 
+
 # ── Integration: Session Persistence ─────────────────────────────────────
+
 
 class TestSessionPersistence:
     """Create → persist → resume → verify messages."""
 
     def test_session_create_and_list(self, tmp_path, monkeypatch):
         from kalash.runtime.session import SessionManager
+
         mgr = SessionManager()
         session = mgr.create(str(tmp_path))
         sessions = mgr.list_sessions(limit=10)
@@ -144,6 +217,7 @@ class TestSessionPersistence:
 
     def test_session_delete(self, tmp_path):
         from kalash.runtime.session import SessionManager
+
         mgr = SessionManager()
         s = mgr.create(str(tmp_path))
         assert mgr.delete_session(s.id)
@@ -151,6 +225,7 @@ class TestSessionPersistence:
 
     def test_session_export_json(self, tmp_path):
         from kalash.runtime.session import SessionManager
+
         mgr = SessionManager()
         s = mgr.create(str(tmp_path))
         exported = mgr.export_session(s.id, format="json")
@@ -160,6 +235,7 @@ class TestSessionPersistence:
 
     def test_session_export_markdown(self, tmp_path):
         from kalash.runtime.session import SessionManager
+
         mgr = SessionManager()
         s = mgr.create(str(tmp_path))
         exported = mgr.export_session(s.id, format="markdown")
@@ -168,10 +244,13 @@ class TestSessionPersistence:
 
     def test_nonexistent_session_returns_none(self, tmp_path):
         from kalash.runtime.session import SessionManager
+
         mgr = SessionManager()
         assert mgr.export_session("nonexistent") is None
 
+
 # ── Integration: Scratchpad ──────────────────────────────────────────────
+
 
 class TestScratchpadIntegration:
     """put → expand → persist → reload — the full observation lifecycle."""
@@ -231,7 +310,9 @@ class TestScratchpadIntegration:
         pad.clear()
         assert pad.stats()["refs"] == 0
 
+
 # ── Integration: Serialization Round-Trip ────────────────────────────────
+
 
 class TestSerializationRoundTrip:
     """Full message serialize → persist → deserialize → verify."""
@@ -239,13 +320,23 @@ class TestSerializationRoundTrip:
     def test_complex_conversation_roundtrip(self):
         rows = [
             {"role": "user", "content": serialize_blocks([TextBlock(text="read a.py")])},
-            {"role": "assistant", "content": serialize_blocks([
-                TextBlock(text="Reading..."),
-                ToolUseBlock(id="tu_1", name="read", input={"path": "a.py"}),
-            ])},
-            {"role": "user", "content": serialize_blocks([
-                ToolResultBlock(tool_use_id="tu_1", content="def foo(): pass"),
-            ])},
+            {
+                "role": "assistant",
+                "content": serialize_blocks(
+                    [
+                        TextBlock(text="Reading..."),
+                        ToolUseBlock(id="tu_1", name="read", input={"path": "a.py"}),
+                    ]
+                ),
+            },
+            {
+                "role": "user",
+                "content": serialize_blocks(
+                    [
+                        ToolResultBlock(tool_use_id="tu_1", content="def foo(): pass"),
+                    ]
+                ),
+            },
             {"role": "assistant", "content": serialize_blocks([TextBlock(text="Done.")])},
         ]
         messages = rehydrate_messages(rows)
@@ -264,23 +355,30 @@ class TestSerializationRoundTrip:
         assert len(messages) == 1
         assert len(messages[0].content) == 2
 
-    def test_dangling_tool_use_dropped(self):
+    def test_dangling_tool_use_recovered(self):
         rows = [
-            {"role": "assistant", "content": serialize_blocks([
-                TextBlock(text="let me check"),
-                ToolUseBlock(id="tu_orphan", name="read", input={}),
-            ])},
+            {
+                "role": "assistant",
+                "content": serialize_blocks(
+                    [
+                        TextBlock(text="let me check"),
+                        ToolUseBlock(id="tu_orphan", name="read", input={}),
+                    ]
+                ),
+            },
         ]
         messages = rehydrate_messages(rows)
-        for m in messages:
-            for b in m.content:
-                assert not isinstance(b, ToolUseBlock)
+        assert isinstance(messages[0].content[-1], ToolUseBlock)
+        assert isinstance(messages[1].content[0], ToolResultBlock)
+        assert messages[1].content[0].is_error
 
     def test_legacy_plain_text_survives(self):
         blocks = deserialize_blocks("just plain text")
         assert blocks[0].text == "just plain text"
 
+
 # ── Integration: Provider Auth Flow ──────────────────────────────────────
+
 
 class TestProviderAuthFlow:
     """Save key → switch → switch back → verify persistence."""
@@ -288,11 +386,16 @@ class TestProviderAuthFlow:
     def test_full_provider_switch_cycle(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KALASH_HOME", str(tmp_path))
         from kalash.tui.providers import PROVIDERS
+
         for p in PROVIDERS:
             monkeypatch.delenv(p.env_key, raising=False)
 
-        from kalash.tui.auth_store import save_credential, get_credential, set_active_provider, get_active_provider
         from kalash.models.resolve import credential_for
+        from kalash.tui.auth_store import (
+            get_active_provider,
+            save_credential,
+            set_active_provider,
+        )
 
         # Save keys for two providers
         save_credential("openrouter", "sk-or-key")
@@ -315,21 +418,26 @@ class TestProviderAuthFlow:
     def test_env_var_fallback(self, tmp_path, monkeypatch):
         monkeypatch.setenv("KALASH_HOME", str(tmp_path))
         from kalash.tui.providers import PROVIDERS
+
         for p in PROVIDERS:
             monkeypatch.delenv(p.env_key, raising=False)
         monkeypatch.setenv("GROQ_API_KEY", "gsk-from-env")
 
-        from kalash.models.resolve import credential_for, active_selection
+        from kalash.models.resolve import active_selection, credential_for
+
         pid, _ = active_selection()
         assert pid == "groq"
         assert credential_for("groq") == "gsk-from-env"
 
+
 # ── Integration: MCP Registry ────────────────────────────────────────────
+
 
 class TestMCPRegistryIntegration:
     def test_add_list_get_server(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         from kalash.mcp.registry import MCPRegistry
+
         reg = MCPRegistry()
         entry = reg.add_server(name="test-server", url="http://localhost:8080", transport="sse")
         assert entry.name == "test-server"
@@ -340,37 +448,52 @@ class TestMCPRegistryIntegration:
 
     def test_to_config_stdio(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        from kalash.mcp.registry import MCPRegistry, MCPServerEntry
         from kalash.mcp.client import TransportType
+        from kalash.mcp.registry import MCPRegistry, MCPServerEntry
+
         reg = MCPRegistry()
         entry = MCPServerEntry(name="s", transport="stdio", url="npx server")
         cfg = reg._to_config(entry)
         assert cfg.transport is TransportType.STDIO
-        assert cfg.command == "npx server"
+        assert cfg.command == "npx"
+        assert cfg.args == ["server"]
 
     def test_to_config_sse(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
-        from kalash.mcp.registry import MCPRegistry, MCPServerEntry
         from kalash.mcp.client import TransportType
+        from kalash.mcp.registry import MCPRegistry, MCPServerEntry
+
         reg = MCPRegistry()
         entry = MCPServerEntry(name="s", transport="sse", url="http://localhost:3000")
         cfg = reg._to_config(entry)
         assert cfg.transport is TransportType.SSE
 
+
 # ── Integration: build_agent Full Pipeline ───────────────────────────────
+
 
 class TestBuildAgentIntegration:
     @pytest.mark.asyncio
     async def test_build_agent_wires_tools_and_prompt(self, tmp_path, monkeypatch):
         from kalash.models.normalize import MessageStop, StopReason
+
         class Stub:
-            name="stub"; context_window=200_000
+            name = "stub"
+            context_window = 200_000
+
             async def stream(self, messages, **kw):
                 yield MessageStop(StopReason.END_TURN)
+
         class Res:
-            ok=True; provider=Stub(); provider_id="test"; model_id="stub"; reason=""
-        monkeypatch.setattr("kalash.models.resolve.build_provider", lambda *a,**k: Res())
+            ok = True
+            provider = Stub()
+            provider_id = "test"
+            model_id = "stub"
+            reason = ""
+
+        monkeypatch.setattr("kalash.models.resolve.build_provider", lambda *a, **k: Res())
         from kalash.runtime.agent import build_agent
+
         agent, reason = build_agent(cwd=tmp_path, interactive=False)
         assert agent is not None, reason
         assert len(agent.loop.system_prompt) > 500
@@ -382,13 +505,24 @@ class TestBuildAgentIntegration:
     @pytest.mark.asyncio
     async def test_build_agent_plan_mode_excludes_writes(self, tmp_path, monkeypatch):
         from kalash.models.normalize import MessageStop, StopReason
+
         class Stub:
-            name="stub"; context_window=200_000
-            async def stream(self, messages, **kw): yield MessageStop(StopReason.END_TURN)
+            name = "stub"
+            context_window = 200_000
+
+            async def stream(self, messages, **kw):
+                yield MessageStop(StopReason.END_TURN)
+
         class Res:
-            ok=True; provider=Stub(); provider_id="test"; model_id="stub"; reason=""
-        monkeypatch.setattr("kalash.models.resolve.build_provider", lambda *a,**k: Res())
+            ok = True
+            provider = Stub()
+            provider_id = "test"
+            model_id = "stub"
+            reason = ""
+
+        monkeypatch.setattr("kalash.models.resolve.build_provider", lambda *a, **k: Res())
         from kalash.runtime.agent import build_agent
+
         agent, _ = build_agent(cwd=tmp_path, interactive=False, mode="plan")
         assert agent is not None
         names = {s["name"] for s in agent.host.schemas()}
@@ -396,14 +530,20 @@ class TestBuildAgentIntegration:
         assert "shell" not in names
         assert "read" in names
 
+
 # ── Integration: Tool Execution ──────────────────────────────────────────
+
 
 class TestToolExecution:
     @pytest.mark.asyncio
     async def test_write_creates_nested_dirs(self, tmp_path):
         host = _host(tmp_path, ui=AutoApprover())
         target = tmp_path / "a" / "b" / "c.txt"
-        await host.execute("write", {"path": str(target), "content": "deep\n", "create_dirs": True}, tool_use_id="t")
+        await host.execute(
+            "write",
+            {"path": str(target), "content": "deep\n", "create_dirs": True},
+            tool_use_id="t",
+        )
         assert target.read_text() == "deep\n"
 
     @pytest.mark.asyncio
@@ -437,11 +577,15 @@ class TestToolExecution:
     @pytest.mark.asyncio
     async def test_protected_path_refused(self, tmp_path):
         host = _host(tmp_path, ui=AutoApprover(ApprovalResponse.ALLOW_ALWAYS))
-        out = await host.execute("write", {"path": str(tmp_path / ".env"), "content": "S=1"}, tool_use_id="t")
+        out = await host.execute(
+            "write", {"path": str(tmp_path / ".env"), "content": "S=1"}, tool_use_id="t"
+        )
         assert "protected" in out.lower()
         assert not (tmp_path / ".env").exists()
 
+
 # ── Integration: Budget Tracking ─────────────────────────────────────────
+
 
 class TestBudgetTracking:
     @pytest.mark.asyncio
@@ -458,26 +602,38 @@ class TestBudgetTracking:
         gw = FakeGateway([_tool("read", {"path": "."})] * 20 + [_text("done")])
         host = _host(tmp_path, ui=AutoApprover())
         b = BudgetState(max_tokens=1)  # impossibly small
-        loop = AgentLoop(gateway=gw, tool_registry=host, session_repo=None,
-                         event_bus=host.event_bus, budget=b,
-                         assembler=ContextAssembler(budget=b, context_window=200_000),
-                         session_id="ses", system_prompt="test")
+        loop = AgentLoop(
+            gateway=gw,
+            tool_registry=host,
+            session_repo=None,
+            event_bus=host.event_bus,
+            budget=b,
+            assembler=ContextAssembler(budget=b, context_window=200_000),
+            session_id="ses",
+            system_prompt="test",
+        )
         result = await _send(loop, "hi")
         assert result.termination_reason in (
-            TerminationReason.BUDGET_EXHAUSTED, TerminationReason.ERROR,
+            TerminationReason.BUDGET_EXHAUSTED,
+            TerminationReason.ERROR,
             TerminationReason.NO_TOOL_CALLS,
         )
 
+
 # ── Integration: Event Bus ───────────────────────────────────────────────
+
 
 class TestEventBusIntegration:
     @pytest.mark.asyncio
     async def test_events_fire_during_tool_execution(self, tmp_path):
         from kalash.core.events import Event, EventType
+
         events_seen = []
         host = _host(tmp_path, ui=AutoApprover())
+
         async def on_complete(event: Event):
             events_seen.append(event.type)
+
         host.event_bus.on(EventType.TOOL_COMPLETE, on_complete)
         (tmp_path / "x.txt").write_text("hi")
         await host.execute("read", {"path": str(tmp_path / "x.txt")}, tool_use_id="t")
@@ -485,14 +641,20 @@ class TestEventBusIntegration:
 
     @pytest.mark.asyncio
     async def test_handler_exception_does_not_crash_bus(self):
-        from kalash.core.events import EventBus, Event, EventType
+        from kalash.core.events import Event, EventBus, EventType
+
         bus = EventBus()
-        async def bad_handler(e): raise RuntimeError("boom")
+
+        async def bad_handler(e):
+            raise RuntimeError("boom")
+
         bus.on(EventType.TURN_START, bad_handler)
         # Must not raise
         await bus.emit(Event(type=EventType.TURN_START, session_id="s", data={}))
 
+
 # ── Integration: System Prompt Wiring ────────────────────────────────────
+
 
 class TestPromptWiring:
     def test_prompt_has_all_required_sections(self):
@@ -518,6 +680,7 @@ class TestPromptWiring:
         monkeypatch.setenv("KALASH_HOME", str(tmp_path / "h"))
         (tmp_path / "KALASH.md").write_text("Always use pytest.")
         from kalash.runtime.prompt import discover_project_instructions
+
         instr = discover_project_instructions(tmp_path)
         prompt = build_system_prompt(project_instructions=instr)
         assert "pytest" in prompt

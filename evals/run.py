@@ -11,7 +11,9 @@ import contextlib
 import shutil
 import sys
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 from evals.project_build import run_project_build_suite
 from evals.suites import (
@@ -33,7 +35,7 @@ THRESHOLDS: dict[str, float] = {
 
 
 @contextlib.contextmanager
-def _monkeypatch():
+def _monkeypatch() -> Iterator[Any]:
     """Standalone MonkeyPatch context, so evals run outside pytest."""
     from _pytest.monkeypatch import MonkeyPatch
 

@@ -20,6 +20,7 @@ make that trade.
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -29,9 +30,11 @@ from kalash.models.normalize import (
     BlockDelta,
     BlockStart,
     BlockStop,
+    Message,
     MessageStart,
     MessageStop,
     StopReason,
+    StreamEvent,
     UsageUpdate,
 )
 
@@ -78,9 +81,7 @@ class ScriptedTurn:
         return [
             *head,
             *body,
-            UsageUpdate(
-                input_tokens=self.input_tokens, output_tokens=self.output_tokens
-            ),
+            UsageUpdate(input_tokens=self.input_tokens, output_tokens=self.output_tokens),
             MessageStop(stop),
         ]
 
@@ -95,10 +96,15 @@ class ScriptedProvider:
         self._turns = list(turns)
         self.requests: list[dict[str, Any]] = []
 
-    async def stream(self, messages, *, system=None, tools=None, **kwargs):
-        self.requests.append(
-            {"system": system or "", "tools": tools or [], "messages": messages}
-        )
+    async def stream(
+        self,
+        messages: list[Message],
+        *,
+        system: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        **kwargs: Any,
+    ) -> AsyncIterator[StreamEvent]:
+        self.requests.append({"system": system or "", "tools": tools or [], "messages": messages})
         turn = self._turns.pop(0) if self._turns else ScriptedTurn(text="done")
         for event in turn.events():
             yield event

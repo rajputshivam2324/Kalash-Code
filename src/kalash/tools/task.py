@@ -6,8 +6,6 @@ task, and returns only the structured result to the parent.
 
 from __future__ import annotations
 
-from typing import Any
-
 from pydantic import BaseModel, Field
 
 from kalash.core.ids import generate_id
@@ -18,7 +16,6 @@ from kalash.tools.base import (
     ToolEnvelope,
 )
 
-
 # ---------------------------------------------------------------------------
 # TaskTool
 # ---------------------------------------------------------------------------
@@ -27,6 +24,7 @@ from kalash.tools.base import (
 class TaskParams(BaseModel):
     """Parameters for spawning a subagent task."""
 
+    agent: str | None = Field(default=None, description="Optional named .kalash/agents definition")
     prompt: str = Field(description="Task instruction for the subagent")
     context_files: list[str] = Field(
         default_factory=list,
@@ -48,19 +46,6 @@ class TaskParams(BaseModel):
         le=200,
         description="Maximum conversation turns for the subagent",
     )
-
-
-class TaskResult(BaseModel):
-    """Structured result from a subagent execution."""
-
-    task_id: str = Field(description="Unique identifier for this task run")
-    success: bool = Field(description="Whether the task completed successfully")
-    response: str = Field(default="", description="Subagent's final response")
-    files_modified: list[str] = Field(
-        default_factory=list, description="Files modified by the subagent"
-    )
-    error: str = Field(default="", description="Error message if failed")
-    turns_used: int = Field(default=0, description="Number of turns consumed")
 
 
 class TaskTool:
@@ -102,7 +87,7 @@ class TaskTool:
 
     @property
     def timeout_s(self) -> float:
-        return 300.0
+        return 1800.0
 
     @property
     def max_output_bytes(self) -> int:
@@ -144,7 +129,7 @@ class TaskTool:
             p = Path(file_path)
             if not p.is_absolute():
                 p = ctx.cwd / p
-            if not p.exists():
+            if not p.resolve().is_relative_to(ctx.cwd.resolve()) or not p.is_file():
                 return ToolEnvelope.fail(
                     code="KALASH_TOOL_ERROR",
                     message=f"Context file not found: {file_path}",
@@ -165,22 +150,48 @@ class TaskTool:
 
         import asyncio
 
-        from kalash.runtime.agent import run_isolated
+        if ctx.delegate is None:
+            return ToolEnvelope.fail(
+                code="KALASH_TOOL_ERROR", message="Delegation is unavailable in this tool context"
+            )
+        requested_caps = requested_caps or ctx.capabilities
+        child_instructions = None
+        allowed_tools = None
+        child_turns = args.max_turns
+        child_mode = "build"
+        if args.agent:
+            from kalash.agents.loader import load_agent_definition
+
+            definition = load_agent_definition(args.agent, ctx.cwd)
+            if definition is None:
+                return ToolEnvelope.fail(
+                    code="KALASH_TOOL_ERROR", message=f"Unknown agent {args.agent!r}"
+                )
+            if definition.model:
+                return ToolEnvelope.fail(
+                    code="KALASH_TOOL_ERROR",
+                    message="A delegated agent must inherit its parent's provider; use agents run for a model override",
+                )
+            child_instructions = definition.body
+            allowed_tools = frozenset(definition.tools) if definition.tools else None
+            child_turns = min(child_turns, definition.max_turns)
+            child_mode = definition.mode
 
         try:
             outcome = await asyncio.wait_for(
-                run_isolated(
-                    args.prompt,
-                    cwd=ctx.cwd,
-                    max_turns=args.max_turns,
-                    spawn_depth=ctx.spawn_depth,
-                    max_spawn_depth=ctx.max_spawn_depth,
-                    model_id=ctx.model_id or None,
+                ctx.delegate(
+                    prompt=args.prompt,
+                    max_turns=child_turns,
+                    timeout_s=args.timeout_s,
+                    capabilities=requested_caps,
                     context_files=tuple(args.context_files),
+                    agent_instructions=child_instructions,
+                    allowed_tools=allowed_tools,
+                    mode=child_mode,
                 ),
                 timeout=args.timeout_s,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return ToolEnvelope.fail(
                 code="KALASH_TOOL_TIMEOUT",
                 message=f"Subagent exceeded its {args.timeout_s}s budget.",
@@ -214,7 +225,5 @@ class TaskTool:
                 "termination": outcome.get("termination", ""),
                 "status": "completed",
             },
-            side_effects=(
-                SideEffectRecord(kind="executed", path=f"task:{task_id}"),
-            ),
+            side_effects=(SideEffectRecord(kind="executed", path=f"task:{task_id}"),),
         )

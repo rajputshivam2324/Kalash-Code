@@ -18,9 +18,9 @@ from kalash.models.normalize import (
     ContentBlock,
     MessageStart,
     MessageStop,
+    StopReason,
     StreamError,
     StreamEvent,
-    StopReason,
     TextBlock,
     ThinkingBlock,
     ToolUseBlock,
@@ -30,67 +30,13 @@ from kalash.models.normalize import (
 logger = logging.getLogger(__name__)
 
 
-def _repair_tool_json(raw: str) -> dict[str, Any]:
-    """Multi-layer JSON repair for LLM tool call arguments.
-    
-    Layer 1: Strip markdown fences and surrounding noise.
-    Layer 2: Attempt standard json.loads.
-    Layer 3: Use json_repair library for syntax fixes.
-    Layer 4: Fall back to {"_raw": raw} as last resort.
-    """
-    if not raw or not raw.strip():
-        return {}
-    
-    # Layer 1: Strip markdown code fences
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.split("\n")
-        # Remove first line (```json) and last line (```)
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        cleaned = "\n".join(lines).strip()
-    
-    # Layer 2: Standard parse
+def _parse_tool_json(raw: str) -> dict[str, Any]:
+    """Accept JSON objects only. The model must correct invalid arguments."""
     try:
-        result = json.loads(cleaned)
-        if isinstance(result, dict):
-            return result
+        value = json.loads(raw or "{}")
+    except json.JSONDecodeError:
         return {"_raw": raw}
-    except (json.JSONDecodeError, ValueError):
-        pass
-    
-    # Layer 3: json_repair
-    try:
-        from json_repair import loads as repair_loads
-        result = repair_loads(cleaned)
-        if isinstance(result, dict):
-            logger.info("Repaired malformed tool call JSON (len=%d)", len(raw))
-            return result
-    except Exception:
-        pass
-    
-    # Layer 4: Try closing unclosed braces manually
-    try:
-        patched = cleaned
-        open_braces = patched.count("{") - patched.count("}")
-        open_brackets = patched.count("[") - patched.count("]")
-        if open_braces > 0:
-            patched += "}" * open_braces
-        if open_brackets > 0:
-            patched += "]" * open_brackets
-        result = json.loads(patched)
-        if isinstance(result, dict):
-            logger.info("Repaired truncated tool call JSON by closing %d brace(s)", open_braces)
-            return result
-    except (json.JSONDecodeError, ValueError):
-        pass
-    
-    logger.warning("Could not repair tool call JSON (len=%d): %.100s...", len(raw), raw)
-    return {"_raw": raw}
-
-
-# ---------------------------------------------------------------------------
-# Accumulator for a single block
-# ---------------------------------------------------------------------------
+    return value if isinstance(value, dict) else {"_raw": raw}
 
 
 @dataclass
@@ -118,9 +64,9 @@ class _BlockAccumulator:
             case "text":
                 return TextBlock(text=self.text)
             case "tool_use":
-                # Parse accumulated JSON input with repair pipeline
+                # Preserve invalid arguments as a rejected call
                 raw_input = self.text
-                parsed_input = _repair_tool_json(raw_input)
+                parsed_input = _parse_tool_json(raw_input)
                 return ToolUseBlock(
                     id=self.tool_use_id or "",
                     name=self.tool_name or "",
@@ -151,6 +97,7 @@ class StreamResult:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    reasoning_tokens: int = 0
     error: StreamError | None = None
 
     @property
@@ -165,9 +112,7 @@ class StreamResult:
     @property
     def text_content(self) -> str:
         """Concatenate all text blocks."""
-        return "".join(
-            b.text for b in self.content if isinstance(b, TextBlock)
-        )
+        return "".join(b.text for b in self.content if isinstance(b, TextBlock))
 
 
 # ---------------------------------------------------------------------------
@@ -202,6 +147,7 @@ class StreamHandler:
     _output_tokens: int = field(init=False, default=0)
     _cache_read_tokens: int = field(init=False, default=0)
     _cache_write_tokens: int = field(init=False, default=0)
+    _reasoning_tokens: int = field(init=False, default=0)
     _error: StreamError | None = field(init=False, default=None)
     _complete: bool = field(init=False, default=False)
 
@@ -244,6 +190,7 @@ class StreamHandler:
             output_tokens=self._output_tokens,
             cache_read_tokens=self._cache_read_tokens,
             cache_write_tokens=self._cache_write_tokens,
+            reasoning_tokens=self._reasoning_tokens,
             error=self._error,
         )
 
@@ -291,6 +238,7 @@ class StreamHandler:
         self._output_tokens = event.output_tokens
         self._cache_read_tokens = event.cache_read_tokens
         self._cache_write_tokens = event.cache_write_tokens
+        self._reasoning_tokens = event.reasoning_tokens
 
     def _handle_message_stop(self, reason: StopReason) -> None:
         self._stop_reason = reason

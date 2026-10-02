@@ -9,9 +9,9 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Any, Callable, Coroutine
+from typing import Any
 
 from kalash.core.errors import KalashError
 
@@ -170,6 +170,7 @@ class KalashMCPServer:
         params = request.get("params", {})
         req_id = request.get("id")
 
+        result: dict[str, Any]
         if method == "initialize":
             result = {
                 "protocolVersion": "2024-11-05",

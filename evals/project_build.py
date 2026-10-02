@@ -14,7 +14,6 @@ Deterministic and offline — no API key required.
 from __future__ import annotations
 
 import difflib
-import json
 import textwrap
 from pathlib import Path
 from typing import Any
@@ -26,7 +25,6 @@ from evals.harness import (
     install_provider,
 )
 from kalash.runtime.scratchpad import reset_cache
-
 
 # ---------------------------------------------------------------------------
 # Golden reference: the project the agent is supposed to build
@@ -266,6 +264,7 @@ GOLDEN_FILES: dict[str, str] = {
 # Scripted agent turns: the agent "builds" the project step by step
 # ---------------------------------------------------------------------------
 
+
 def _build_project_turns() -> list[ScriptedTurn]:
     """Script the agent building the TaskFlow project across multiple turns.
 
@@ -282,156 +281,188 @@ def _build_project_turns() -> list[ScriptedTurn]:
     turns: list[ScriptedTurn] = []
 
     # Turn 1: Plan the project with the todo tool
-    turns.append(ScriptedTurn(
-        tool="todo",
-        args={
-            "command": "create",
-            "task_list_description": "Build TaskFlow CLI task manager app",
-            "tasks": [
-                {"task_description": "Create pyproject.toml and package layout"},
-                {"task_description": "Implement Task and TaskStore models"},
-                {"task_description": "Implement Typer CLI interface"},
-                {"task_description": "Write and run test suite"},
-                {"task_description": "Create README documentation"},
-            ],
-        },
-        call_id="plan_1",
-    ))
+    turns.append(
+        ScriptedTurn(
+            tool="todo",
+            args={
+                "command": "create",
+                "task_list_description": "Build TaskFlow CLI task manager app",
+                "tasks": [
+                    {"task_description": "Create pyproject.toml and package layout"},
+                    {"task_description": "Implement Task and TaskStore models"},
+                    {"task_description": "Implement Typer CLI interface"},
+                    {"task_description": "Write and run test suite"},
+                    {"task_description": "Create README documentation"},
+                ],
+            },
+            call_id="plan_1",
+        )
+    )
 
     # Turn 2: Load the code-refactoring-ast skill (if available)
-    turns.append(ScriptedTurn(
-        tool="skill",
-        args={"name": ""},  # list all skills
-        call_id="skill_list",
-    ))
+    turns.append(
+        ScriptedTurn(
+            tool="skill",
+            args={"name": ""},  # list all skills
+            call_id="skill_list",
+        )
+    )
 
     # Turn 3: Store a memory about project conventions
-    turns.append(ScriptedTurn(
-        tool="remember",
-        args={
-            "content": "TaskFlow project uses hatchling build backend, typer for CLI, rich for output, pytest for tests. Source layout: src/taskflow/",
-            "scope": "project",
-        },
-        call_id="mem_store_1",
-    ))
+    turns.append(
+        ScriptedTurn(
+            tool="remember",
+            args={
+                "content": "TaskFlow project uses hatchling build backend, typer for CLI, rich for output, pytest for tests. Source layout: src/taskflow/",
+                "scope": "project",
+            },
+            call_id="mem_store_1",
+        )
+    )
 
     # Turn 4: Create pyproject.toml
-    turns.append(ScriptedTurn(
-        tool="write",
-        args={
-            "path": "pyproject.toml",
-            "content": GOLDEN_FILES["pyproject.toml"],
-            "create_dirs": True,
-        },
-        call_id="write_pyproject",
-    ))
+    turns.append(
+        ScriptedTurn(
+            tool="write",
+            args={
+                "path": "pyproject.toml",
+                "content": GOLDEN_FILES["pyproject.toml"],
+                "create_dirs": True,
+            },
+            call_id="write_pyproject",
+        )
+    )
 
     # Turn 5: Create __init__.py
-    turns.append(ScriptedTurn(
-        tool="write",
-        args={
-            "path": "src/taskflow/__init__.py",
-            "content": GOLDEN_FILES["src/taskflow/__init__.py"],
-            "create_dirs": True,
-        },
-        call_id="write_init",
-    ))
+    turns.append(
+        ScriptedTurn(
+            tool="write",
+            args={
+                "path": "src/taskflow/__init__.py",
+                "content": GOLDEN_FILES["src/taskflow/__init__.py"],
+                "create_dirs": True,
+            },
+            call_id="write_init",
+        )
+    )
 
     # Turn 6: Create models.py
-    turns.append(ScriptedTurn(
-        tool="write",
-        args={
-            "path": "src/taskflow/models.py",
-            "content": GOLDEN_FILES["src/taskflow/models.py"],
-            "create_dirs": True,
-        },
-        call_id="write_models",
-    ))
+    turns.append(
+        ScriptedTurn(
+            tool="write",
+            args={
+                "path": "src/taskflow/models.py",
+                "content": GOLDEN_FILES["src/taskflow/models.py"],
+                "create_dirs": True,
+            },
+            call_id="write_models",
+        )
+    )
 
     # Turn 7: Create cli.py
-    turns.append(ScriptedTurn(
-        tool="write",
-        args={
-            "path": "src/taskflow/cli.py",
-            "content": GOLDEN_FILES["src/taskflow/cli.py"],
-            "create_dirs": True,
-        },
-        call_id="write_cli",
-    ))
+    turns.append(
+        ScriptedTurn(
+            tool="write",
+            args={
+                "path": "src/taskflow/cli.py",
+                "content": GOLDEN_FILES["src/taskflow/cli.py"],
+                "create_dirs": True,
+            },
+            call_id="write_cli",
+        )
+    )
 
     # Turn 8: Read back models.py to verify
-    turns.append(ScriptedTurn(
-        tool="read",
-        args={"path": "src/taskflow/models.py"},
-        call_id="read_verify",
-    ))
+    turns.append(
+        ScriptedTurn(
+            tool="read",
+            args={"path": "src/taskflow/models.py"},
+            call_id="read_verify",
+        )
+    )
 
     # Turn 9: Create tests
-    turns.append(ScriptedTurn(
-        tool="write",
-        args={
-            "path": "tests/test_models.py",
-            "content": GOLDEN_FILES["tests/test_models.py"],
-            "create_dirs": True,
-        },
-        call_id="write_tests",
-    ))
+    turns.append(
+        ScriptedTurn(
+            tool="write",
+            args={
+                "path": "tests/test_models.py",
+                "content": GOLDEN_FILES["tests/test_models.py"],
+                "create_dirs": True,
+            },
+            call_id="write_tests",
+        )
+    )
 
     # Turn 10: Run the tests via shell
-    turns.append(ScriptedTurn(
-        tool="shell",
-        args={"command": "ls -R src/ tests/"},
-        call_id="shell_ls",
-    ))
+    turns.append(
+        ScriptedTurn(
+            tool="shell",
+            args={"command": "ls -R src/ tests/"},
+            call_id="shell_ls",
+        )
+    )
 
     # Turn 11: Recall the project memory
-    turns.append(ScriptedTurn(
-        tool="recall",
-        args={"query": "TaskFlow project conventions"},
-        call_id="mem_recall",
-    ))
+    turns.append(
+        ScriptedTurn(
+            tool="recall",
+            args={"query": "TaskFlow project conventions"},
+            call_id="mem_recall",
+        )
+    )
 
     # Turn 12: Mark the todo as progressed with a note
-    turns.append(ScriptedTurn(
-        tool="note",
-        args={
-            "action": "add",
-            "text": "models.py, cli.py, tests complete. README remaining.",
-        },
-        call_id="note_progress",
-    ))
+    turns.append(
+        ScriptedTurn(
+            tool="note",
+            args={
+                "action": "add",
+                "text": "models.py, cli.py, tests complete. README remaining.",
+            },
+            call_id="note_progress",
+        )
+    )
 
     # Turn 13: Create README
-    turns.append(ScriptedTurn(
-        tool="write",
-        args={
-            "path": "README.md",
-            "content": GOLDEN_FILES["README.md"],
-            "create_dirs": True,
-        },
-        call_id="write_readme",
-    ))
+    turns.append(
+        ScriptedTurn(
+            tool="write",
+            args={
+                "path": "README.md",
+                "content": GOLDEN_FILES["README.md"],
+                "create_dirs": True,
+            },
+            call_id="write_readme",
+        )
+    )
 
     # Turn 14: Search to verify all files are connected
-    turns.append(ScriptedTurn(
-        tool="search",
-        args={"pattern": "TaskStore"},
-        call_id="search_verify",
-    ))
+    turns.append(
+        ScriptedTurn(
+            tool="search",
+            args={"pattern": "TaskStore"},
+            call_id="search_verify",
+        )
+    )
 
     # Turn 15: Glob to verify structure
-    turns.append(ScriptedTurn(
-        tool="glob",
-        args={"pattern": "**/*.py"},
-        call_id="glob_verify",
-    ))
+    turns.append(
+        ScriptedTurn(
+            tool="glob",
+            args={"pattern": "**/*.py"},
+            call_id="glob_verify",
+        )
+    )
 
     # Turn 16: Final summary
-    turns.append(ScriptedTurn(
-        text="TaskFlow project built successfully. Created pyproject.toml, "
-             "src/taskflow/ package (models.py, cli.py), tests/test_models.py, "
-             "and README.md. All project conventions stored in memory.",
-    ))
+    turns.append(
+        ScriptedTurn(
+            text="TaskFlow project built successfully. Created pyproject.toml, "
+            "src/taskflow/ package (models.py, cli.py), tests/test_models.py, "
+            "and README.md. All project conventions stored in memory.",
+        )
+    )
 
     return turns
 
@@ -439,6 +470,7 @@ def _build_project_turns() -> list[ScriptedTurn]:
 # ---------------------------------------------------------------------------
 # Comparison engine
 # ---------------------------------------------------------------------------
+
 
 def _compare_files(
     workspace: Path,
@@ -453,7 +485,7 @@ def _compare_files(
     for rel_path, expected_content in golden.items():
         actual_path = workspace / rel_path
         if not actual_path.exists():
-            results.append((rel_path, False, f"file missing from harness output"))
+            results.append((rel_path, False, "file missing from harness output"))
             continue
 
         actual_content = actual_path.read_text(encoding="utf-8")
@@ -467,24 +499,31 @@ def _compare_files(
         ratio = matcher.ratio()
 
         if ratio >= 0.80:
-            results.append((
-                rel_path,
-                True,
-                f"match ratio {ratio:.0%}",
-            ))
+            results.append(
+                (
+                    rel_path,
+                    True,
+                    f"match ratio {ratio:.0%}",
+                )
+            )
         else:
-            diff = list(difflib.unified_diff(
-                expected_lines, actual_lines,
-                fromfile=f"golden/{rel_path}",
-                tofile=f"harness/{rel_path}",
-                lineterm="",
-            ))
+            diff = list(
+                difflib.unified_diff(
+                    expected_lines,
+                    actual_lines,
+                    fromfile=f"golden/{rel_path}",
+                    tofile=f"harness/{rel_path}",
+                    lineterm="",
+                )
+            )
             diff_preview = "\n".join(diff[:10])
-            results.append((
-                rel_path,
-                False,
-                f"match ratio {ratio:.0%} (need ≥80%)\n{diff_preview}",
-            ))
+            results.append(
+                (
+                    rel_path,
+                    False,
+                    f"match ratio {ratio:.0%} (need ≥80%)\n{diff_preview}",
+                )
+            )
 
     # Check for unexpected files
     for actual_file in workspace.rglob("*"):
@@ -506,7 +545,7 @@ def _compare_files(
 
 async def run_project_build_suite(
     tmp_root: Path,
-    monkeypatch_factory,
+    monkeypatch_factory: Any,
 ) -> SuiteReport:
     """Run a complete project build and compare against golden reference.
 
@@ -542,14 +581,13 @@ async def run_project_build_suite(
 
         agent, why = build_agent(cwd=workspace, interactive=False)
         if agent is None:
-            report.results.append(
-                TaskResult(name="build agent", passed=False, detail=why)
-            )
+            report.results.append(TaskResult(name="build agent", passed=False, detail=why))
             return report
 
         if agent.host.approval is not None:
-            from kalash.permissions.prompt import ApprovalResponse
             from evals.suites import _AllowingUI
+            from kalash.permissions.prompt import ApprovalResponse
+
             agent.host.approval.ui = _AllowingUI(ApprovalResponse.ALLOW_ONCE)
             agent.host.approval.non_interactive = False
 
@@ -559,89 +597,114 @@ async def run_project_build_suite(
         # --- Assertion 1: All golden files exist and match ---
         comparisons = _compare_files(workspace, GOLDEN_FILES)
         for filename, passed, detail in comparisons:
-            report.results.append(TaskResult(
-                name=f"file: {filename}",
-                passed=passed,
-                detail=detail,
-            ))
+            report.results.append(
+                TaskResult(
+                    name=f"file: {filename}",
+                    passed=passed,
+                    detail=detail,
+                )
+            )
 
         # --- Assertion 2: Agent used the todo/plan tool ---
         plan_text = agent.plan()
         has_plan = bool(plan_text and "TaskFlow" in plan_text)
-        report.results.append(TaskResult(
-            name="agent created a plan",
-            passed=has_plan,
-            detail=plan_text[:100] if plan_text else "no plan recorded",
-        ))
+        report.results.append(
+            TaskResult(
+                name="agent created a plan",
+                passed=has_plan,
+                detail=plan_text[:100] if plan_text else "no plan recorded",
+            )
+        )
 
         # --- Assertion 3: Agent stored scratchpad notes ---
         notes = agent.scratchpad_blocks()
         has_notes = any("complete" in n.lower() or "remaining" in n.lower() for n in notes)
-        report.results.append(TaskResult(
-            name="agent recorded progress notes",
-            passed=has_notes,
-            detail=f"{len(notes)} scratchpad block(s)",
-        ))
+        report.results.append(
+            TaskResult(
+                name="agent recorded progress notes",
+                passed=has_notes,
+                detail=f"{len(notes)} scratchpad block(s)",
+            )
+        )
 
         # --- Assertion 4: Skills were discoverable ---
         tool_blob = _tool_output_blob(provider)
         skill_discovered = "code-refactoring-ast" in tool_blob
-        report.results.append(TaskResult(
-            name="skill discovery worked",
-            passed=skill_discovered,
-            detail="skill listed in tool output" if skill_discovered else "skill not found in output",
-        ))
+        report.results.append(
+            TaskResult(
+                name="skill discovery worked",
+                passed=skill_discovered,
+                detail="skill listed in tool output"
+                if skill_discovered
+                else "skill not found in output",
+            )
+        )
 
         # --- Assertion 5: Memory store was invoked ---
         memory_stored = "TaskFlow" in tool_blob and "hatchling" in tool_blob
-        report.results.append(TaskResult(
-            name="memory store invoked",
-            passed=memory_stored,
-            detail="project conventions stored" if memory_stored else "memory content not found",
-        ))
+        report.results.append(
+            TaskResult(
+                name="memory store invoked",
+                passed=memory_stored,
+                detail="project conventions stored"
+                if memory_stored
+                else "memory content not found",
+            )
+        )
 
         # --- Assertion 6: Search found cross-references ---
         search_found = "TaskStore" in tool_blob
-        report.results.append(TaskResult(
-            name="codebase search worked",
-            passed=search_found,
-            detail="TaskStore found in search" if search_found else "search missed references",
-        ))
+        report.results.append(
+            TaskResult(
+                name="codebase search worked",
+                passed=search_found,
+                detail="TaskStore found in search" if search_found else "search missed references",
+            )
+        )
 
         # --- Assertion 7: Glob discovered project structure ---
         glob_found = "models.py" in tool_blob and "cli.py" in tool_blob
-        report.results.append(TaskResult(
-            name="glob discovered structure",
-            passed=glob_found,
-            detail="project .py files found" if glob_found else "glob results incomplete",
-        ))
+        report.results.append(
+            TaskResult(
+                name="glob discovered structure",
+                passed=glob_found,
+                detail="project .py files found" if glob_found else "glob results incomplete",
+            )
+        )
 
         # --- Assertion 8: Shell executed listing ---
         shell_ran = "taskflow" in tool_blob.lower()
-        report.results.append(TaskResult(
-            name="shell execution worked",
-            passed=shell_ran,
-            detail="ls output contained project dirs" if shell_ran else "shell output missing",
-        ))
+        report.results.append(
+            TaskResult(
+                name="shell execution worked",
+                passed=shell_ran,
+                detail="ls output contained project dirs" if shell_ran else "shell output missing",
+            )
+        )
 
         # --- Assertion 9: Multi-turn continuity (agent used 16+ turns) ---
         turns_used = outcome.iterations
-        report.results.append(TaskResult(
-            name=f"multi-turn continuity ({turns_used} turns)",
-            passed=turns_used >= 10,
-            detail=f"{turns_used} iterations, {agent.budget.tool_calls_used} tool calls",
-            turns=turns_used,
-            tool_calls=agent.budget.tool_calls_used,
-            tokens=agent.budget.tokens_used,
-        ))
+        report.results.append(
+            TaskResult(
+                name=f"multi-turn continuity ({turns_used} turns)",
+                passed=turns_used >= 10,
+                detail=f"{turns_used} iterations, {agent.budget.tool_calls_used} tool calls",
+                turns=turns_used,
+                tool_calls=agent.budget.tool_calls_used,
+                tokens=agent.budget.tokens_used,
+            )
+        )
 
         # --- Assertion 10: Agent terminated cleanly ---
         from kalash.runtime.loop import TerminationReason
-        report.results.append(TaskResult(
-            name="agent terminated cleanly",
-            passed=outcome.termination_reason != TerminationReason.ERROR,
-            detail=f"exit reason: {outcome.termination_reason.value if hasattr(outcome.termination_reason, 'value') else outcome.termination_reason}",
-        ))
+
+        report.results.append(
+            TaskResult(
+                name="agent terminated cleanly",
+                passed=outcome.termination_reason != TerminationReason.ERROR,
+                detail=f"exit reason: {outcome.termination_reason.value if hasattr(outcome.termination_reason, 'value') else outcome.termination_reason}",
+            )
+        )
 
         reset_cache()
 
@@ -655,14 +718,14 @@ async def run_project_build_suite(
         target.write_text(content, encoding="utf-8")
 
     # Verify golden reference is self-consistent
-    golden_files_exist = all(
-        (golden_workspace / f).exists() for f in GOLDEN_FILES
+    golden_files_exist = all((golden_workspace / f).exists() for f in GOLDEN_FILES)
+    report.results.append(
+        TaskResult(
+            name="golden reference is complete",
+            passed=golden_files_exist,
+            detail=f"{len(GOLDEN_FILES)} files",
+        )
     )
-    report.results.append(TaskResult(
-        name="golden reference is complete",
-        passed=golden_files_exist,
-        detail=f"{len(GOLDEN_FILES)} files",
-    ))
 
     # Cross-compare: harness vs golden at the directory level
     harness_files = set()
@@ -674,11 +737,13 @@ async def run_project_build_suite(
 
     golden_file_set = set(GOLDEN_FILES.keys())
     coverage = len(harness_files & golden_file_set) / len(golden_file_set) if golden_file_set else 0
-    report.results.append(TaskResult(
-        name=f"harness vs golden coverage ({coverage:.0%})",
-        passed=coverage >= 0.80,
-        detail=f"harness produced {len(harness_files)} files, golden has {len(golden_file_set)}",
-    ))
+    report.results.append(
+        TaskResult(
+            name=f"harness vs golden coverage ({coverage:.0%})",
+            passed=coverage >= 0.80,
+            detail=f"harness produced {len(harness_files)} files, golden has {len(golden_file_set)}",
+        )
+    )
 
     return report
 

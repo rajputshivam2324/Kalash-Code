@@ -71,10 +71,10 @@ def skills_dirs() -> list[Path]:
     return paths
 
 
-def agents_dirs() -> list[Path]:
+def agents_dirs(project_dir: Path | None = None) -> list[Path]:
     """Discovery paths for agent definitions."""
     paths = [kalash_home() / "agents"]
-    workspace_agents = Path.cwd() / ".kalash" / "agents"
+    workspace_agents = (project_dir or Path.cwd()) / ".kalash" / "agents"
     if workspace_agents.exists():
         paths.append(workspace_agents)
     return paths

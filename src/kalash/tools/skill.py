@@ -1,14 +1,4 @@
-"""The `skill` tool — progressive disclosure of skill bodies.
-
-``skills/loader.py`` and ``skills/index.py`` implement all three disclosure
-tiers correctly (catalog, body, bundled references) and had no callers, so
-installed skills were invisible to the agent.
-
-This tool is the invocation tier. The catalog — names and descriptions only —
-goes into the context automatically; a body loads only when the agent asks for
-it by name. That distinction is what keeps a user with 200 skills installed
-paying hundreds of tokens rather than hundreds of thousands.
-"""
+"""Load a named skill body and bounded references on demand."""
 
 from __future__ import annotations
 
@@ -16,6 +6,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from kalash.skills.loader import SkillLoader
 from kalash.tools.base import SideEffect, ToolContext, ToolEnvelope
 
 # Bundled reference files can be long; cap what one call returns.
@@ -37,11 +28,9 @@ class SkillTool:
 
     def __init__(self, project_dir: Path | None = None) -> None:
         self._project_dir = project_dir
-        self._loader = None
+        self._loader: SkillLoader | None = None
 
-    def _get_loader(self, ctx: ToolContext):
-        from kalash.skills.loader import SkillLoader
-
+    def _get_loader(self, ctx: ToolContext) -> SkillLoader:
         if self._loader is None:
             self._loader = SkillLoader(self._project_dir or ctx.cwd)
             self._loader.discover_now()
@@ -113,9 +102,7 @@ class SkillTool:
                 entry = loader.get_entry(name)
                 description = entry.metadata.description if entry else ""
                 lines.append(f"- {name}: {description}")
-            return ToolEnvelope.success(
-                content="\n".join(lines), metadata={"count": len(names)}
-            )
+            return ToolEnvelope.success(content="\n".join(lines), metadata={"count": len(names)})
 
         body = await loader.load_body(args.name)
         if body is None:

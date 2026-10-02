@@ -19,6 +19,7 @@ from kalash.tui.messages import (
     WelcomeBanner,
 )
 from kalash.tui.picker import Picker, PickerMode
+from tests.render import plain as render_plain
 
 
 def prompt(app: KalashApp) -> Input:
@@ -282,8 +283,6 @@ class TestPickerUnit:
 
 import json
 
-import pytest
-
 from kalash.models.normalize import (
     BlockDelta,
     BlockStart,
@@ -386,9 +385,7 @@ class TestAgentIntegration:
 
     async def test_history_persists_between_sends(self, tui_env, monkeypatch):
         app = KalashApp()
-        provider = _connect(
-            monkeypatch, app, [_text_turn("first"), _text_turn("second")]
-        )
+        provider = _connect(monkeypatch, app, [_text_turn("first"), _text_turn("second")])
         async with app.run_test(size=(100, 30)) as pilot:
             await submit(pilot, app, "one")
             for _ in range(20):
@@ -403,9 +400,7 @@ class TestAgentIntegration:
 
         assert len(provider.requests) >= 2
         # Turn two must see turn one; the old code rebuilt a 1-message history.
-        assert len(provider.requests[1]["messages"]) > len(
-            provider.requests[0]["messages"]
-        )
+        assert len(provider.requests[1]["messages"]) > len(provider.requests[0]["messages"])
 
     async def test_agent_mode_helper_is_callable(self):
         """Regression: shadowed by Textual's App._current_mode instance attr."""
@@ -465,7 +460,17 @@ class TestSessionResume:
 class TestNewSlashCommands:
     @pytest.mark.parametrize(
         "command",
-        ["/tools", "/notes", "/scratch", "/cost", "/status", "/mode", "/sessions", "/mcp", "/skills"],
+        [
+            "/tools",
+            "/notes",
+            "/scratch",
+            "/cost",
+            "/status",
+            "/mode",
+            "/sessions",
+            "/mcp",
+            "/skills",
+        ],
     )
     async def test_command_runs_without_error(self, tui_env, monkeypatch, command):
         app = KalashApp()
@@ -473,9 +478,7 @@ class TestNewSlashCommands:
         async with app.run_test(size=(100, 30)) as pilot:
             await submit(pilot, app, command)
             await pilot.pause()
-            errors = [
-                w for w in app.query(SystemMessage) if "unknown command" in str(w.renderable)
-            ]
+            errors = [w for w in app.query(SystemMessage) if "unknown command" in str(w.renderable)]
             assert not errors, f"{command} was not handled"
 
     async def test_init_writes_a_starter_file(self, tui_env, monkeypatch):
@@ -604,10 +607,10 @@ class TestDiffsAppearInTheTranscript:
             for _ in range(40):
                 await pilot.pause()
                 lines = list(app.query(ToolCallLine))
-                if any("+" in line.renderable.plain for line in lines):
+                if any("+" in render_plain(line.renderable) for line in lines):
                     break
             lines = list(app.query(ToolCallLine))
             assert lines
-            plain = "\n".join(line.renderable.plain for line in lines)
+            plain = "\n".join(render_plain(line.renderable) for line in lines)
             assert "made.py" in plain or "Wrote" in plain
             assert "+" in plain or "print" in plain

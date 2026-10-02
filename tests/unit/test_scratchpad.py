@@ -462,9 +462,7 @@ class TestWebSearchTool:
             return fake_response()
 
         monkeypatch.setattr("kalash.tools.web.run_search", stub)
-        env = await WebSearchTool().execute(
-            WebSearchParams(query="asyncio timeout"), ctx
-        )
+        env = await WebSearchTool().execute(WebSearchParams(query="asyncio timeout"), ctx)
 
         assert env.ok
         # The whole point: snippet bodies must not reach the context window.
@@ -499,8 +497,7 @@ class TestWebSearchTool:
         env = await WebSearchTool().execute(WebSearchParams(query="q"), ctx)
 
         inlined = sum(
-            len(r.title) + len(r.url) + len(r.snippet) + len(r.published)
-            for r in response.results
+            len(r.title) + len(r.url) + len(r.snippet) + len(r.published) for r in response.results
         )
         assert len(env.content) < inlined * 0.4
 
@@ -555,8 +552,13 @@ class TestProviderSelection:
         assert spec.name == "exa"
 
     def test_none_configured_returns_none(self, monkeypatch):
-        for var in ("KALASH_SEARCH_PROVIDER", "TAVILY_API_KEY", "BRAVE_API_KEY",
-                    "BRAVE_SEARCH_API_KEY", "EXA_API_KEY"):
+        for var in (
+            "KALASH_SEARCH_PROVIDER",
+            "TAVILY_API_KEY",
+            "BRAVE_API_KEY",
+            "BRAVE_SEARCH_API_KEY",
+            "EXA_API_KEY",
+        ):
             monkeypatch.delenv(var, raising=False)
         assert select_provider() is None
 
@@ -577,9 +579,19 @@ class TestBuiltins:
         registry = default_registry()
         names = {t.name for t in registry.list_tools()}
         assert {
-            "read", "write", "edit", "multi_edit", "glob", "list",
-            "search", "shell", "fetch", "web_search", "todo",
-            "note", "expand",
+            "read",
+            "write",
+            "edit",
+            "multi_edit",
+            "glob",
+            "list",
+            "search",
+            "shell",
+            "fetch",
+            "web_search",
+            "todo",
+            "note",
+            "expand",
         } <= names
 
     def test_memory_tools_are_registered_by_default(self):

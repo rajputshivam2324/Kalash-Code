@@ -1,19 +1,17 @@
-"""Load subagent definitions from ``.kalash/agents/*.md``."""
+"""Workspace-specific subagent definitions with project-over-user precedence."""
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
+from kalash.core.frontmatter import read_body, read_metadata
 from kalash.core.paths import agents_dirs
 
 
 @dataclass
 class AgentDefinition:
-    """Parsed agent frontmatter + body."""
-
     name: str
     path: Path
     description: str = ""
@@ -24,64 +22,29 @@ class AgentDefinition:
     body: str = ""
 
 
-_FRONTMATTER = re.compile(r"^---\s*\n(.*?)\n---\s*\n?(.*)", re.DOTALL)
-
-
-def _parse_scalar(value: str) -> Any:
-    value = value.strip()
-    if value.startswith("[") and value.endswith("]"):
-        inner = value[1:-1].strip()
-        if not inner:
-            return []
-        return [item.strip().strip("'\"") for item in inner.split(",") if item.strip()]
-    if value.lower() in {"true", "false"}:
-        return value.lower() == "true"
-    if value.isdigit():
-        return int(value)
-    if (value.startswith('"') and value.endswith('"')) or (
-        value.startswith("'") and value.endswith("'")
-    ):
-        return value[1:-1]
-    return value
-
-
-def _parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
-    match = _FRONTMATTER.match(text)
-    if not match:
-        return {}, text.strip()
-    raw_yaml, body = match.group(1), match.group(2).strip()
-    meta: dict[str, Any] = {}
-    for line in raw_yaml.splitlines():
-        if not line.strip() or line.strip().startswith("#") or ":" not in line:
-            continue
-        key, _, value = line.partition(":")
-        meta[key.strip()] = _parse_scalar(value)
-    return meta, body
-
-
-def load_agent_definition(name: str) -> AgentDefinition | None:
-    """Find and parse an agent definition by stem name."""
-    for directory in agents_dirs():
+def load_agent_definition(name: str, cwd: Path | None = None) -> AgentDefinition | None:
+    if not re.fullmatch(r"[a-z0-9-]{1,64}", name):
+        raise ValueError("Agent name must match [a-z0-9-] (1–64 characters)")
+    for directory in reversed(agents_dirs(cwd)):
         path = directory / f"{name}.md"
         if not path.is_file():
             continue
-        meta, body = _parse_frontmatter(path.read_text(encoding="utf-8"))
-        tools = meta.get("tools", [])
-        if not isinstance(tools, list):
-            tools = [str(tools)]
-        max_turns = meta.get("max_turns", 25)
-        try:
-            max_turns = int(max_turns)
-        except (TypeError, ValueError):
-            max_turns = 25
+        metadata = read_metadata(path)
+        tools = metadata.get("tools") or []
+        if not isinstance(tools, list) or not all(isinstance(tool, str) for tool in tools):
+            raise ValueError(f"Agent tools must be a list of names: {path}")
+        max_turns = int(metadata.get("max_turns", 25))
+        mode = str(metadata.get("mode", "build"))
+        if not 1 <= max_turns <= 200 or mode not in {"plan", "build"}:
+            raise ValueError(f"Invalid agent mode or max_turns: {path}")
         return AgentDefinition(
-            name=str(meta.get("name") or name),
+            name=name,
             path=path,
-            description=str(meta.get("description") or ""),
-            tools=[str(t) for t in tools],
-            model=str(meta["model"]) if meta.get("model") else None,
+            description=str(metadata.get("description") or ""),
+            tools=tools,
+            model=str(metadata["model"]) if metadata.get("model") else None,
             max_turns=max_turns,
-            mode=str(meta.get("mode") or "build"),
-            body=body,
+            mode=mode,
+            body=read_body(path),
         )
     return None

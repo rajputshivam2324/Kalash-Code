@@ -12,16 +12,12 @@ Design invariants:
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, AsyncIterator, Protocol, Sequence, runtime_checkable
-
-
-# ---------------------------------------------------------------------------
-# Enums
-# ---------------------------------------------------------------------------
+from typing import Any, Protocol, runtime_checkable
 
 
 class MemoryKind(StrEnum):
@@ -80,11 +76,6 @@ class Trust(StrEnum):
     LOW = "low"
 
 
-# ---------------------------------------------------------------------------
-# Value objects
-# ---------------------------------------------------------------------------
-
-
 @dataclass(frozen=True, slots=True)
 class Scope:
     """Defines who can see a memory record."""
@@ -105,7 +96,7 @@ class Provenance:
 
     source: Source
     trust: Trust = Trust.MEDIUM
-    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    created_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     origin_provider: str | None = None
     session_id: str | None = None
     turn_seq: int | None = None
@@ -133,11 +124,6 @@ class MemoryRecord:
     revision: int = 1
     embedding_model_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# Write / Edit / Query types
-# ---------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,7 +202,7 @@ class WriteReceipt:
 
     record_id: str
     provider: str
-    written_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    written_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     revision: int = 1
 
 
@@ -226,7 +212,7 @@ class ForgetReceipt:
 
     count: int
     provider: str
-    forgotten_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    forgotten_at: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,7 +222,7 @@ class ProviderHealth:
     provider: str
     healthy: bool
     latency_ms: float | None = None
-    last_check: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_check: datetime = field(default_factory=lambda: datetime.now(UTC))
     error: str | None = None
 
 
@@ -251,11 +237,6 @@ class ProviderStats:
     storage_bytes: int = 0
     oldest_record: datetime | None = None
     newest_record: datetime | None = None
-
-
-# ---------------------------------------------------------------------------
-# Provider protocol
-# ---------------------------------------------------------------------------
 
 
 @runtime_checkable
@@ -304,7 +285,7 @@ class MemoryProvider(Protocol):
         """Get all revisions of a record (newest first)."""
         ...
 
-    async def export(self, scope: Scope) -> AsyncIterator[MemoryRecord]:
+    def export(self, scope: Scope) -> AsyncIterator[MemoryRecord]:
         """Bulk export all records within a scope."""
         ...
 

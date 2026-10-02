@@ -9,17 +9,24 @@ between two competing full-screen views.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import os
 import time
-import asyncio
+from collections.abc import Callable
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
+
+from rich.style import Style
+from textual.widget import Widget
+
+from kalash.models.normalize import Message
 
 if TYPE_CHECKING:
     from kalash.runtime.agent import Agent
 
 
+import rich.default_styles
 from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -30,9 +37,8 @@ from textual.theme import ThemeProvider
 from textual.widgets import Input, Static
 from textual.worker import Worker, WorkerState
 
-import rich.default_styles
 # Force transparent backgrounds for inline code by stripping the background from default styles
-rich.default_styles.DEFAULT_STYLES["markdown.code_inline"] = "bold cyan"
+rich.default_styles.DEFAULT_STYLES["markdown.code_inline"] = Style.parse("bold cyan")
 
 from kalash.tui.messages import (
     AssistantMessage,
@@ -49,83 +55,9 @@ from kalash.tui.theme import APP_CSS, KalashTheme, register_kalash_themes
 TOOL_TICK_SECONDS = 0.1
 
 
-def summarize_tool_call(name: str, arguments: dict) -> str:
-    """One-line headline for a tool call, Cursor/OpenCode style."""
-    if name == "shell":
-        command = str(arguments.get("command", "")).strip().replace("\n", " ")
-        return f"$ {command[:96]}" if command else "$"
-    if name in ("write", "edit", "multi_edit"):
-        path = str(arguments.get("path") or arguments.get("file") or "").strip()
-        verb = "Edited" if name != "write" else "Wrote"
-        return f"{verb} {_short_label(path)}" if path else name
-    if name == "read":
-        path = str(arguments.get("path") or "").strip()
-        return f"Read {_short_label(path)}" if path else "Read"
-    if name == "list":
-        path = str(arguments.get("path") or ".").strip()
-        return f"Listed {_short_label(path)}"
-    if name in ("search", "grep"):
-        query = str(arguments.get("query") or arguments.get("pattern") or "").strip()
-        where = str(arguments.get("path") or arguments.get("search_path") or "").strip()
-        target = f' in {_short_label(where)}' if where else ""
-        return f'Grepped "{query[:48]}"{target}' if query else "Grepped"
-    if name == "glob":
-        pattern = str(arguments.get("pattern") or "").strip()
-        return f"Globbed {pattern}" if pattern else "Globbed"
-    if name == "web_search":
-        query = str(arguments.get("query") or "").strip()
-        return f'Searched web "{query[:48]}"' if query else "Web search"
-    if name == "fetch":
-        url = str(arguments.get("url") or "").strip()
-        return f"Fetched {url[:70]}" if url else "Fetch"
-    if name == "note":
-        return f"Note  {str(arguments.get('text', ''))[:70]}"
-    if name == "todo":
-        return f"Todo  {str(arguments.get('command', 'update'))}"
-    for key in ("path", "file", "pattern", "url", "query", "ref"):
-        value = arguments.get(key)
-        if isinstance(value, str) and value.strip():
-            return f"{name}  {value.strip()[:80]}"
-    return name
+from datetime import UTC
 
-
-def _short_label(path: str) -> str:
-    from pathlib import Path
-
-    if not path:
-        return "."
-    try:
-        return str(Path(path).relative_to(Path.cwd()))
-    except (ValueError, OSError):
-        parts = Path(path).parts
-        return str(Path(*parts[-2:])) if len(parts) > 2 else path
-
-
-def summarize_tool_result(name: str, data: dict) -> str:
-    """One-line result under a folded tool block."""
-    if name == "search":
-        count = data.get("match_count")
-        if count is not None:
-            return f"Found {count} match{'es' if count != 1 else ''}"
-    if name == "glob":
-        count = data.get("count")
-        if count is not None:
-            return f"{count} file{'s' if count != 1 else ''}"
-    if name == "list":
-        count = data.get("entry_count")
-        if count is not None:
-            return f"{count} entries"
-    if name == "web_search":
-        count = data.get("count")
-        if count is not None:
-            return f"{count} results"
-    warning = data.get("sandbox_warning")
-    if warning:
-        return str(warning)[:120]
-    if data.get("sandboxed") is False and data.get("command"):
-        return "runs unwrapped (OS sandbox unavailable)"
-    return ""
-
+from kalash.tui.formatting import summarize_tool_call
 
 SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/connect", "Connect or switch AI model provider"),
@@ -208,7 +140,6 @@ class KalashApp(App[None]):
         self,
         *,
         resume_session: str | None = None,
-        rewind_steps: int = 0,
         mode: str = "build",
     ) -> None:
         self._theme = KalashTheme.load()
@@ -216,13 +147,13 @@ class KalashApp(App[None]):
         register_kalash_themes(self, activate=self._theme.textual_name)
         self.set_class(self._theme.high_contrast, "high-contrast")
         self._resume_session = resume_session
-        self._rewind_steps = rewind_steps
         self._intent = InputIntent.PROMPT
         self._pending_provider: str | None = None
         self._pending_base_url: str | None = None
         self._history: list[str] = []
         self._history_pos: int | None = None
         self._banner_removed = False
+        self._clear_confirmed = False
         self._stream_worker: Worker[None] | None = None
         self._resolution_error: str | None = None
         self._agent: Agent | None = None
@@ -236,6 +167,7 @@ class KalashApp(App[None]):
         self._context_fill: float = 0.0
         self._react_step: int = 0
         self._subagents: dict[str, SubagentLine] = {}
+        self._event_unsubscribe: Any = None
         self._tool_event_bus: Any = None
         self._restore_session()
         if mode.strip().lower() == "plan":
@@ -251,10 +183,14 @@ class KalashApp(App[None]):
 
     def compose(self) -> ComposeResult:
         from textual.containers import Horizontal
+
         with Horizontal():
             with VerticalScroll(id="transcript"):
                 yield WelcomeBanner()
-            yield Static("Workspace Context\n\n- No active files\n- Token usage: 0\n- Agents: Idle", id="context-sidebar")
+            yield Static(
+                "Workspace Context\n\n- No active files\n- Token usage: 0\n- Agents: Idle",
+                id="context-sidebar",
+            )
         with Vertical(id="footer"):
             yield Picker()
             with Container(id="input-wrap"):
@@ -281,6 +217,7 @@ class KalashApp(App[None]):
         # text selection, highlighting, and right-click context menu copy work seamlessly.
         if hasattr(self, "_driver") and self._driver is not None:
             import contextlib
+
             with contextlib.suppress(Exception):
                 if hasattr(self._driver, "_disable_mouse_support"):
                     self._driver._disable_mouse_support()
@@ -312,18 +249,6 @@ class KalashApp(App[None]):
 
         await self._session_chosen(session_id)
 
-        if self._rewind_steps > 0 and self._agent is not None:
-            agent = self._agent
-            drop = min(self._rewind_steps * 2, len(agent.history))
-            if drop:
-                agent.history = agent.history[:-drop]
-            await self._post(
-                SystemMessage(
-                    f"rewound {self._rewind_steps} turn(s) — "
-                    f"{len(agent.history)} message(s) remain"
-                )
-            )
-
     # -- picker triggers ---------------------------------------------------
 
     def _open_command_picker(self) -> None:
@@ -341,7 +266,7 @@ class KalashApp(App[None]):
     def _refresh_statusline(self) -> None:
         from rich.text import Text
 
-        from kalash.tui.providers import get_provider
+        from kalash.models.catalog import get_provider
 
         text = Text()
         mode_label = f"[{self.mode.upper()}]"
@@ -384,7 +309,7 @@ class KalashApp(App[None]):
             return
 
         lines = ["[bold cyan]Workspace Context[/bold cyan]\n"]
-        
+
         if self._agent and self._agent.budget:
             budget = self._agent.budget
             lines.append(f"[bold]Tokens:[/bold] {budget.tokens_used:,}")
@@ -395,12 +320,12 @@ class KalashApp(App[None]):
         else:
             lines.append("[bold]Tokens:[/bold] 0")
             lines.append("[bold]Cost:[/bold] $0.00")
-        
+
         lines.append("")
-        
+
         state = "[yellow]Thinking...[/yellow]" if self.busy else "[green]Idle[/green]"
         lines.append(f"[bold]Status:[/bold] {state}")
-        
+
         if self._react_step > 0:
             lines.append(f"[bold]Step:[/bold] {self._react_step}")
 
@@ -448,7 +373,7 @@ class KalashApp(App[None]):
     def _transcript(self) -> VerticalScroll:
         return self.query_one("#transcript", VerticalScroll)
 
-    async def _post(self, widget) -> None:
+    async def _post(self, widget: Widget) -> None:
         """Mount a widget into the transcript and scroll to it."""
         if not self._banner_removed:
             for banner in self.query(WelcomeBanner):
@@ -556,9 +481,7 @@ class KalashApp(App[None]):
                 with contextlib.suppress(Exception):
                     from kalash.tools.shell import terminate_session_backgrounds
 
-                    asyncio.create_task(
-                        terminate_session_backgrounds(agent.session_id)  # type: ignore[attr-defined]
-                    )
+                    asyncio.create_task(terminate_session_backgrounds(agent.session_id))
             self._stream_worker.cancel()
 
             line = self._active_tool
@@ -604,7 +527,12 @@ class KalashApp(App[None]):
 
         # Provider and model lists are also type-to-filter, which matters most
         # for model pickers that can run to dozens of entries.
-        if picker.mode in (PickerMode.PROVIDER, PickerMode.MODEL, PickerMode.SESSION, PickerMode.THEME):
+        if picker.mode in (
+            PickerMode.PROVIDER,
+            PickerMode.MODEL,
+            PickerMode.SESSION,
+            PickerMode.THEME,
+        ):
             picker.filter(value)
             return
 
@@ -705,7 +633,9 @@ class KalashApp(App[None]):
 
     async def _start_theme(self) -> None:
         items = [
-            PickerItem(value=pid, label=label, detail="current" if pid == self._theme.preset_id else "")
+            PickerItem(
+                value=pid, label=label, detail="current" if pid == self._theme.preset_id else ""
+            )
             for pid, label, _, _ in KalashTheme.PRESETS
         ]
         self._open_picker(PickerMode.THEME, items)
@@ -722,206 +652,21 @@ class KalashApp(App[None]):
     # -- commands ----------------------------------------------------------
 
     async def _run_command(self, text: str) -> None:
-        command = text.split()[0].lower()
+        from kalash.tui.commands import run_command
 
-        if command == "/exit":
-            self.exit()
-        elif command == "/help":
-            await self._post(
-                SystemMessage([f"{c:<10} {d}" for c, d in SLASH_COMMANDS])
-            )
-        elif command == "/clear":
-            # Guard against accidental erasure of a multi-hour session (U-5).
-            transcript = self._transcript()
-            children = list(transcript.children)
-            if len(children) > 1 and not getattr(self, "_clear_confirmed", False):
-                self._clear_confirmed = True
-                await self._post(
-                    SystemMessage(
-                        "⚠ this will erase the entire transcript. "
-                        "run /clear again to confirm.",
-                        error=True,
-                    )
-                )
-                return
-            self._clear_confirmed = False
-            await transcript.remove_children()
-            self._banner_removed = True
-        elif command == "/new":
-            await self._transcript().remove_children()
-            await self._transcript().mount(WelcomeBanner())
-            self._banner_removed = False
-            self._history.clear()
-        elif command == "/status":
-            await self._post(SystemMessage(self._status_lines()))
-        elif command == "/connect":
-            await self._start_connect()
-        elif command == "/key":
-            if self.provider_id:
-                from kalash.tui.providers import get_provider
-                provider = get_provider(self.provider_id)
-                if provider and provider.requires_key:
-                    self._pending_provider = self.provider_id
-                    self._ask_for(InputIntent.API_KEY, f"paste your new {provider.name} API key")
-                else:
-                    await self._post(SystemMessage("current provider does not require an API key"))
-            else:
-                await self._post(SystemMessage("no provider connected — run /connect", error=True))
-        elif command == "/theme":
-            await self._start_theme()
-        elif command == "/models":
-            await self._start_models()
-        elif command == "/mode":
-            self.action_toggle_mode()
-            await self._post(SystemMessage(f"mode → {self.mode}"))
-        elif command in {"/copy", "/cp"}:
-            parts = text.split(maxsplit=1)
-            subcmd = parts[1].lower().strip() if len(parts) > 1 else "reply"
-            if subcmd in {"code", "block"}:
-                await self._post(SystemMessage(self._copy_last_code()))
-            elif subcmd in {"transcript", "all"}:
-                await self._post(SystemMessage(self._copy_full_transcript()))
-            else:
-                await self._post(SystemMessage(self._copy_last_reply()))
-        elif command in {"/eval", "/benchmark"}:
-            await self._run_eval_command()
-        elif command in {"/compare", "/diff"}:
-            await self._show_comparison_table()
-        elif command == "/export":
-            await self._post(SystemMessage(self._export_transcript()))
-        elif command == "/plan":
-            await self._show_plan_widget()
-        elif command == "/tools":
-            await self._post(SystemMessage(self._tool_lines()))
-        elif command == "/mcp":
-            await self._post(SystemMessage(self._mcp_lines()))
-        elif command == "/skills":
-            await self._post(SystemMessage(self._skill_lines()))
-        elif command == "/notes":
-            await self._post(SystemMessage(self._scratch_text(notes=True)))
-        elif command == "/scratch":
-            await self._post(SystemMessage(self._scratch_text(notes=False)))
-        elif command == "/cost":
-            await self._post(SystemMessage(self._cost_lines()))
-        elif command == "/sessions":
-            await self._start_sessions()
-        elif command == "/init":
-            await self._post(SystemMessage(self._write_starter_instructions()))
-        else:
-            await self._post(SystemMessage(f"unknown command: {command}", error=True))
+        return await run_command(self, text)
 
     # -- command helpers ---------------------------------------------------
 
     async def _show_plan_widget(self) -> None:
-        from kalash.tools.todo import get_task_list
-        from kalash.tui.messages import PlanMessage, SystemMessage
-        agent = self._agent
-        if agent is None:
-            await self._post(SystemMessage("no session active — send a message to begin"))
-            return
-        task_list = get_task_list(agent.session_id)
-        if task_list and task_list.tasks:
-            tasks_data = [
-                {"description": t.description, "completed": t.completed}
-                for t in task_list.tasks
-            ]
-            await self._post(PlanMessage(description=task_list.description, tasks=tasks_data))
-        else:
-            await self._post(SystemMessage(self._plan_text()))
+        from kalash.tui.commands import show_plan_widget
 
-    async def _show_comparison_table(self) -> None:
-        from kalash.tui.messages import ComparisonTableMessage
-        cols = ["File / Target", "Golden Standard", "Harness Match", "Status"]
-        rows = [
-            ["pyproject.toml", "Hatchling config (10 lines)", "100% Match", "PASS"],
-            ["src/taskflow/__init__.py", "Package versioning (2 lines)", "100% Match", "PASS"],
-            ["src/taskflow/models.py", "Task & TaskStore (90 lines)", "100% Match", "PASS"],
-            ["src/taskflow/cli.py", "Typer CLI app (50 lines)", "100% Match", "PASS"],
-            ["tests/test_models.py", "Unit tests suite (45 lines)", "100% Match", "PASS"],
-            ["README.md", "Documentation guide (15 lines)", "100% Match", "PASS"],
-        ]
-        await self._post(ComparisonTableMessage(
-            title="⚡ Project Build Harness vs Golden Reference",
-            columns=cols,
-            rows=rows,
-            summary="All 6 golden files produced with 100% structural fidelity and 0 diff errors.",
-        ))
-
-    async def _run_eval_command(self) -> None:
-        from kalash.tui.messages import ComparisonTableMessage, SystemMessage
-        import shutil
-        import tempfile
-        from pathlib import Path
-
-        await self._post(SystemMessage("⚡ Running Kalash Offline Evaluation Suites..."))
-        try:
-            from evals.suites import (
-                run_capability_suite,
-                run_policy_suite,
-                run_token_suite,
-            )
-            from evals.project_build import run_project_build_suite
-            from evals.run import _monkeypatch
-
-            root = Path(tempfile.mkdtemp(prefix="kalash-tui-evals-"))
-            try:
-                cap = await run_capability_suite(root, _monkeypatch)
-                pol = await run_policy_suite()
-                tok, _ = run_token_suite(root)
-                proj = await run_project_build_suite(root, _monkeypatch)
-
-                cols = ["Evaluation Suite", "Passed", "Total", "Pass Rate", "Status"]
-                rows = [
-                    ["Capability", str(cap.passed), str(cap.total), f"{cap.rate:.0%}", "PASS" if cap.rate == 1.0 else "FAIL"],
-                    ["Policy Gates", str(pol.passed), str(pol.total), f"{pol.rate:.0%}", "PASS" if pol.rate == 1.0 else "FAIL"],
-                    ["Token Economy", str(tok.passed), str(tok.total), f"{tok.rate:.0%}", "PASS" if tok.rate == 1.0 else "FAIL"],
-                    ["Project Build", str(proj.passed), str(proj.total), f"{proj.rate:.0%}", "PASS" if proj.rate == 1.0 else "FAIL"],
-                ]
-                total_p = cap.passed + pol.passed + tok.passed + proj.passed
-                total_t = cap.total + pol.total + tok.total + proj.total
-                await self._post(ComparisonTableMessage(
-                    title="🏆 Kalash Harness Benchmark Scorecard",
-                    columns=cols,
-                    rows=rows,
-                    summary=f"Summary: {total_p}/{total_t} benchmarks passed (100% Green)",
-                ))
-            finally:
-                shutil.rmtree(root, ignore_errors=True)
-        except Exception as exc:
-            await self._post(SystemMessage(f"Eval execution error: {exc}", error=True))
+        return await show_plan_widget(self)
 
     def _status_lines(self) -> list[str]:
-        from kalash.runtime.scratchpad import get_scratchpad
+        from kalash.tui.commands import status_lines
 
-        lines = [
-            f"mode      {self.mode}",
-            f"theme     {self._theme.label}",
-            f"provider  {self.provider_id or '—'}",
-            f"model     {self.model_id or '—'}",
-            f"cwd       {os.getcwd()}",
-        ]
-        agent = self._agent
-        if agent is None:
-            lines.append("session   not started (send a message to begin)")
-            return lines
-
-        lines.append(f"session   {agent.session_id}")
-        lines.append(f"sandbox   {agent.host.sandbox_mode}")
-        lines.append(f"tools     {len(agent.host.schemas())} available")
-        if agent.instructions:
-            lines.append(f"KALASH.md {len(agent.instructions)} file(s) loaded")
-        stats = get_scratchpad(agent.session_id).stats()
-        lines.append(f"scratch   {stats['refs']} refs")
-
-        from kalash.tools.todo import get_task_list
-
-        task_list = get_task_list(agent.session_id)
-        if task_list and task_list.tasks:
-            done = sum(1 for t in task_list.tasks if t.completed)
-            lines.append(f"plan      {done}/{len(task_list.tasks)} complete  (/plan)")
-        else:
-            lines.append("plan      none recorded")
-        return lines
+        return status_lines(self)
 
     # -- copying out -------------------------------------------------------
 
@@ -958,6 +703,7 @@ class KalashApp(App[None]):
     def _set_clipboard(self, text: str) -> bool:
         """Copy via universal clipboard engine (Textual + OSC 52 + Desktop tools)."""
         from kalash.tui.clipboard import copy_text
+
         success, _ = copy_text(text, app=self)
         return success
 
@@ -980,6 +726,7 @@ class KalashApp(App[None]):
 
     def _copy_last_code(self) -> str:
         from kalash.tui.clipboard import extract_last_code_block
+
         text = self._last_reply_text()
         code = extract_last_code_block(text)
         if not code:
@@ -998,14 +745,14 @@ class KalashApp(App[None]):
 
     def _export_transcript(self) -> str:
         """Write the transcript to a file, for terminals that block OSC 52."""
-        from datetime import datetime, timezone
+        from datetime import datetime
         from pathlib import Path
 
         text = self._transcript_text()
         if not text.strip():
             return "nothing to export yet"
 
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
         target = Path.cwd() / f"kalash-transcript-{stamp}.txt"
         try:
             target.write_text(text, encoding="utf-8")
@@ -1027,83 +774,34 @@ class KalashApp(App[None]):
         return plan
 
     def _tool_lines(self) -> list[str]:
-        agent = self._agent
-        if agent is None:
-            from kalash.tools.builtins import core_tools
+        from kalash.tui.commands import tool_lines
 
-            return [f"{t.name:<12} {t.description[:60]}" for t in core_tools()]
-        return [
-            f"{s['name']:<12} {s['description'][:60]}" for s in agent.host.schemas()
-        ]
+        return tool_lines(self)
 
     def _mcp_lines(self) -> list[str]:
-        try:
-            from kalash.mcp.registry import MCPRegistry
+        from kalash.tui.commands import mcp_lines
 
-            servers = MCPRegistry().list_servers()
-        except Exception as exc:
-            return [f"could not load MCP config: {exc}"]
-        if not servers:
-            return ["no MCP servers configured — kalash mcp add <name> <url>"]
-        lines = []
-        for server in servers:
-            lines.append(
-                f"{server.name:<16} {server.transport:<8} {server.url or '—'}  ({server.scope})"
-            )
-        return lines
+        return mcp_lines(self)
 
     def _skill_lines(self) -> list[str]:
-        try:
-            from kalash.skills.loader import SkillLoader
+        from kalash.tui.commands import skill_lines
 
-            entries = SkillLoader().discover_now()
-        except Exception as exc:
-            return [f"could not load skills: {exc}"]
-        if not entries:
-            return ["no skills found — kalash skills new <name>"]
-        lines = []
-        for entry in sorted(entries.values(), key=lambda e: e.metadata.name):
-            lines.append(f"{entry.metadata.name:<20} {entry.metadata.description[:60]}")
-        return lines
+        return skill_lines(self)
 
     def _scratch_text(self, *, notes: bool) -> str:
-        from kalash.runtime.scratchpad import get_scratchpad
+        from kalash.tui.commands import scratch_text
 
-        agent = self._agent
-        if agent is None:
-            return "no session yet"
-        pad = get_scratchpad(agent.session_id)
-        text = pad.render_notes() if notes else pad.render_index()
-        return text or ("no notes recorded" if notes else "scratchpad is empty")
+        return scratch_text(self, notes=notes)
 
     def _cost_lines(self) -> list[str]:
-        agent = self._agent
-        if agent is None:
-            return ["no session yet"]
-        budget = agent.budget
-        return [
-            f"tokens    {budget.tokens_used:,} / {budget.max_tokens:,}",
-            f"turns     {budget.turns_used} / {budget.max_turns}",
-            f"tools     {budget.tool_calls_used} / {budget.max_tool_calls}",
-            f"cost      ${budget.cost_used} / ${budget.max_cost}",
-        ]
+        from kalash.tui.commands import cost_lines
+
+        return cost_lines(self)
 
     def _write_starter_instructions(self) -> str:
-        from pathlib import Path
+        from kalash.tui.commands import write_starter_instructions
 
-        target = Path.cwd() / "KALASH.md"
-        if target.exists():
-            return f"{target} already exists — edit it directly"
-        target.write_text(
-            "# Project instructions\n\n"
-            "Kalash reads this file on every session in this directory.\n\n"
-            "## Commands\n\n"
-            "- build:\n- test:\n- lint:\n\n"
-            "## Conventions\n\n"
-            "- \n",
-            encoding="utf-8",
-        )
-        return f"created {target} — describe your build, test, and conventions there"
+        return write_starter_instructions(self)
 
     async def _start_sessions(self) -> None:
         from kalash.runtime.session import SessionManager
@@ -1129,12 +827,11 @@ class KalashApp(App[None]):
         self._open_picker(PickerMode.SESSION, items)
         self.query_one("#prompt", Input).placeholder = "pick a session — ↑↓ then enter"
 
-    async def _replay_history(self, history: list) -> None:
+    async def _replay_history(self, history: list[Message]) -> None:
         """Mount restored session conversation messages into the transcript."""
         from kalash.models.normalize import (
             Role,
             TextBlock,
-            ToolResultBlock,
             ToolUseBlock,
         )
         from kalash.tui.messages import (
@@ -1156,9 +853,7 @@ class KalashApp(App[None]):
             content = getattr(msg, "content", []) or []
 
             if role == Role.USER or str(role).lower() == "user":
-                user_texts = [
-                    b.text for b in content if isinstance(b, TextBlock)
-                ]
+                user_texts = [b.text for b in content if isinstance(b, TextBlock)]
                 if user_texts:
                     await self._post(UserMessage("\n".join(user_texts)))
             elif role == Role.ASSISTANT or str(role).lower() == "assistant":
@@ -1195,9 +890,7 @@ class KalashApp(App[None]):
         # build_agent uses asyncio.run() which returns [] when called from
         # inside the TUI's already-running event loop.
         if agent.loop.session_repo is not None:
-            loaded = await load_history_async(
-                agent.loop.session_repo, session_id
-            )
+            loaded = await load_history_async(agent.loop.session_repo, session_id)
             agent.history = loaded
 
         self._agent = agent
@@ -1206,13 +899,11 @@ class KalashApp(App[None]):
         if agent.history:
             await self._replay_history(agent.history)
         await self._post(
-            SystemMessage(
-                f"resumed {session_id} — {len(agent.history)} message(s) restored"
-            )
+            SystemMessage(f"resumed {session_id} — {len(agent.history)} message(s) restored")
         )
 
     async def _start_connect(self) -> None:
-        from kalash.tui.providers import PROVIDERS
+        from kalash.models.catalog import PROVIDERS
 
         items = [
             PickerItem(
@@ -1226,8 +917,8 @@ class KalashApp(App[None]):
         self.query_one("#prompt", Input).placeholder = "select a provider — ↑↓ then enter"
 
     async def _provider_chosen(self, provider_id: str) -> None:
-        from kalash.tui.auth_store import get_credential, save_credential
-        from kalash.tui.providers import get_provider
+        from kalash.models.auth_store import get_credential, save_credential
+        from kalash.models.catalog import get_provider
 
         provider = get_provider(provider_id)
         if provider is None:
@@ -1257,8 +948,7 @@ class KalashApp(App[None]):
             self._reset_intent()
             await self._post(
                 SystemMessage(
-                    f"using saved key for {provider.name} — "
-                    f"run /key to update it if needed"
+                    f"using saved key for {provider.name} — run /key to update it if needed"
                 )
             )
             await self._start_models()
@@ -1271,7 +961,7 @@ class KalashApp(App[None]):
         self._ask_for(InputIntent.API_KEY, "API key (enter to skip)")
 
     async def _store_api_key(self, api_key: str) -> None:
-        from kalash.tui.auth_store import save_credential
+        from kalash.models.auth_store import save_credential
 
         provider_id = self._pending_provider
         if provider_id is None:
@@ -1294,8 +984,8 @@ class KalashApp(App[None]):
 
     @work(exclusive=True, group="models")
     async def _fetch_models(self) -> None:
-        from kalash.tui.auth_store import get_credential
-        from kalash.tui.providers import fetch_models, get_provider
+        from kalash.models.auth_store import get_credential
+        from kalash.models.catalog import fetch_models, get_provider
 
         assert self.provider_id is not None
         provider = get_provider(self.provider_id)
@@ -1316,13 +1006,11 @@ class KalashApp(App[None]):
             )
             return
 
-        self._open_picker(
-            PickerMode.MODEL, [PickerItem(value=m, label=m) for m in models]
-        )
+        self._open_picker(PickerMode.MODEL, [PickerItem(value=m, label=m) for m in models])
         self.query_one("#prompt", Input).placeholder = "select a model — ↑↓ then enter"
 
     async def _model_chosen(self, model_id: str) -> None:
-        from kalash.tui.auth_store import set_active_provider
+        from kalash.models.auth_store import set_active_provider
 
         assert self.provider_id is not None
         self.model_id = model_id
@@ -1336,9 +1024,7 @@ class KalashApp(App[None]):
     async def _send(self, text: str) -> None:
         await self._post(UserMessage(text))
         if self.provider_id is None or self.model_id is None:
-            await self._post(
-                SystemMessage("no provider connected — run /connect", error=True)
-            )
+            await self._post(SystemMessage("no provider connected — run /connect", error=True))
             return
         message = AssistantMessage()
         self._current_assistant = message
@@ -1360,9 +1046,7 @@ class KalashApp(App[None]):
         try:
             agent = await self._ensure_agent()
             if agent is None:
-                sink.set_error(
-                    self._resolution_error or "provider could not be initialised"
-                )
+                sink.set_error(self._resolution_error or "provider could not be initialised")
                 return
 
             result = await agent.send(text, on_text_delta=self._make_sink(sink))
@@ -1371,9 +1055,7 @@ class KalashApp(App[None]):
 
             match result.termination_reason:
                 case TerminationReason.ERROR:
-                    await self._post(
-                        SystemMessage(result.error or "run failed", error=True)
-                    )
+                    await self._post(SystemMessage(result.error or "run failed", error=True))
                 case TerminationReason.BUDGET_EXHAUSTED:
                     detail = f" ({result.error})" if result.error else ""
                     await self._post(
@@ -1401,7 +1083,7 @@ class KalashApp(App[None]):
             self._react_step = 0
             self._refresh_statusline()
 
-    def _make_sink(self, sink: AssistantMessage):
+    def _make_sink(self, sink: AssistantMessage) -> Callable[[str], None]:
         """Callback that streams assistant text smoothly into the transcript."""
         last_scroll = 0.0
 
@@ -1422,7 +1104,7 @@ class KalashApp(App[None]):
 
     async def _prepare_agent(self, agent: Agent) -> None:
         """Wire MCP, tool-event handlers, and approval UI for an agent."""
-        from kalash.runtime.bootstrap import wire_agent_tools
+        from kalash.runtime.bootstrap import prepare_agent
         from kalash.tui.approval import TuiApprovalAdapter
 
         if agent.host.approval is not None:
@@ -1434,7 +1116,7 @@ class KalashApp(App[None]):
             self._subscribe_tool_events(bus)
             self._tool_event_bus = bus
 
-        await wire_agent_tools(agent)
+        await prepare_agent(agent)
         await self._report_model_constraints(agent)
 
     async def _ensure_agent(self) -> Agent | None:
@@ -1460,6 +1142,8 @@ class KalashApp(App[None]):
             self._resolution_error = reason
             return None
 
+        if self._agent is not None:
+            await self._agent.close()
         self._agent = agent
         self._agent_signature = signature
         await self._prepare_agent(agent)
@@ -1467,29 +1151,19 @@ class KalashApp(App[None]):
 
     async def _report_model_constraints(self, agent: Agent) -> None:
         """Surface model limits once — in the status line, not the transcript."""
-        from kalash.models.limits import describe, supports_tools
-
-        model = self.model_id or ""
-        if not supports_tools(model):
+        capabilities = getattr(agent.loop.gateway.primary, "capabilities", None)
+        if capabilities is not None and not capabilities.tool_use:
             if not self._constraints_announced:
                 self._constraints_announced = True
                 await self._post(
                     SystemMessage(
-                        f"{model} does not support tool calling — Kalash cannot edit "
-                        f"files or run commands with it. Switch with /models.",
+                        "This model cannot call tools. Select a coding model with /models.",
                         error=True,
                     )
                 )
             return
-
         count = len(agent.host.schemas())
-        profile = getattr(agent.host, "active_profile", "full")
-        self._model_profile = f"{profile}·{count} tools"
-        if profile.startswith("minimal") or profile == "standard":
-            self._model_profile = (
-                f"{describe(model, provider_id=self.provider_id)} · "
-                f"{profile}·{count} tools"
-            )
+        self._model_profile = f"{count} tools"
         self._refresh_statusline()
 
     def _agent_mode(self) -> str:
@@ -1504,140 +1178,19 @@ class KalashApp(App[None]):
         return "plan" if self.mode == Mode.PLAN.value else "build"
 
     def _subscribe_tool_events(self, bus: Any) -> None:
-        """Show tool activity in the transcript so the run is not a black box.
+        from kalash.tui.events import subscribe_tool_events
 
-        A bare `· shell` with no command and no output is indistinguishable from
-        a freeze — which is exactly how a 120-second network timeout looked. The
-        summary line names what is running, and long-running calls get a live
-        elapsed counter so waiting is a decision rather than a guess.
-        """
-        from kalash.core.events import Event, EventType
+        if self._event_unsubscribe is not None:
+            self._event_unsubscribe()
+        self._event_unsubscribe = subscribe_tool_events(self, bus)
 
-        async def on_start(event: Event) -> None:
-            name = event.data.get("tool_name", "?")
-            label = summarize_tool_call(name, event.data.get("arguments") or {})
-            line = ToolCallLine(label, tool_name=name)
-            tool_use_id = str(event.data.get("tool_use_id", ""))
-            if tool_use_id:
-                self._active_tools[tool_use_id] = line
-                self._active_tool_started[tool_use_id] = time.monotonic()
-            self._active_tool = line
-            assistant = self._current_assistant
-            if assistant is not None and not assistant.text:
-                with contextlib.suppress(Exception):
-                    assistant.set_working()
-            await self._post(line)
-
-        async def on_output(event: Event) -> None:
-            tool_use_id = str(event.data.get("tool_use_id", ""))
-            chunk = str(event.data.get("chunk", ""))
-            if not chunk:
-                return
-            line = self._active_tools.get(tool_use_id) or self._active_tool
-            if line is not None:
-                line.append_output(chunk)
-
-        async def on_complete(event: Event) -> None:
-            tool_use_id = str(event.data.get("tool_use_id", ""))
-            tool_name = str(event.data.get("tool_name", ""))
-            line = self._active_tools.get(tool_use_id)
-            if line is None and self._active_tool and not self._active_tools:
-                line = self._active_tool
-            if line is None:
-                return
-            exit_code = event.data.get("exit_code")
-            try:
-                exit_code_i = int(exit_code) if exit_code is not None else None
-            except (TypeError, ValueError):
-                exit_code_i = None
-            with contextlib.suppress(Exception):
-                line.finish(
-                    failed=bool(event.data.get("error"))
-                    or event.data.get("ok") is False
-                    or (exit_code_i not in (None, 0)),
-                    duration_ms=int(event.data.get("duration_ms") or 0),
-                    exit_code=exit_code_i,
-                )
-            diff_text = event.data.get("diff")
-            if diff_text:
-                with contextlib.suppress(Exception):
-                    line.set_diff(
-                        str(event.data.get("path", "")),
-                        str(diff_text),
-                        str(event.data.get("diff_stat", "")),
-                    )
-            summary = summarize_tool_result(tool_name, event.data)
-            if summary:
-                with contextlib.suppress(Exception):
-                    line.set_summary(summary)
-            if tool_use_id:
-                self._active_tools.pop(tool_use_id, None)
-            if not self._active_tools:
-                self._active_tool = None
-
-        async def on_spawn(event: Event) -> None:
-            brief = str(event.data.get("brief") or event.data.get("agent") or "task")
-            line = SubagentLine(brief[:70])
-            self._subagents[str(event.data.get("child_run_id", brief))] = line
-            await self._post(line)
-
-        async def on_agent_complete(event: Event) -> None:
-            key = str(event.data.get("child_run_id", ""))
-            line = self._subagents.pop(key, None)
-            if line is None:
-                return
-            with contextlib.suppress(Exception):
-                line.finish(
-                    failed=str(event.data.get("status", "")) != "completed",
-                    turns=int(event.data.get("turns") or 0),
-                    tokens=int(event.data.get("tokens") or 0),
-                )
-
-        async def on_denied(event: Event) -> None:
-            tool_use_id = str(event.data.get("tool_use_id", ""))
-            line = self._active_tools.pop(tool_use_id, None) or self._active_tool
-            self._active_tool = None
-            if not self._active_tools:
-                self._active_tool = None
-            if line is not None:
-                with contextlib.suppress(Exception):
-                    line.finish(failed=True)
-            await self._post(
-                SystemMessage(
-                    f"refused: {event.data.get('reason', 'not permitted')}", error=True
-                )
-            )
-
-        async def on_turn_start(event: Event) -> None:
-            self._react_step = int(event.data.get("react_step") or event.data.get("iteration") or 0)
-            fill = event.data.get("fill_ratio")
-            if fill is not None:
-                self._context_fill = float(fill)
-            elif event.data.get("prompt_tokens") and event.data.get("context_window"):
-                self._context_fill = float(event.data["prompt_tokens"]) / float(
-                    event.data["context_window"]
-                )
-            self._refresh_statusline()
-
-        async def on_budget(event: Event) -> None:
-            fill = event.data.get("fill_ratio")
-            if fill is not None:
-                self._context_fill = float(fill)
-            elif event.data.get("prompt_tokens") and event.data.get("context_window"):
-                self._context_fill = float(event.data["prompt_tokens"]) / float(
-                    event.data["context_window"]
-                )
-            self._refresh_statusline()
-
-        bus.on(EventType.TOOL_START, on_start)
-        bus.on(EventType.TOOL_OUTPUT, on_output)
-        bus.on(EventType.TOOL_COMPLETE, on_complete)
-        bus.on(EventType.TOOL_DENIED, on_denied)
-        bus.on(EventType.AGENT_SPAWN, on_spawn)
-        bus.on(EventType.AGENT_COMPLETE, on_agent_complete)
-        bus.on(EventType.TURN_START, on_turn_start)
-        bus.on(EventType.BUDGET_WARNING, on_budget)
-        bus.on(EventType.BUDGET_SOFT_LIMIT, on_budget)
+    async def on_unmount(self) -> None:
+        if self._event_unsubscribe is not None:
+            self._event_unsubscribe()
+            self._event_unsubscribe = None
+        if self._agent is not None:
+            self._agent.cancel()
+            await self._agent.close()
 
     def _tick_active_tool(self) -> None:
         """Refresh the elapsed counter on still-running tool calls."""

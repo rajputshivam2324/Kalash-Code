@@ -93,7 +93,7 @@ _session_lists: dict[str, TaskList] = {}
 _TODO_STATE = "todo.json"
 
 
-def _todo_path(session_id: str) -> "Path":
+def _todo_path(session_id: str) -> Path:
     from kalash.runtime.scratchpad import get_scratchpad
 
     pad = get_scratchpad(session_id)
@@ -137,9 +137,7 @@ def _load_list(session_id: str) -> TaskList | None:
         restored.id = str(payload.get("id") or restored.id)
         restored.created_at = float(payload.get("created_at") or restored.created_at)
         for raw in payload.get("tasks") or []:
-            item = TaskItem(
-                str(raw.get("description", "")), str(raw.get("details", "") or "")
-            )
+            item = TaskItem(str(raw.get("description", "")), str(raw.get("details", "") or ""))
             item.id = str(raw.get("id") or item.id)
             item.completed = bool(raw.get("completed", False))
             item.created_at = float(raw.get("created_at") or item.created_at)
@@ -196,9 +194,7 @@ class TaskDef(BaseModel):
 class TodoParams(BaseModel):
     """Parameters for task list operations."""
 
-    command: str = Field(
-        description="Operation: 'create', 'add', 'complete', 'remove', or 'list'"
-    )
+    command: str = Field(description="Operation: 'create', 'add', 'complete', 'remove', or 'list'")
     task_list_description: str = Field(
         default="", description="Description for the task list (required for 'create')"
     )
@@ -211,9 +207,7 @@ class TodoParams(BaseModel):
     remove_task_ids: list[str] = Field(
         default_factory=list, description="Task IDs to remove (required for 'remove')"
     )
-    context_update: str = Field(
-        default="", description="Context information when completing tasks"
-    )
+    context_update: str = Field(default="", description="Context information when completing tasks")
 
 
 class TodoTool:
@@ -230,8 +224,7 @@ class TodoTool:
     @property
     def description(self) -> str:
         return (
-            "Manage a task list for multi-step work. "
-            "Commands: create, add, complete, remove, list."
+            "Manage a task list for multi-step work. Commands: create, add, complete, remove, list."
         )
 
     @property

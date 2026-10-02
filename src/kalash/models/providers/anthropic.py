@@ -6,7 +6,6 @@ Uses lazy import of the anthropic package to avoid import-time cost.
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import AsyncIterator
 from decimal import Decimal
@@ -27,7 +26,6 @@ from ..normalize import (
     ModelResponse,
     OpaqueBlock,
     OpaquePayload,
-    Role,
     StopReason,
     StreamError,
     StreamEvent,
@@ -351,10 +349,7 @@ class AnthropicProvider:
         response = await client.messages.create(**request)
 
         # Deserialize content blocks
-        content = [
-            _deserialize_content_block(block.model_dump())
-            for block in response.content
-        ]
+        content = [_deserialize_content_block(block.model_dump()) for block in response.content]
 
         # Normalize usage
         usage = _normalize_usage(response.usage.model_dump())
@@ -400,12 +395,18 @@ class AnthropicProvider:
                             msg = event.message
                             yield MessageStart(id=msg.id, model=msg.model)
                             if hasattr(msg, "usage") and msg.usage:
-                                raw = msg.usage.model_dump() if hasattr(msg.usage, "model_dump") else {}
+                                raw = (
+                                    msg.usage.model_dump()
+                                    if hasattr(msg.usage, "model_dump")
+                                    else {}
+                                )
                                 if raw:
                                     yield UsageUpdate(
                                         input_tokens=raw.get("input_tokens", 0),
                                         cache_read_tokens=raw.get("cache_read_input_tokens", 0),
-                                        cache_write_tokens=raw.get("cache_creation_input_tokens", 0),
+                                        cache_write_tokens=raw.get(
+                                            "cache_creation_input_tokens", 0
+                                        ),
                                     )
 
                         case "content_block_start":
@@ -445,11 +446,13 @@ class AnthropicProvider:
                         case "message_delta":
                             delta = event.delta
                             if hasattr(delta, "stop_reason") and delta.stop_reason:
-                                yield MessageStop(
-                                    stop_reason=_map_stop_reason(delta.stop_reason)
-                                )
+                                yield MessageStop(stop_reason=_map_stop_reason(delta.stop_reason))
                             if hasattr(event, "usage") and event.usage:
-                                raw = event.usage.model_dump() if hasattr(event.usage, "model_dump") else {}
+                                raw = (
+                                    event.usage.model_dump()
+                                    if hasattr(event.usage, "model_dump")
+                                    else {}
+                                )
                                 if raw.get("output_tokens"):
                                     yield UsageUpdate(output_tokens=raw["output_tokens"])
 

@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import getpass
+from collections.abc import Coroutine
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from kalash.core.ids import generate_id
 from kalash.memory.protocol import (
     ForgetSelector,
     MemoryKind,
@@ -20,12 +19,13 @@ from kalash.memory.protocol import (
     Scope,
     Source,
     Trust,
-    Visibility,
 )
+from kalash.memory.registry import MemoryRegistry
+from kalash.memory.router import MemoryRouter
 from kalash.memory.session import project_scope
 
 
-def _run_async(coro: Any) -> Any:
+def _run_async[T](coro: Coroutine[Any, Any, T]) -> T:
     return asyncio.run(coro)
 
 
@@ -46,15 +46,6 @@ class MemoryEntry:
 
 
 @dataclass
-class AuditEntry:
-    timestamp: datetime
-    operation: str
-    provider: str
-    count: int
-    destination: str | None = None
-
-
-@dataclass
 class HealthCheck:
     name: str
     passed: bool
@@ -71,20 +62,15 @@ class HealthReport:
         return all(c.passed for c in self.checks)
 
 
-@dataclass
-class MigrateResult:
-    count: int
-
-
 class MemoryManager:
     """Sync facade over :class:`MemoryRouter` for CLI commands."""
 
-    async def _router(self):
+    async def _router(self) -> MemoryRouter:
         from kalash.memory.service import get_memory_service
 
         return (await get_memory_service()).router
 
-    async def _registry(self):
+    async def _registry(self) -> MemoryRegistry:
         from kalash.memory.service import get_memory_service
 
         return (await get_memory_service()).registry
@@ -116,14 +102,7 @@ class MemoryManager:
             )
             receipts = await router.write(intent)
             if not receipts:
-                mem_id = generate_id("mem_")
-                return MemoryEntry(
-                    id=mem_id,
-                    content=content,
-                    scope=scope,
-                    created_at=datetime.now(timezone.utc),
-                    tags=tags,
-                )
+                raise RuntimeError("Memory was not saved: no provider accepted the write")
             hit = await router.get(receipts[0].record_id)
             assert hit is not None
             from kalash.memory.protocol import MemoryHit
@@ -135,9 +114,7 @@ class MemoryManager:
 
         return _run_async(write())
 
-    def search(
-        self, *, query: str, limit: int = 10, scope: str | None = None
-    ) -> list[MemoryEntry]:
+    def search(self, *, query: str, limit: int = 10, scope: str | None = None) -> list[MemoryEntry]:
         async def recall() -> list[MemoryEntry]:
             router = await self._router()
             hits = await router.recall(
@@ -177,7 +154,7 @@ class MemoryManager:
         async def forget() -> bool:
             router = await self._router()
             existing = await router.get(memory_id)
-            if existing is None:
+            if existing is None or not router.visible(existing.scope, _scope_for("project")):
                 return False
             receipts = await router.forget(ForgetSelector(ids=[memory_id]))
             return sum(r.count for r in receipts) > 0
@@ -188,7 +165,6 @@ class MemoryManager:
         import json
 
         async def export() -> str:
-            router = await self._router()
             primary = (await self._registry()).get_primary()
             if primary is None:
                 return "[]\n"
@@ -205,16 +181,12 @@ class MemoryManager:
                     }
                 )
             if format == "jsonl":
-                return "\n".join(json.dumps(r) for r in records) + (
-                    "\n" if records else ""
-                )
+                return "\n".join(json.dumps(r) for r in records) + ("\n" if records else "")
             return json.dumps(records, indent=2) + "\n"
 
         return _run_async(export())
 
-    def import_from_file(
-        self, path: Path, *, format: str = "json", merge: bool = True
-    ) -> int:
+    def import_from_file(self, path: Path, *, format: str = "json", merge: bool = True) -> int:
         import json
 
         text = path.read_text(encoding="utf-8")
@@ -231,6 +203,7 @@ class MemoryManager:
                 continue
             mem_id = str(row.get("id", ""))
             if merge and mem_id:
+
                 async def exists() -> bool:
                     router = await self._router()
                     return (await router.get(mem_id)) is not None
@@ -244,17 +217,6 @@ class MemoryManager:
             self.add(content=content, tags=[str(t) for t in tags], scope=scope)
             count += 1
         return count
-
-    def migrate(self, *, source: str, target: str, dry_run: bool = False) -> MigrateResult:
-        if source == target:
-            return MigrateResult(count=0)
-        entries = self.list_entries(limit=10_000, scope="project")
-        if dry_run:
-            return MigrateResult(count=len(entries))
-        return MigrateResult(count=len(entries) if target == "local" else 0)
-
-    def get_audit_log(self, *, limit: int = 50) -> list[AuditEntry]:
-        return []
 
     def health_check(self) -> HealthReport:
         async def check() -> HealthReport:

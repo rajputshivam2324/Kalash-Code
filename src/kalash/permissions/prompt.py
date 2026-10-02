@@ -132,15 +132,17 @@ class ApprovalPrompt:
         On timeout, returns DENY (never auto-approves).
         """
         # Emit permission requested event
-        await self.event_bus.emit(Event(
-            type=EventType.PERMISSION_REQUESTED,
-            data={
-                "tool_name": context.tool_name,
-                "action": context.action,
-                "risk_class": context.risk_class,
-                "paths": context.paths,
-            },
-        ))
+        await self.event_bus.emit(
+            Event(
+                type=EventType.PERMISSION_REQUESTED,
+                data={
+                    "tool_name": context.tool_name,
+                    "action": context.action,
+                    "risk_class": context.risk_class,
+                    "paths": context.paths,
+                },
+            )
+        )
 
         # Non-interactive: stop and report, never auto-approve
         if self.non_interactive:
@@ -167,7 +169,7 @@ class ApprovalPrompt:
                 self.ui.show_approval_prompt(context),
                 timeout=self.timeout_seconds,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             # Timeout: DENY (never auto-approve). The reason names the likely
             # cause, because the usual explanation is that the prompt never
             # became visible rather than that the user ignored it.
@@ -219,7 +221,7 @@ class ApprovalPrompt:
             lines.append(f"  Command:       {context.command}")
 
         if context.paths:
-            lines.append(f"  Paths:")
+            lines.append("  Paths:")
             for p in context.paths[:10]:
                 lines.append(f"    - {p}")
             if len(context.paths) > 10:

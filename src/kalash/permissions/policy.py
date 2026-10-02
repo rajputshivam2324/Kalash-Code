@@ -136,6 +136,7 @@ class PermissionPolicy:
     deny_rules: list[DenyRule] = field(default_factory=list)
     protected_paths: list[ProtectedPath] = field(default_factory=list)
     sandbox_mode: str = "workspace_write"  # From SandboxMode
+    approval_mode: str = "on-request"
     protected_branches: list[str] = field(default_factory=lambda: ["main", "master", "production"])
 
     # Grant store reference (injected)
@@ -185,6 +186,12 @@ class PermissionPolicy:
         # case that needs a boundary-crossing or destructive-git prompt layered
         # on top. It can only escalate to ASK, never relax a decision.
         result = self._stage_6_confirmation_classes(request, result)
+        if self.approval_mode == "never" and result.decision is Decision.ASK:
+            result = PolicyResult(
+                decision=Decision.DENY,
+                stage=6,
+                reason="This operation requires approval; prompting is disabled",
+            )
 
         await self._emit_decision(request, result)
         return result
@@ -225,7 +232,10 @@ class PermissionPolicy:
                     )
 
         # Check protected branches in git commands
-        if request.command and request.risk_class in (RiskClass.WRITE_REMOTE, RiskClass.DESTRUCTIVE):
+        if request.command and request.risk_class in (
+            RiskClass.WRITE_REMOTE,
+            RiskClass.DESTRUCTIVE,
+        ):
             for branch in self.protected_branches:
                 if branch in request.command:
                     return PolicyResult(
@@ -271,6 +281,12 @@ class PermissionPolicy:
 
     def _stage_4_sandbox_defaults(self, request: PolicyRequest) -> PolicyResult | None:
         """Stage 4: Sandbox-mode capability defaults."""
+        if (
+            self.approval_mode == "untrusted"
+            and self.sandbox_mode != "read_only"
+            and request.risk_class is not RiskClass.READ
+        ):
+            return None
         match self.sandbox_mode:
             case "read_only":
                 # Only allow reads
@@ -381,13 +397,15 @@ class PermissionPolicy:
 
     async def _emit_decision(self, request: PolicyRequest, result: PolicyResult) -> None:
         """Emit a permission decision event."""
-        await self.event_bus.emit(Event(
-            type=EventType.PERMISSION_DECIDED,
-            data={
-                "tool_name": request.tool_name,
-                "risk_class": request.risk_class,
-                "decision": result.decision,
-                "stage": result.stage,
-                "reason": result.reason,
-            },
-        ))
+        await self.event_bus.emit(
+            Event(
+                type=EventType.PERMISSION_DECIDED,
+                data={
+                    "tool_name": request.tool_name,
+                    "risk_class": request.risk_class,
+                    "decision": result.decision,
+                    "stage": result.stage,
+                    "reason": result.reason,
+                },
+            )
+        )

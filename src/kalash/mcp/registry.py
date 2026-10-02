@@ -4,27 +4,28 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from kalash.core.ids import generate_id
 from kalash.core.paths import kalash_home
 from kalash.mcp.client import MCPServerConfig, TransportType
 
 
-def _mcp_settings_paths() -> list[tuple[str, Path]]:
+def _mcp_settings_paths(cwd: Path | None = None) -> list[tuple[str, Path]]:
     paths: list[tuple[str, Path]] = [
         ("global", kalash_home() / "settings" / "mcp.json"),
-        ("project", Path.cwd() / ".kalash" / "settings" / "mcp.json"),
+        ("project", (cwd or Path.cwd()) / ".kalash" / "settings" / "mcp.json"),
     ]
     return paths
 
 
-def _load_registry() -> dict[str, Any]:
+def _load_registry(cwd: Path | None = None) -> dict[str, Any]:
     merged: dict[str, Any] = {"servers": {}}
-    for _scope, path in _mcp_settings_paths():
+    for _scope, path in _mcp_settings_paths(cwd):
         if not path.exists():
             continue
         try:
@@ -37,8 +38,8 @@ def _load_registry() -> dict[str, Any]:
     return merged
 
 
-def _save_registry(scope: str, data: dict[str, Any]) -> None:
-    path = dict(_mcp_settings_paths())[scope]
+def _save_registry(scope: str, data: dict[str, Any], cwd: Path | None = None) -> None:
+    path = dict(_mcp_settings_paths(cwd))[scope]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
@@ -50,6 +51,9 @@ class MCPServerEntry:
     url: str
     scope: str = "project"
     env: dict[str, str] = field(default_factory=dict)
+    command: str = ""
+    args: list[str] = field(default_factory=list)
+    headers: dict[str, str] = field(default_factory=dict)
     is_healthy: bool = False
     tool_count: int = 0
 
@@ -70,7 +74,10 @@ class OAuthResult:
 
 
 class MCPRegistry:
-    """Persist and inspect MCP server configuration."""
+    """Persist and inspect configuration for a specific workspace."""
+
+    def __init__(self, cwd: Path | None = None) -> None:
+        self.cwd = (cwd or Path.cwd()).resolve()
 
     def add_server(
         self,
@@ -83,7 +90,7 @@ class MCPRegistry:
     ) -> MCPServerEntry:
         normalized_scope = "global" if scope in ("global", "user") else "project"
         path_scope = normalized_scope
-        path = dict(_mcp_settings_paths())[path_scope]
+        path = dict(_mcp_settings_paths(self.cwd))[path_scope]
         data: dict[str, Any] = {"servers": {}}
         if path.exists():
             try:
@@ -95,9 +102,13 @@ class MCPRegistry:
             "transport": transport,
             "url": url,
             "env": env or {},
-            "registered_at": datetime.now(timezone.utc).isoformat(),
+            "registered_at": datetime.now(UTC).isoformat(),
         }
-        _save_registry(path_scope, data)
+        _save_registry(path_scope, data, self.cwd)
+        if normalized_scope == "project":
+            from kalash.core.trust import trust_file
+
+            trust_file(path)
         return MCPServerEntry(
             name=name,
             transport=transport,
@@ -107,14 +118,14 @@ class MCPRegistry:
         )
 
     def list_servers(self, *, scope: str | None = None) -> list[MCPServerEntry]:
-        registry = _load_registry()
+        registry = _load_registry(self.cwd)
         servers = registry.get("servers", {})
         entries: list[MCPServerEntry] = []
         for name, cfg in servers.items():
             if not isinstance(cfg, dict):
                 continue
             entry_scope = "project"
-            for label, path in _mcp_settings_paths():
+            for label, path in _mcp_settings_paths(self.cwd):
                 if path.exists():
                     try:
                         data = json.loads(path.read_text(encoding="utf-8"))
@@ -135,6 +146,9 @@ class MCPRegistry:
                     url=str(cfg.get("url", "")),
                     scope=entry_scope,
                     env=dict(cfg.get("env", {})),
+                    command=str(cfg.get("command", "")),
+                    args=list(cfg.get("args", [])),
+                    headers=dict(cfg.get("headers", {})),
                 )
             )
         return entries
@@ -146,6 +160,18 @@ class MCPRegistry:
         return None
 
     def _to_config(self, entry: MCPServerEntry) -> MCPServerConfig:
+        def expand(values: dict[str, str]) -> dict[str, str]:
+            def variable(match: re.Match[str]) -> str:
+                name = match.group(1)
+                if name not in os.environ:
+                    raise ValueError(f"MCP {entry.name!r} requires environment variable {name}")
+                return os.environ[name]
+
+            return {
+                key: re.sub(r"\$\{env:([A-Za-z_][A-Za-z0-9_]*)\}", variable, value)
+                for key, value in values.items()
+            }
+
         transport_map = {
             "stdio": TransportType.STDIO,
             "sse": TransportType.SSE,
@@ -153,19 +179,28 @@ class MCPRegistry:
             "streamable_http": TransportType.HTTP,
             "http": TransportType.HTTP,
         }
-        transport = transport_map.get(entry.transport, TransportType.STDIO)
+        if entry.transport not in transport_map:
+            raise ValueError(f"Unknown MCP transport {entry.transport!r}")
+        transport = transport_map[entry.transport]
         if transport is TransportType.STDIO:
+            import shlex
+
+            command = [entry.command, *entry.args] if entry.command else shlex.split(entry.url)
+            if not command or not command[0]:
+                raise ValueError(f"MCP server {entry.name!r} requires a command")
             return MCPServerConfig(
                 name=entry.name,
                 transport=transport,
-                command=entry.url,
-                env=entry.env,
+                command=command[0],
+                args=command[1:],
+                env=expand(entry.env),
             )
         return MCPServerConfig(
             name=entry.name,
             transport=transport,
             url=entry.url,
-            env=entry.env,
+            env=expand(entry.env),
+            headers=expand(entry.headers),
         )
 
     def test_server(self, name: str, *, timeout: int = 10) -> MCPTestResult:
@@ -184,7 +219,6 @@ class MCPRegistry:
                 await asyncio.wait_for(client.connect(), timeout=timeout)
                 tools = client.tools
                 latency = (time.perf_counter() - started) * 1000
-                await client.disconnect()
                 return MCPTestResult(
                     success=True,
                     protocol_version="mcp",
@@ -193,6 +227,8 @@ class MCPRegistry:
                 )
             except Exception as exc:
                 return MCPTestResult(success=False, error=str(exc))
+            finally:
+                await client.disconnect()
 
         return asyncio.run(probe())
 
@@ -203,11 +239,11 @@ class MCPRegistry:
         )
 
     def store_token(self, name: str, token: str) -> None:
-        from kalash.tui.auth_store import save_credential
+        from kalash.models.auth_store import save_credential
 
         save_credential(f"mcp:{name}", token)
 
     def store_api_key(self, name: str, key: str) -> None:
-        from kalash.tui.auth_store import save_credential
+        from kalash.models.auth_store import save_credential
 
         save_credential(f"mcp:{name}", key)

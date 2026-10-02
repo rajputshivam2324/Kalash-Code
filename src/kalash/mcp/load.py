@@ -2,25 +2,15 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from pathlib import Path
 
-from kalash.mcp.client import MCPServerConfig
 from kalash.mcp.manager import MCPManager
-from kalash.mcp.registry import MCPRegistry, MCPServerEntry
+from kalash.mcp.registry import MCPRegistry
 from kalash.mcp.tools import MCPToolAdapter
 from kalash.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
-
-# Prevent fire-and-forget tasks from being garbage collected before completion.
-_background_tasks: set[asyncio.Task[MCPManager | None]] = set()
-
-
-def _entry_to_config(entry: MCPServerEntry) -> MCPServerConfig:
-    registry = MCPRegistry()
-    return registry._to_config(entry)  # noqa: SLF001 — shared conversion logic
 
 
 async def wire_mcp_tools(
@@ -33,20 +23,34 @@ async def wire_mcp_tools(
     Failures are non-fatal: a dead server is skipped and the agent still runs
     with built-in tools only.
     """
-    _ = cwd  # reserved for future project-scoped config overrides
-    mcp_registry = MCPRegistry()
+    mcp_registry = MCPRegistry(cwd)
     entries = mcp_registry.list_servers()
     if not entries:
         return None
 
-    configs = [_entry_to_config(entry) for entry in entries]
+    configs = []
+    for entry in entries:
+        if entry.scope == "project":
+            from kalash.core.trust import is_trusted
+
+            project_config = mcp_registry.cwd / ".kalash" / "settings" / "mcp.json"
+            if not is_trusted(project_config):
+                logger.warning(
+                    "Skipping untrusted project MCP configuration; run kalash mcp trust after reviewing it"
+                )
+                continue
+        try:
+            configs.append(mcp_registry._to_config(entry))
+        except (ValueError, TypeError) as exc:
+            logger.warning("Skipping MCP server %s: %s", entry.name, exc)
     manager = MCPManager()
     await manager.configure(configs)
 
     try:
         await manager.connect_all()
-    except Exception:
-        logger.debug("mcp connect_all failed", exc_info=True)
+    except BaseException:
+        await manager.disconnect_all()
+        raise
 
     registered = 0
     for schema in manager.all_tools.values():
@@ -58,24 +62,4 @@ async def wire_mcp_tools(
 
     if registered:
         logger.info("registered %d MCP tool(s)", registered)
-    return manager if registered else None
-
-
-def wire_mcp_tools_sync(
-    registry: ToolRegistry,
-    *,
-    cwd: Path | None = None,
-) -> MCPManager | None:
-    """Sync wrapper for callers that are not already inside an event loop."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(wire_mcp_tools(registry, cwd=cwd))
-
-    # Inside a running loop: schedule wiring and keep a strong reference so
-    # the task is not garbage collected before completion (S-6).
-    task = loop.create_task(wire_mcp_tools(registry, cwd=cwd))
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-    logger.debug("scheduled async MCP wiring inside running event loop")
-    return None
+    return manager

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import getpass
-import hashlib
 import logging
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
-from kalash.core.config import load_config
+from kalash.core.config import KalashConfig, load_config
 from kalash.core.ids import generate_id
 from kalash.memory.pipeline.inject import build_memory_block
 from kalash.memory.protocol import (
@@ -23,6 +22,7 @@ from kalash.memory.protocol import (
     Trust,
     Visibility,
 )
+from kalash.memory.router import MemoryRouter
 
 logger = logging.getLogger(__name__)
 
@@ -53,14 +53,15 @@ def project_scope(
 class SessionMemory:
     """Memory operations scoped to one agent session."""
 
-    def __init__(self, session_id: str, cwd: Path) -> None:
+    def __init__(self, session_id: str, cwd: Path, config: KalashConfig | None = None) -> None:
         self.session_id = session_id
         self.cwd = cwd.resolve()
+        self.config = config
 
-    async def _router(self):
+    async def _router(self) -> MemoryRouter:
         from kalash.memory.service import get_memory_service
 
-        return (await get_memory_service()).router
+        return (await get_memory_service(config=self.config)).router
 
     async def recall_blocks(
         self,
@@ -68,15 +69,13 @@ class SessionMemory:
         *,
         limit: int = 8,
         existing_context: str = "",
+        context_window: int = 32_000,
     ) -> list[str]:
         """Return formatted memory blocks for context injection."""
-        config = load_config()
+        config = self.config or load_config(self.cwd)
         router = await self._router()
 
-        budget_tokens = max(
-            200,
-            int(config.budget.max_tokens * config.memory.recall_budget),
-        )
+        budget_tokens = max(0, min(2_000, int(context_window * config.memory.recall_budget)))
 
         scope = project_scope(self.cwd, session_id=self.session_id)
         hits = await router.recall(
@@ -111,9 +110,7 @@ class SessionMemory:
             session_id=self.session_id,
             scope_name=scope_name,
         )
-        hits = await router.recall(
-            RecallQuery(text=query, scope=scope_obj, limit=limit)
-        )
+        hits = await router.recall(RecallQuery(text=query, scope=scope_obj, limit=limit))
         return [
             {
                 "id": hit.record.id,
@@ -149,7 +146,9 @@ class SessionMemory:
             metadata={"tags": tags or [], "requested_id": mem_id},
         )
         receipts = await router.write(intent)
-        return receipts[0].record_id if receipts else mem_id
+        if not receipts:
+            raise RuntimeError("Memory was not saved: no provider accepted the write")
+        return receipts[0].record_id
 
     async def forget(
         self,
@@ -159,6 +158,10 @@ class SessionMemory:
     ) -> int:
         router = await self._router()
         if memory_id:
+            record = await router.get(memory_id)
+            scope = project_scope(self.cwd, session_id=self.session_id)
+            if record is None or not router.visible(record.scope, scope):
+                return 0
             receipts = await router.forget(ForgetSelector(ids=[memory_id]))
             return sum(r.count for r in receipts)
         if content_match:
@@ -177,5 +180,7 @@ class SessionMemory:
         return 0
 
 
-def get_session_memory(session_id: str, cwd: Path) -> SessionMemory:
-    return SessionMemory(session_id, cwd)
+def get_session_memory(
+    session_id: str, cwd: Path, config: KalashConfig | None = None
+) -> SessionMemory:
+    return SessionMemory(session_id, cwd, config)

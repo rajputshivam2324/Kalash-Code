@@ -7,12 +7,17 @@ references/ load only when body directs.
 
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
+import yaml
+
+from kalash.core.frontmatter import read_body, read_metadata
 from kalash.core.paths import kalash_home
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -85,7 +90,7 @@ class SkillLoader:
         """
         self._loaded.clear()
 
-        # Priority order: user > project > plugins
+        # Project definitions override user definitions; plugins have lowest priority.
         # Later discoveries with same name override earlier ones
         sources: list[tuple[Path, str]] = []
 
@@ -93,19 +98,18 @@ class SkillLoader:
         for plugin_dir in self._plugin_dirs:
             sources.append((plugin_dir, "plugin"))
 
-        # Project-level
-        project_skills = self._project_dir / ".kalash" / "skills"
-        sources.append((project_skills, "project"))
-
-        # User-level (highest priority)
-        user_skills = kalash_home() / "skills"
-        sources.append((user_skills, "user"))
+        sources.extend(
+            [
+                (kalash_home() / "skills", "user"),
+                (self._project_dir / ".kalash" / "skills", "project"),
+            ]
+        )
 
         for skills_dir, source in sources:
             if not skills_dir.is_dir():
                 continue
 
-            for skill_file in skills_dir.glob("**/*.md"):
+            for skill_file in sorted(skills_dir.glob("**/SKILL.md")):
                 entry = self._parse_frontmatter(skill_file, source)
                 if entry and entry.metadata.name:
                     self._loaded[entry.metadata.name] = entry
@@ -124,9 +128,7 @@ class SkillLoader:
         if entry.is_loaded:
             return entry.body
 
-        content = entry.path.read_text(encoding="utf-8")
-        # Strip frontmatter to get body
-        body = self._strip_frontmatter(content)
+        body = read_body(entry.path)
         entry._body = body
         return body
 
@@ -145,10 +147,16 @@ class SkillLoader:
             return {}
 
         references: dict[str, str] = {}
-        for ref_file in refs_dir.iterdir():
-            if ref_file.is_file():
+        remaining = 40_000
+        for ref_file in sorted(refs_dir.iterdir()):
+            if ref_file.is_file() and remaining > 0:
+                if not ref_file.resolve().is_relative_to(entry.path.parent.resolve()):
+                    continue
                 try:
-                    references[ref_file.name] = ref_file.read_text(encoding="utf-8")
+                    with ref_file.open(encoding="utf-8") as stream:
+                        text = stream.read(min(remaining, 20_000))
+                    references[ref_file.name] = text
+                    remaining -= len(text)
                 except (OSError, UnicodeDecodeError):
                     continue
 
@@ -186,85 +194,31 @@ class SkillLoader:
         return errors
 
     def _parse_frontmatter(self, path: Path, source: str) -> SkillEntry | None:
-        """Parse YAML frontmatter from a skill file.
-
-        Expected format:
-        ---
-        name: skill-name
-        description: What this skill does
-        version: 1.0.0
-        allowed-tools: [tool1, tool2]
-        model: anthropic/claude-sonnet-4-5
-        agent: code-review
-        ---
-        """
         try:
-            content = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            metadata = read_metadata(path)
+            name = metadata.get("name") or path.parent.name
+            description = metadata.get("description", "")
+            tools = metadata.get("allowed-tools") or []
+            if isinstance(tools, str):
+                tools = tools.split()
+            if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9-]{1,64}", name):
+                raise ValueError("Invalid skill name")
+            if not isinstance(description, str) or not description.strip():
+                raise ValueError("Skill description is required")
+            if len(description) > 1024 or not isinstance(tools, list):
+                raise ValueError("Invalid skill metadata")
+            return SkillEntry(
+                metadata=SkillMetadata(
+                    name=name,
+                    description=description,
+                    version=str(metadata.get("version", "0.1.0")),
+                    allowed_tools=[str(tool) for tool in tools],
+                    model=metadata.get("model"),
+                    agent=metadata.get("agent"),
+                ),
+                path=path,
+                source=source,
+            )
+        except (OSError, UnicodeError, ValueError, yaml.YAMLError):
+            logger.warning("Skipping invalid skill: %s", path, exc_info=True)
             return None
-
-        # Extract frontmatter between --- markers
-        match = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
-        if not match:
-            return None
-
-        frontmatter_text = match.group(1)
-        metadata = self._parse_yaml_simple(frontmatter_text)
-
-        return SkillEntry(
-            metadata=SkillMetadata(
-                name=metadata.get("name", path.stem),
-                description=metadata.get("description", ""),
-                version=metadata.get("version", "0.1.0"),
-                allowed_tools=metadata.get("allowed-tools", []),
-                model=metadata.get("model"),
-                agent=metadata.get("agent"),
-            ),
-            path=path,
-            source=source,
-        )
-
-    def _parse_yaml_simple(self, text: str) -> dict[str, Any]:
-        """Simple YAML-like parser for frontmatter.
-
-        Handles: key: value, key: [list, items].
-        Not a full YAML parser — sufficient for skill frontmatter.
-        """
-        result: dict[str, Any] = {}
-        for line in text.strip().split("\n"):
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            if ":" not in line:
-                continue
-
-            key, _, value = line.partition(":")
-            key = key.strip()
-            value = value.strip()
-
-            # Handle list values: [a, b, c]
-            if value.startswith("[") and value.endswith("]"):
-                items = [
-                    item.strip().strip("\"'")
-                    for item in value[1:-1].split(",")
-                    if item.strip()
-                ]
-                result[key] = items
-            elif value.lower() in ("true", "false"):
-                result[key] = value.lower() == "true"
-            elif value.isdigit():
-                result[key] = int(value)
-            elif value == "null" or value == "~" or value == "":
-                result[key] = None
-            else:
-                # Strip quotes
-                result[key] = value.strip("\"'")
-
-        return result
-
-    def _strip_frontmatter(self, content: str) -> str:
-        """Remove YAML frontmatter from content, returning the body."""
-        match = re.match(r"^---\s*\n.*?\n---\s*\n", content, re.DOTALL)
-        if match:
-            return content[match.end():]
-        return content

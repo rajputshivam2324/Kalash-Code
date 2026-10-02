@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Optional
+from typing import Annotated
 
 import typer
 from rich.console import Console
@@ -78,7 +78,7 @@ def edit(
 @config_app.command("show")
 def show(
     scope: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--scope", "-s", help="Filter by scope: global, project"),
     ] = None,
     format: Annotated[

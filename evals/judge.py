@@ -13,7 +13,6 @@ offline rubric grading for CI environments.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -98,11 +97,18 @@ def evaluate_content_deterministic(
         if re.search(pat, content, re.MULTILINE | re.IGNORECASE):
             matched_pat += 1
     corr_score = round((matched_pat / max(len(required_code_patterns), 1)) * 10.0, 1)
-    findings_corr.append(f"Matched {matched_pat}/{len(required_code_patterns)} algorithmic patterns.")
+    findings_corr.append(
+        f"Matched {matched_pat}/{len(required_code_patterns)} algorithmic patterns."
+    )
 
     # Check for overflow safety: low + (high - low) // 2
     if is_code_file:
-        if "low + (high - low)" in content or "low + ((high - low)" in content or "low + (high-low)" in content or "lo + (hi - lo)" in content:
+        if (
+            "low + (high - low)" in content
+            or "low + ((high - low)" in content
+            or "low + (high-low)" in content
+            or "lo + (hi - lo)" in content
+        ):
             findings_corr.append("Protected against integer overflow.")
         else:
             corr_score = max(0.0, corr_score - 1.0)
@@ -141,10 +147,30 @@ def evaluate_content_deterministic(
         findings_dx.append("Clean developer typography without emoji clutter.")
 
     dims = [
-        DimensionScore("completeness", comp_score, 0.35, "Evaluated required topic coverage.", findings_comp),
-        DimensionScore("correctness", corr_score, 0.35, "Evaluated algorithmic formulas and invariants.", findings_corr),
-        DimensionScore("code_quality", min(10.0, qual_score), 0.15, "Evaluated code structure and type hints.", findings_qual),
-        DimensionScore("developer_experience", min(10.0, dx_score), 0.15, "Evaluated markdown layout and readability.", findings_dx),
+        DimensionScore(
+            "completeness", comp_score, 0.35, "Evaluated required topic coverage.", findings_comp
+        ),
+        DimensionScore(
+            "correctness",
+            corr_score,
+            0.35,
+            "Evaluated algorithmic formulas and invariants.",
+            findings_corr,
+        ),
+        DimensionScore(
+            "code_quality",
+            min(10.0, qual_score),
+            0.15,
+            "Evaluated code structure and type hints.",
+            findings_qual,
+        ),
+        DimensionScore(
+            "developer_experience",
+            min(10.0, dx_score),
+            0.15,
+            "Evaluated markdown layout and readability.",
+            findings_dx,
+        ),
     ]
 
     overall = sum(d.score * d.weight for d in dims)
@@ -156,7 +182,9 @@ def evaluate_content_deterministic(
         overall_score=overall,
         passed=passed,
         summary=f"{title}: Score {overall:.1f}/10 ({'PASSED' if passed else 'FAILED'})",
-        strengths=[f for d in dims for f in d.findings if "All" in f or "Protected" in f or "Clean" in f],
+        strengths=[
+            f for d in dims for f in d.findings if "All" in f or "Protected" in f or "Clean" in f
+        ],
         areas_for_improvement=[f for d in dims for f in d.findings if "Missing" in f],
     )
 
@@ -172,15 +200,26 @@ async def run_binary_search_notes_judge(directory: Path) -> SuiteReport:
             "01_fundamentals.md",
             ch1.read_text(),
             required_keywords=["monotonic", "invariant", "template", "overflow"],
-            required_code_patterns=[r"while\s+\w+\s*<=?\s*\w+", r"mid\s*=\s*\w+\s*\+\s*\(\w+\s*-\s*\w+\)"],
+            required_code_patterns=[
+                r"while\s+\w+\s*<=?\s*\w+",
+                r"mid\s*=\s*\w+\s*\+\s*\(\w+\s*-\s*\w+\)",
+            ],
         )
-        results.append(TaskResult(
-            name="chapter_1_fundamentals",
-            passed=scorecard.passed,
-            detail=f"Score {scorecard.overall_score:.1f}/10 — {scorecard.summary}",
-        ))
+        results.append(
+            TaskResult(
+                name="chapter_1_fundamentals",
+                passed=scorecard.passed,
+                detail=f"Score {scorecard.overall_score:.1f}/10 — {scorecard.summary}",
+            )
+        )
     else:
-        results.append(TaskResult(name="chapter_1_fundamentals", passed=False, detail="File 01_fundamentals.md missing."))
+        results.append(
+            TaskResult(
+                name="chapter_1_fundamentals",
+                passed=False,
+                detail="File 01_fundamentals.md missing.",
+            )
+        )
 
     # Chapter 2: Lower/Upper Bounds
     ch2 = directory / "02_lower_upper_bounds.md"
@@ -192,15 +231,26 @@ async def run_binary_search_notes_judge(directory: Path) -> SuiteReport:
             "02_lower_upper_bounds.md",
             ch2.read_text(),
             required_keywords=["lower_bound", "upper_bound", "first", "last"],
-            required_code_patterns=[r"lower_bound|first_occurrence", r"upper_bound|last_occurrence"],
+            required_code_patterns=[
+                r"lower_bound|first_occurrence",
+                r"upper_bound|last_occurrence",
+            ],
         )
-        results.append(TaskResult(
-            name="chapter_2_lower_upper_bounds",
-            passed=scorecard.passed,
-            detail=f"Score {scorecard.overall_score:.1f}/10 — {scorecard.summary}",
-        ))
+        results.append(
+            TaskResult(
+                name="chapter_2_lower_upper_bounds",
+                passed=scorecard.passed,
+                detail=f"Score {scorecard.overall_score:.1f}/10 — {scorecard.summary}",
+            )
+        )
     else:
-        results.append(TaskResult(name="chapter_2_lower_upper_bounds", passed=False, detail="File 02_lower_upper_bounds.md missing."))
+        results.append(
+            TaskResult(
+                name="chapter_2_lower_upper_bounds",
+                passed=False,
+                detail="File 02_lower_upper_bounds.md missing.",
+            )
+        )
 
     # Chapter 3: Search on Answer
     ch3 = directory / "03_search_on_answer.md"
@@ -214,13 +264,21 @@ async def run_binary_search_notes_judge(directory: Path) -> SuiteReport:
             required_keywords=["minimize", "maximize", "predicate", "koko", "bananas"],
             required_code_patterns=[r"def\s+\w+", r"while\s+\w+\s*<=?\s*\w+"],
         )
-        results.append(TaskResult(
-            name="chapter_3_search_on_answer",
-            passed=scorecard.passed,
-            detail=f"Score {scorecard.overall_score:.1f}/10 — {scorecard.summary}",
-        ))
+        results.append(
+            TaskResult(
+                name="chapter_3_search_on_answer",
+                passed=scorecard.passed,
+                detail=f"Score {scorecard.overall_score:.1f}/10 — {scorecard.summary}",
+            )
+        )
     else:
-        results.append(TaskResult(name="chapter_3_search_on_answer", passed=False, detail="File 03_search_on_answer.md missing."))
+        results.append(
+            TaskResult(
+                name="chapter_3_search_on_answer",
+                passed=False,
+                detail="File 03_search_on_answer.md missing.",
+            )
+        )
 
     # Chapter 4: Rotated & Peaks
     ch4 = directory / "04_rotated_and_peaks.md"
@@ -232,15 +290,26 @@ async def run_binary_search_notes_judge(directory: Path) -> SuiteReport:
             "04_rotated_and_peaks.md",
             ch4.read_text(),
             required_keywords=["rotated", "pivot", "peak", "sorted"],
-            required_code_patterns=[r"nums\[mid\]\s*>\s*nums\[\w+\]|nums\[mid\]\s*<\s*nums\[mid\s*\+\s*1\]", r"def\s+\w+"],
+            required_code_patterns=[
+                r"nums\[mid\]\s*>\s*nums\[\w+\]|nums\[mid\]\s*<\s*nums\[mid\s*\+\s*1\]",
+                r"def\s+\w+",
+            ],
         )
-        results.append(TaskResult(
-            name="chapter_4_rotated_and_peaks",
-            passed=scorecard.passed,
-            detail=f"Score {scorecard.overall_score:.1f}/10 — {scorecard.summary}",
-        ))
+        results.append(
+            TaskResult(
+                name="chapter_4_rotated_and_peaks",
+                passed=scorecard.passed,
+                detail=f"Score {scorecard.overall_score:.1f}/10 — {scorecard.summary}",
+            )
+        )
     else:
-        results.append(TaskResult(name="chapter_4_rotated_and_peaks", passed=False, detail="File 04_rotated_and_peaks.md missing."))
+        results.append(
+            TaskResult(
+                name="chapter_4_rotated_and_peaks",
+                passed=False,
+                detail="File 04_rotated_and_peaks.md missing.",
+            )
+        )
 
     # Chapter 5: 2D Matrix
     ch5 = directory / "05_2d_matrix_search.md"
@@ -251,16 +320,28 @@ async def run_binary_search_notes_judge(directory: Path) -> SuiteReport:
         scorecard = evaluate_content_deterministic(
             "05_2d_matrix_search.md",
             ch5.read_text(),
-            required_keywords=["matrix", "flatten|mapping|coordinate", "staircase|stair", "row", "col"],
+            required_keywords=[
+                "matrix",
+                "flatten|mapping|coordinate",
+                "staircase|stair",
+                "row",
+                "col",
+            ],
             required_code_patterns=[r"mid\s*//\s*\w+|mid\s*%\s*\w+", r"def\s+\w+"],
         )
-        results.append(TaskResult(
-            name="chapter_5_2d_matrix",
-            passed=scorecard.passed,
-            detail=f"Score {scorecard.overall_score:.1f}/10 — {scorecard.summary}",
-        ))
+        results.append(
+            TaskResult(
+                name="chapter_5_2d_matrix",
+                passed=scorecard.passed,
+                detail=f"Score {scorecard.overall_score:.1f}/10 — {scorecard.summary}",
+            )
+        )
     else:
-        results.append(TaskResult(name="chapter_5_2d_matrix", passed=False, detail="File 05_2d_matrix.md missing."))
+        results.append(
+            TaskResult(
+                name="chapter_5_2d_matrix", passed=False, detail="File 05_2d_matrix.md missing."
+            )
+        )
 
     # README Master Index
     readme = directory / "README.md"
@@ -268,16 +349,26 @@ async def run_binary_search_notes_judge(directory: Path) -> SuiteReport:
         scorecard = evaluate_content_deterministic(
             "README.md",
             readme.read_text(),
-            required_keywords=["binary search", "fundamentals|chapter", "bounds|bound", "answer", "matrix"],
+            required_keywords=[
+                "binary search",
+                "fundamentals|chapter",
+                "bounds|bound",
+                "answer",
+                "matrix",
+            ],
             required_code_patterns=[r"\|", r"01_|chapter|basic"],
             is_code_file=False,
         )
-        results.append(TaskResult(
-            name="master_readme_index",
-            passed=scorecard.passed,
-            detail=f"Score {scorecard.overall_score:.1f}/10 — {scorecard.summary}",
-        ))
+        results.append(
+            TaskResult(
+                name="master_readme_index",
+                passed=scorecard.passed,
+                detail=f"Score {scorecard.overall_score:.1f}/10 — {scorecard.summary}",
+            )
+        )
     else:
-        results.append(TaskResult(name="master_readme_index", passed=False, detail="File README.md missing."))
+        results.append(
+            TaskResult(name="master_readme_index", passed=False, detail="File README.md missing.")
+        )
 
     return SuiteReport("llm_judge_binary_search", results)

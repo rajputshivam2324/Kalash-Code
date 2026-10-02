@@ -11,17 +11,16 @@ import asyncio
 import json
 import sys
 import time
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any, Callable, Coroutine
+from typing import Any
 
-from kalash.core.errors import HookDeniedError, HookError, KalashError
-from kalash.core.events import Event, EventType, get_event_bus
+from kalash.core.errors import HookDeniedError
 from kalash.core.ids import generate_id
-from kalash.storage.engine import StorageEngine
-
 from kalash.hooks.events import HookEvent, HookPayload
+from kalash.storage.engine import StorageEngine
 
 
 class HandlerType(StrEnum):
@@ -55,6 +54,7 @@ class HookConfig:
     # Handler-specific config
     command: str = ""  # For COMMAND type
     url: str = ""  # For HTTP type
+    source_path: str = ""
     python_callable: str = ""  # For PYTHON type (dotted path)
 
     def __post_init__(self) -> None:
@@ -142,7 +142,9 @@ class HookRunner:
 
             _log.getLogger(__name__).warning(
                 "hook_loop_protection: event=%s chain_id=%s depth=%d",
-                event, effective_chain, current_depth,
+                event,
+                effective_chain,
+                current_depth,
             )
             return []
 
@@ -171,7 +173,10 @@ class HookRunner:
 
             return results
         finally:
-            self._chain_depth[effective_chain] = current_depth
+            if current_depth:
+                self._chain_depth[effective_chain] = current_depth
+            else:
+                self._chain_depth.pop(effective_chain, None)
 
     async def _execute_hook(
         self,
@@ -180,22 +185,30 @@ class HookRunner:
     ) -> HookResult:
         """Execute a single hook handler based on its type."""
         start = time.time()
+        if config.source_path:
+            from pathlib import Path
+
+            from kalash.core.trust import is_trusted
+
+            if not is_trusted(Path(config.source_path)):
+                raise HookDeniedError(
+                    "Project hook configuration is not trusted or changed", recoverable=True
+                )
         try:
             if config.handler_type == HandlerType.COMMAND:
                 return await self._execute_command(config, payload, start)
-            elif config.handler_type == HandlerType.HTTP:
+            if config.handler_type == HandlerType.HTTP:
                 return await self._execute_http(config, payload, start)
-            elif config.handler_type == HandlerType.PYTHON:
+            if config.handler_type == HandlerType.PYTHON:
                 return await self._execute_python(config, payload, start)
-            else:
-                return HookResult(
-                    hook_id=config.id,
-                    event=payload.event,
-                    exit_code=1,
-                    error=f"Unknown handler type: {config.handler_type}",
-                    duration_ms=int((time.time() - start) * 1000),
-                )
-        except asyncio.TimeoutError:
+            return HookResult(
+                hook_id=config.id,
+                event=payload.event,
+                exit_code=1,
+                error=f"Unknown handler type: {config.handler_type}",
+                duration_ms=int((time.time() - start) * 1000),
+            )
+        except TimeoutError:
             return HookResult(
                 hook_id=config.id,
                 event=payload.event,
@@ -221,13 +234,17 @@ class HookRunner:
         start: float,
     ) -> HookResult:
         """Execute a command hook: JSON payload on stdin, exit code semantics."""
-        stdin_data = json.dumps({
-            "event": payload.event.value,
-            "session_id": payload.session_id,
-            "run_id": payload.run_id,
-            "timestamp": payload.timestamp,
-            "data": payload.data,
-        }).encode()
+        stdin_data = json.dumps(
+            {
+                "event": payload.event.value,
+                "session_id": payload.session_id,
+                "run_id": payload.run_id,
+                "timestamp": payload.timestamp,
+                "data": payload.data,
+            }
+        ).encode()
+
+        from kalash.sandbox.environment import safe_environment
 
         # Command comes from the user's hook config (trusted), not from the
         # payload. Pass it as a single `-c` argument so runtime data never
@@ -237,6 +254,7 @@ class HookRunner:
                 "cmd.exe",
                 "/c",
                 config.command,
+                env=safe_environment(),
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
@@ -246,26 +264,59 @@ class HookRunner:
                 "/bin/sh",
                 "-c",
                 config.command,
+                env=safe_environment(),
+                start_new_session=True,
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
 
+        async def drain(reader: asyncio.StreamReader | None) -> bytes:
+            retained = bytearray()
+            if reader is not None:
+                while chunk := await reader.read(8192):
+                    retained.extend(chunk[: max(0, 32_000 - len(retained))])
+            return bytes(retained)
+
+        async def communicate() -> tuple[bytes, bytes]:
+            readers = [
+                asyncio.create_task(drain(proc.stdout)),
+                asyncio.create_task(drain(proc.stderr)),
+            ]
+            try:
+                if proc.stdin is not None:
+                    try:
+                        proc.stdin.write(stdin_data)
+                        await proc.stdin.drain()
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+                    finally:
+                        proc.stdin.close()
+                stdout, stderr = await asyncio.gather(*readers)
+                await proc.wait()
+                return stdout, stderr
+            finally:
+                for reader in readers:
+                    reader.cancel()
+                await asyncio.gather(*readers, return_exceptions=True)
+
         try:
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(stdin_data),
+                communicate(),
                 timeout=config.timeout_s,
             )
-        except asyncio.TimeoutError:
-            proc.kill()
+        except (TimeoutError, asyncio.CancelledError):
+            from kalash.tools.shell import _terminate_process
+
+            await _terminate_process(proc)
             raise
 
         return HookResult(
             hook_id=config.id,
             event=payload.event,
             exit_code=proc.returncode or 0,
-            stdout=stdout.decode(errors="replace"),
-            stderr=stderr.decode(errors="replace"),
+            stdout=stdout[:32_000].decode(errors="replace"),
+            stderr=stderr[:32_000].decode(errors="replace"),
             duration_ms=int((time.time() - start) * 1000),
         )
 
@@ -276,16 +327,18 @@ class HookRunner:
         start: float,
     ) -> HookResult:
         """Execute an HTTP hook: JSON POST to configured URL."""
-        import urllib.request
         import urllib.error
+        import urllib.request
 
-        body = json.dumps({
-            "event": payload.event.value,
-            "session_id": payload.session_id,
-            "run_id": payload.run_id,
-            "timestamp": payload.timestamp,
-            "data": payload.data,
-        }).encode()
+        body = json.dumps(
+            {
+                "event": payload.event.value,
+                "session_id": payload.session_id,
+                "run_id": payload.run_id,
+                "timestamp": payload.timestamp,
+                "data": payload.data,
+            }
+        ).encode()
 
         req = urllib.request.Request(
             config.url,
@@ -295,15 +348,18 @@ class HookRunner:
         )
 
         try:
-            response = await asyncio.to_thread(
-                urllib.request.urlopen, req, timeout=config.timeout_s
-            )
-            response_body = response.read().decode(errors="replace")
-            exit_code = 0 if response.status == 200 else 1
+
+            def fetch() -> tuple[str, int]:
+                with urllib.request.urlopen(req, timeout=config.timeout_s) as response:
+                    return response.read(32_000).decode(
+                        errors="replace"
+                    ), 0 if response.status == 200 else 1
+
+            response_body, exit_code = await asyncio.to_thread(fetch)
         except urllib.error.HTTPError as e:
-            response_body = e.read().decode(errors="replace") if e.fp else ""
+            response_body = e.read(32_000).decode(errors="replace") if e.fp else ""
             exit_code = 2 if e.code == 403 else 1
-        except (urllib.error.URLError, OSError, asyncio.TimeoutError) as e:
+        except (TimeoutError, urllib.error.URLError, OSError) as e:
             # R-1: DNS failure, connection refused, or timeout.
             response_body = ""
             exit_code = 1
@@ -385,7 +441,7 @@ class HookRunner:
 
     async def _record_result(self, result: HookResult, payload: HookPayload) -> None:
         """Record hook execution in hook_runs table."""
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         await self._engine.execute_write(
             """INSERT INTO hook_runs
                (id, hook_id, event, exit_code, stdout, stderr, error,

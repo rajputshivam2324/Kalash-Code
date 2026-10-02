@@ -1,13 +1,10 @@
 """Tests for the storage layer."""
 
 import pytest
-import tempfile
-from pathlib import Path
 
+from kalash.storage.blobs import blob_exists, compute_digest, read_blob, store_blob
 from kalash.storage.engine import StorageEngine
-from kalash.storage.blobs import compute_digest, store_blob, read_blob, blob_exists, BLOB_THRESHOLD
 from kalash.storage.repositories.sessions import SessionRepository
-
 
 # --- Blobs ---
 
@@ -39,6 +36,7 @@ class TestBlobs:
 
         # Corrupt the blob
         from kalash.storage.blobs import blob_path
+
         path = blob_path(digest)
         path.write_bytes(b"corrupted")
 
@@ -65,7 +63,9 @@ class TestStorageEngine:
         await engine.initialize()
 
         # Check that sessions table exists
-        rows = engine.execute_read("SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'")
+        rows = engine.execute_read(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='sessions'"
+        )
         assert len(rows) == 1
 
         engine.close()
@@ -79,7 +79,14 @@ class TestStorageEngine:
         # Write should work
         await engine.execute_write(
             "INSERT INTO sessions (id, project_dir, agent, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-            ("ses_test", "/tmp", "default", "CREATED", "2024-01-01T00:00:00Z", "2024-01-01T00:00:00Z"),
+            (
+                "ses_test",
+                "/tmp",
+                "default",
+                "CREATED",
+                "2024-01-01T00:00:00Z",
+                "2024-01-01T00:00:00Z",
+            ),
         )
 
         # Read it back
@@ -120,7 +127,7 @@ class TestSessionRepository:
 
         session_id = await repo.create_session(project_dir="/tmp")
         turn_id = await repo.create_turn(session_id, seq=1, role="user")
-        msg_id = await repo.add_message(turn_id, seq=1, role="user", content="Hello")
+        await repo.add_message(turn_id, seq=1, role="user", content="Hello")
 
         messages = await repo.get_messages(turn_id)
         assert len(messages) == 1

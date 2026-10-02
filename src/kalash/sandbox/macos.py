@@ -13,7 +13,6 @@ import subprocess
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
 
 from .policy import SandboxMode, SandboxPolicy
 
@@ -89,7 +88,7 @@ def _generate_seatbelt_profile(
         # Allow network to specific hosts
         lines.append("(allow network-outbound (remote tcp))")
         for host in allowed_hosts:
-            lines.append(f'  ;; allowed: {host}')
+            lines.append(f"  ;; allowed: {host}")
         # Note: sandbox-exec doesn't support host-level filtering directly,
         # so we allow outbound and rely on application-level enforcement
         lines.append("(allow network-outbound)")

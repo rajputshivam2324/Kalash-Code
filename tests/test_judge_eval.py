@@ -1,7 +1,8 @@
 """Tests for the LLM-as-a-Judge evaluation framework."""
 
-import pytest
 from pathlib import Path
+
+import pytest
 from evals.judge import evaluate_content_deterministic, run_binary_search_notes_judge
 
 
@@ -37,7 +38,10 @@ def binary_search(nums: list[int], target: int) -> int:
         "test_fundamentals.md",
         sample_doc,
         required_keywords=["monotonic", "invariant", "overflow", "interval"],
-        required_code_patterns=[r"while\s+low\s*<=\s*high", r"mid\s*=\s*low\s*\+\s*\(high\s*-\s*low\)"],
+        required_code_patterns=[
+            r"while\s+low\s*<=\s*high",
+            r"mid\s*=\s*low\s*\+\s*\(high\s*-\s*low\)",
+        ],
     )
 
     assert scorecard.passed is True

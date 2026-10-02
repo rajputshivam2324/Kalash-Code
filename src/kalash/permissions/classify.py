@@ -64,8 +64,8 @@ _STATIC_RISK: dict[str, RiskClass] = {
     "remember": RiskClass.WRITE,
     "forget": RiskClass.WRITE,
     "notebook_edit": RiskClass.WRITE,
-    "fetch": RiskClass.NETWORK,
-    "web_search": RiskClass.NETWORK,
+    "fetch": RiskClass.READ,
+    "web_search": RiskClass.READ,
     "task": RiskClass.WRITE,
 }
 
@@ -167,8 +167,7 @@ def analyze_command(command: str) -> CommandRisk:
             continue
         found = _analyze_segment(segment)
         if _max_risk(found.risk_class, worst.risk_class) == found.risk_class and (
-            found.risk_class != worst.risk_class
-            or found.confirmation_classes
+            found.risk_class != worst.risk_class or found.confirmation_classes
         ):
             merged_classes = tuple(
                 dict.fromkeys(worst.confirmation_classes + found.confirmation_classes)
@@ -230,9 +229,7 @@ def _analyze_segment(segment: str) -> CommandRisk:
         return CommandRisk(
             risk_class=RiskClass.DESTRUCTIVE,
             confirmation_classes=tuple(
-                dict.fromkeys(
-                    (*result.confirmation_classes, ConfirmationClass.SECURITY_SURFACE)
-                )
+                dict.fromkeys((*result.confirmation_classes, ConfirmationClass.SECURITY_SURFACE))
             ),
             reversibility=_IRREVERSIBLE,
             reason=f"runs with elevated privileges: {result.reason or argv0}",
@@ -299,13 +296,9 @@ def _classify_argv(  # noqa: PLR0911 - a flat rule table reads better than nesti
         )
 
     if argv0 in ("kubectl", "terraform", "aws", "gcloud", "az", "helm", "flyctl"):
-        production = bool(
-            re.search(r"\b(prod|production|live)\b", segment, re.IGNORECASE)
-        )
+        production = bool(re.search(r"\b(prod|production|live)\b", segment, re.IGNORECASE))
         classes = [ConfirmationClass.PRODUCTION] if production else []
-        destructive = bool(
-            {"delete", "destroy", "apply", "drop"} & set(rest[:2])
-        )
+        destructive = bool({"delete", "destroy", "apply", "drop"} & set(rest[:2]))
         return CommandRisk(
             risk_class=RiskClass.DESTRUCTIVE if destructive else RiskClass.NETWORK,
             confirmation_classes=tuple(classes),
@@ -345,11 +338,45 @@ def _classify_argv(  # noqa: PLR0911 - a flat rule table reads better than nesti
 
     # Commands known to only observe.
     if argv0 in (
-        "ls", "cat", "head", "tail", "wc", "grep", "rg", "fd", "which", "file",
-        "stat", "pwd", "echo", "date", "env", "printenv", "diff", "tree", "du",
-        "df", "ps", "uname", "whoami", "sort", "uniq", "cut", "awk", "sed",
-        "jq", "python", "python3", "node", "pytest", "ruff", "mypy", "make",
-        "cargo-check", "tsc", "eslint",
+        "ls",
+        "cat",
+        "head",
+        "tail",
+        "wc",
+        "grep",
+        "rg",
+        "fd",
+        "which",
+        "file",
+        "stat",
+        "pwd",
+        "echo",
+        "date",
+        "env",
+        "printenv",
+        "diff",
+        "tree",
+        "du",
+        "df",
+        "ps",
+        "uname",
+        "whoami",
+        "sort",
+        "uniq",
+        "cut",
+        "awk",
+        "sed",
+        "jq",
+        "python",
+        "python3",
+        "node",
+        "pytest",
+        "ruff",
+        "mypy",
+        "make",
+        "cargo-check",
+        "tsc",
+        "eslint",
     ):
         # sed -i and make can write, so this is WRITE unless clearly read-only.
         if argv0 == "sed" and ("i" in flags or "in-place" in flags):
@@ -395,9 +422,7 @@ def _classify_git(rest: list[str], flags: set[str]) -> CommandRisk:
 
     if subcommand == "push":
         forced = bool({"f", "force", "force-with-lease"} & flags)
-        protected = any(
-            branch in rest for branch in ("main", "master", "production", "release")
-        )
+        protected = any(branch in rest for branch in ("main", "master", "production", "release"))
         classes = [ConfirmationClass.REMOTE_PUBLICATION]
         if forced:
             classes.append(ConfirmationClass.DESTRUCTIVE_GIT)
@@ -555,9 +580,7 @@ def classify_tool_call(
                 resolved = candidate.resolve()
             except OSError:
                 continue
-            inside = any(
-                resolved == root or root in resolved.parents for root in writable_roots
-            )
+            inside = any(resolved == root or root in resolved.parents for root in writable_roots)
             if not inside:
                 confirmation.append(ConfirmationClass.BOUNDARY_CROSSING)
                 reason = f"writes outside the workspace: {resolved}"

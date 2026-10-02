@@ -128,7 +128,8 @@ def _copy_desktop(text: str) -> str | None:
 def extract_last_code_block(text: str) -> str | None:
     """Extract the contents of the last markdown code block if present."""
     import re
+
     blocks = re.findall(r"```(?:\w+)?\n(.*?)```", text, re.DOTALL)
     if blocks:
-        return blocks[-1].strip()
+        return str(blocks[-1]).strip()
     return None

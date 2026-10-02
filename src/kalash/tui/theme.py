@@ -10,7 +10,9 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Any
 
+from textual.app import App
 from textual.theme import Theme
 
 from kalash.core.paths import kalash_home, settings_path
@@ -207,11 +209,7 @@ class KalashTheme:
     ) -> None:
         saved = _load_saved()
         self.disable_color = bool(os.environ.get("NO_COLOR"))
-        self._dark = (
-            dark
-            if dark is not None
-            else saved.get("dark", _env_dark(default=True))
-        )
+        self._dark = dark if dark is not None else saved.get("dark", _env_dark(default=True))
         self._high_contrast = (
             high_contrast
             if high_contrast is not None
@@ -273,7 +271,7 @@ class KalashTheme:
     def save(self) -> None:
         _save_settings({"dark": self._dark, "high_contrast": self._high_contrast})
 
-    def apply_to(self, app) -> None:
+    def apply_to(self, app: App[Any]) -> None:
         """Activate this palette via Textual's theme engine.
 
         Setting ``App.theme`` before the app is running queues a CSS refresh that
@@ -340,7 +338,7 @@ def _to_textual_theme(_preset_id: str, label: str, *, dark: bool, high_contrast:
     )
 
 
-def register_kalash_themes(app, *, activate: str | None = None) -> None:
+def register_kalash_themes(app: App[Any], *, activate: str | None = None) -> None:
     """Register Kalash palettes and hide unrelated built-in themes from Ctrl+P.
 
     The active theme is switched *before* built-ins are removed so
@@ -358,7 +356,7 @@ def register_kalash_themes(app, *, activate: str | None = None) -> None:
             app.unregister_theme(name)
 
 
-def _refresh_live_css(app) -> None:
+def _refresh_live_css(app: App[Any]) -> None:
     """Repaint tokens when the theme name did not change (watch skipped)."""
     if not getattr(app, "is_running", False):
         return
@@ -412,7 +410,7 @@ def _load_saved() -> dict[str, bool]:
 
 def _save_settings(values: dict[str, bool]) -> None:
     path = _settings_file()
-    data: dict = {}
+    data: dict[str, Any] = {}
     if path.exists():
         try:
             loaded = json.loads(path.read_text(encoding="utf-8"))

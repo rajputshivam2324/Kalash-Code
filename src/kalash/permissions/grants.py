@@ -10,7 +10,7 @@ from __future__ import annotations
 import fnmatch
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -103,7 +103,7 @@ class GrantStore:
             The created Grant.
         """
         grant_id = generate_id("grt_")
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         grant = Grant(
             id=grant_id,
@@ -249,9 +249,7 @@ class GrantStore:
         if not rows:
             return False
 
-        await self.engine.execute_write(
-            f"DELETE FROM {_GRANTS_TABLE} WHERE id = ?", (grant_id,)
-        )
+        await self.engine.execute_write(f"DELETE FROM {_GRANTS_TABLE} WHERE id = ?", (grant_id,))
         logger.info("Grant revoked: %s", grant_id)
         return True
 
@@ -267,9 +265,7 @@ class GrantStore:
         )
         count = rows[0]["cnt"] if rows else 0
 
-        await self.engine.execute_write(
-            f"DELETE FROM {_GRANTS_TABLE} WHERE session_id = ?", (sid,)
-        )
+        await self.engine.execute_write(f"DELETE FROM {_GRANTS_TABLE} WHERE session_id = ?", (sid,))
         logger.info("Revoked %d session grants for %s", count, sid)
         return count
 
@@ -284,9 +280,7 @@ class GrantStore:
         )
         count = rows[0]["cnt"] if rows else 0
 
-        await self.engine.execute_write(
-            f"DELETE FROM {_GRANTS_TABLE} WHERE consumed = 1", ()
-        )
+        await self.engine.execute_write(f"DELETE FROM {_GRANTS_TABLE} WHERE consumed = 1", ())
         return count
 
     # ------------------------------------------------------------------
@@ -316,6 +310,7 @@ def _json_dumps(data: Any) -> str | None:
     if data is None:
         return None
     import json
+
     return json.dumps(data)
 
 

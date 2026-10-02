@@ -1,22 +1,4 @@
-"""Message serialization — the session resume read path.
-
-``SessionRepository.get_session_messages()`` returns exactly the rows a resume
-needs, ordered by turn then message sequence. It had zero call sites, because
-nothing existed to turn those rows back into
-:class:`~kalash.models.normalize.Message` objects. Every run therefore started
-with an empty history, and ``kalash resume`` restored a session's *metadata*
-while silently discarding its conversation.
-
-This module is both halves of that round trip. It is deliberately explicit
-rather than using ``pickle`` or ``dataclasses.asdict``: the stored form is a
-durable format that has to survive code changes, so each block type is written
-and read by name.
-
-Tool-use and tool-result blocks matter most. A resumed conversation that drops a
-``tool_use`` block but keeps the assistant text leaves the provider with a
-dangling reference and the request is rejected, so the pairing has to survive
-storage intact.
-"""
+"""Versioned message storage and recovery of interrupted tool exchanges."""
 
 from __future__ import annotations
 
@@ -48,15 +30,19 @@ def _block_to_json(block: ContentBlock) -> dict[str, Any] | None:
         case TextBlock():
             return {"t": "text", "text": block.text}
         case ToolUseBlock():
-            return {"t": "tool_use", "id": block.id, "name": block.name, "input": block.input}
+            return {
+                "t": "tool_use",
+                "id": block.id,
+                "name": block.name,
+                "input": block.input,
+                "thought_signature": block.thought_signature,
+            }
         case ToolResultBlock():
             content = block.content
             if not isinstance(content, str):
                 # Nested blocks flatten to text; the structure carries no meaning
                 # the model needs on replay.
-                content = "\n".join(
-                    b.text for b in content if isinstance(b, TextBlock)
-                )
+                content = "\n".join(b.text for b in content if isinstance(b, TextBlock))
             return {
                 "t": "tool_result",
                 "tool_use_id": block.tool_use_id,
@@ -64,9 +50,7 @@ def _block_to_json(block: ContentBlock) -> dict[str, Any] | None:
                 "is_error": block.is_error,
             }
         case ThinkingBlock():
-            # Reasoning payloads are provider-specific and not portable across a
-            # model switch, so the signature is intentionally dropped.
-            return {"t": "thinking", "thinking": block.thinking}
+            return {"t": "thinking", "thinking": block.thinking, "signature": block.signature}
         case ImageBlock():
             return {
                 "t": "image",
@@ -98,6 +82,7 @@ def _block_from_json(raw: dict[str, Any]) -> ContentBlock | None:
                     id=str(raw["id"]),
                     name=str(raw["name"]),
                     input=dict(raw.get("input") or {}),
+                    thought_signature=raw.get("thought_signature"),
                 )
             case "tool_result":
                 return ToolResultBlock(
@@ -106,7 +91,9 @@ def _block_from_json(raw: dict[str, Any]) -> ContentBlock | None:
                     is_error=bool(raw.get("is_error", False)),
                 )
             case "thinking":
-                return ThinkingBlock(thinking=str(raw.get("thinking", "")))
+                return ThinkingBlock(
+                    thinking=str(raw.get("thinking", "")), signature=raw.get("signature")
+                )
             case "image":
                 return ImageBlock(
                     source_type=str(raw["source_type"]),
@@ -184,37 +171,48 @@ def rehydrate_messages(rows: list[dict[str, Any]]) -> list[Message]:
         else:
             messages.append(Message(role=role, content=blocks))
 
-    return _drop_dangling_tool_calls(messages)
+    return _repair_interrupted_tools(messages)
 
 
-def _drop_dangling_tool_calls(messages: list[Message]) -> list[Message]:
-    """Remove tool_use blocks whose results were never stored.
-
-    A truncated or interrupted session can persist an assistant turn containing
-    a ``tool_use`` block without the matching ``tool_result``. Providers reject
-    that pairing, so replaying it would make a resumed session permanently
-    unusable. Dropping the unanswered call is the recoverable choice.
-    """
-    answered: set[str] = set()
+def _repair_interrupted_tools(messages: list[Message]) -> list[Message]:
+    """Preserve intent and mark missing durable outcomes; never replay effects."""
+    repaired: list[Message] = []
+    pending: list[str] = []
     for message in messages:
-        for block in message.content:
-            if isinstance(block, ToolResultBlock):
-                answered.add(block.tool_use_id)
-
-    cleaned: list[Message] = []
-    for message in messages:
-        kept: list[ContentBlock] = [
-            block
-            for block in message.content
-            if not (isinstance(block, ToolUseBlock) and block.id not in answered)
-        ]
-        if len(kept) != len(message.content):
-            logger.debug("dropped %d unanswered tool call(s) on resume",
-                         len(message.content) - len(kept))
-        if kept:
-            cleaned.append(Message(role=message.role, content=kept))
-
-    return cleaned
+        if pending:
+            results = message.content if message.role == Role.USER else []
+            answered = {b.tool_use_id for b in results if isinstance(b, ToolResultBlock)}
+            missing: list[ContentBlock] = [
+                ToolResultBlock(
+                    tool_use_id=call_id,
+                    content="No durable result. Outcome unknown; inspect workspace before retrying.",
+                    is_error=True,
+                )
+                for call_id in pending
+                if call_id not in answered
+            ]
+            if missing:
+                if message.role == Role.USER:
+                    message = Message(role=Role.USER, content=[*missing, *message.content])
+                else:
+                    repaired.append(Message(role=Role.USER, content=missing))
+        repaired.append(message)
+        pending = [b.id for b in message.content if isinstance(b, ToolUseBlock)]
+    if pending:
+        repaired.append(
+            Message(
+                role=Role.USER,
+                content=[
+                    ToolResultBlock(
+                        tool_use_id=call_id,
+                        content="No durable result. Outcome unknown; inspect workspace before retrying.",
+                        is_error=True,
+                    )
+                    for call_id in pending
+                ],
+            )
+        )
+    return repaired
 
 
 def split_system(messages: list[Message]) -> tuple[str, list[Message]]:

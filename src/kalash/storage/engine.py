@@ -5,13 +5,14 @@ All writes serialize through one queue. Reads go wide via WAL.
 
 from __future__ import annotations
 
-import atexit
 import asyncio
-import threading
+import atexit
 import sqlite3
+import threading
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
-from typing import Any, AsyncIterator, Iterator
+from typing import Any
 
 from kalash.core.paths import kalash_db_path
 

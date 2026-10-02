@@ -5,10 +5,8 @@ Creates, resumes, and manages agent sessions backed by SQLite.
 
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from pathlib import Path
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from kalash.core.config import KalashConfig, load_config
@@ -30,10 +28,6 @@ class Session:
     turn_seq: int = 0
     config: KalashConfig | None = None
 
-    def rewind(self, steps: int = 1) -> None:
-        """Rewind the session by N turns (placeholder)."""
-        self.turn_seq = max(0, self.turn_seq - steps)
-
 
 class SessionManager:
     """Manages session lifecycle: create, resume, list, close."""
@@ -54,7 +48,7 @@ class SessionManager:
     def _run_migrations_sync(engine: StorageEngine) -> None:
         """Apply pending schema migrations synchronously."""
         import hashlib
-        from datetime import datetime, timezone as tz
+        from datetime import datetime
 
         from kalash.storage.migrations import MIGRATIONS
 
@@ -71,7 +65,7 @@ class SessionManager:
         )
         row = conn.execute("SELECT MAX(version) as v FROM schema_migrations").fetchone()
         current_version = int(row["v"]) if row and row["v"] is not None else 0
-        now = datetime.now(tz.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         for version, name, sql in MIGRATIONS:
             if version <= current_version:
                 continue
@@ -95,14 +89,13 @@ class SessionManager:
         session_id = generate_id("ses_")
 
         engine = self._ensure_engine()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
 
         # Use the engine's synchronous write path (A-1/R-3).
         engine.execute_write_sync(
             """INSERT INTO sessions (id, project_dir, agent, state, created_at, updated_at)
                VALUES (?, ?, ?, 'ACTIVE', ?, ?)""",
-            (session_id, proj, self._config.model.primary.split("/")[0],
-             now, now),
+            (session_id, proj, self._config.model.primary.split("/")[0], now, now),
         )
 
         return Session(
@@ -118,9 +111,7 @@ class SessionManager:
     def resume(self, session_id: str) -> Session:
         """Resume an existing session."""
         engine = self._ensure_engine()
-        rows = engine.execute_read(
-            "SELECT * FROM sessions WHERE id = ?", (session_id,)
-        )
+        rows = engine.execute_read("SELECT * FROM sessions WHERE id = ?", (session_id,))
         if not rows:
             raise ValueError(f"Session not found: {session_id}")
 
@@ -135,9 +126,7 @@ class SessionManager:
             config=self._config,
         )
 
-    def list_sessions(
-        self, limit: int = 20, status: str | None = None
-    ) -> list[dict[str, Any]]:
+    def list_sessions(self, limit: int = 20, status: str | None = None) -> list[dict[str, Any]]:
         """List recent sessions, newest first.
 
         Each row carries a ``turn_count`` so callers can show session size
@@ -203,10 +192,12 @@ class SessionManager:
             (session_id,),
         )
         engine.execute_write_sync(
-            "DELETE FROM turns WHERE session_id = ?", (session_id,),
+            "DELETE FROM turns WHERE session_id = ?",
+            (session_id,),
         )
         engine.execute_write_sync(
-            "DELETE FROM sessions WHERE id = ?", (session_id,),
+            "DELETE FROM sessions WHERE id = ?",
+            (session_id,),
         )
         return True
 
@@ -219,8 +210,8 @@ class SessionManager:
         transcript = self.get_transcript(session_id)
 
         if format.lower() == "markdown":
-            from kalash.runtime.serialize import deserialize_blocks
             from kalash.models.normalize import TextBlock
+            from kalash.runtime.serialize import deserialize_blocks
 
             lines = [
                 f"# Session {session_id}",
@@ -243,14 +234,12 @@ class SessionManager:
 
         import json
 
-        return json.dumps(
-            {"session": session, "messages": transcript}, indent=2, default=str
-        )
+        return json.dumps({"session": session, "messages": transcript}, indent=2, default=str)
 
     def close_session(self, session_id: str) -> None:
         """Close a session."""
         engine = self._ensure_engine()
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         engine.execute_write_sync(
             "UPDATE sessions SET state = 'CLOSED', closed_at = ?, updated_at = ? WHERE id = ?",
             (now, now, session_id),

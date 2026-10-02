@@ -10,12 +10,12 @@ from kalash.cli.output import (
     EXIT_BUDGET_EXCEEDED,
     EXIT_CANCELLED,
     EXIT_FAILURE,
-    EXIT_OK,
     EXIT_PROVIDER_UNAVAILABLE,
     OutputFormat,
     OutputSink,
     RunMetrics,
 )
+from kalash.runtime.agent import Agent
 from kalash.runtime.loop import TerminationReason
 
 # Legacy aliases for tests and scripts
@@ -73,9 +73,9 @@ async def _run(
     sandbox: str | None = None,
     approval: str | None = None,
 ) -> int:
-    from kalash.runtime.agent import build_agent, load_history_async
-    from kalash.runtime.bootstrap import prepare_agent
     from kalash.core.logging import configure_logging
+    from kalash.runtime.agent import build_agent
+    from kalash.runtime.bootstrap import prepare_agent
 
     configure_logging()
 
@@ -108,9 +108,6 @@ async def _run(
         model_id=model_id,
         config=config,
     )
-    if agent is not None:
-        await prepare_agent(agent)
-
     if agent is None:
         print(f"kalash: {reason}", file=sys.stderr)
         if output_format is not OutputFormat.TEXT:
@@ -123,15 +120,18 @@ async def _run(
             )
         return EXIT_NO_PROVIDER
 
-    if resume_session and agent.loop.session_repo is not None:
-        agent.history = await load_history_async(
-            agent.loop.session_repo, agent.session_id
-        )
+    try:
+        await prepare_agent(agent)
+        return await _execute(agent, prompt, output_format, config.permissions.sandbox)
+    finally:
+        await agent.close()
 
+
+async def _execute(agent: Agent, prompt: str, output_format: OutputFormat, sandbox: str) -> int:
     metrics = RunMetrics(
         session_id=agent.session_id,
         model_id=agent.loop.model_id,
-        sandbox=config.permissions.sandbox,
+        sandbox=sandbox,
     )
     sink = OutputSink(output_format, metrics=metrics)
     sink.emit_session_started()
@@ -183,6 +183,10 @@ async def _run(
             message=msg,
             exit_code=EXIT_FAILURE,
         )
+
+    finally:
+        bus.off(EventType.TOOL_COMPLETE, on_tool_complete)
+        bus.off(EventType.TOOL_OUTPUT, on_tool_output)
 
     metrics.input_tokens = agent.budget.tokens_used
     stop = result.termination_reason.value

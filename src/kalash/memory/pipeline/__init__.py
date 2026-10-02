@@ -1,1 +1,1 @@
-"""Memory pipeline: extract → dedupe → inject."""
+"""Explicit preference extraction and bounded recall rendering."""

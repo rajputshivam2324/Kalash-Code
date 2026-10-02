@@ -1,9 +1,10 @@
 """Core Key-Value store engine with JSON persistence and TTL expiration."""
+
 from __future__ import annotations
 
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -64,9 +65,7 @@ class KVStore:
     def set(self, key: str, value: Any, ttl_seconds: float | None = None) -> None:
         now = time.time()
         expires_at = (now + ttl_seconds) if ttl_seconds else None
-        self._entries[key] = Entry(
-            key=key, value=value, created_at=now, expires_at=expires_at
-        )
+        self._entries[key] = Entry(key=key, value=value, created_at=now, expires_at=expires_at)
         self._save()
 
     def get(self, key: str, default: Any = None) -> Any:

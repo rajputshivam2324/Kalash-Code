@@ -7,13 +7,11 @@ Protected path checks implement I-010 (security-sensitive file protection).
 from __future__ import annotations
 
 import fnmatch
-import os
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
 from kalash.core.paths import temp_dir_for_session
-
 
 # ---------------------------------------------------------------------------
 # Sandbox modes
@@ -212,10 +210,7 @@ class SandboxPolicy:
             case NetworkPolicy.ALLOW_LISTED:
                 if host is None:
                     return bool(self.allowed_hosts)
-                return any(
-                    fnmatch.fnmatch(host, pattern)
-                    for pattern in self.allowed_hosts
-                )
+                return any(fnmatch.fnmatch(host, pattern) for pattern in self.allowed_hosts)
         return False
 
     # ------------------------------------------------------------------

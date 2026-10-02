@@ -1,13 +1,13 @@
 """Tests for the core layer."""
 
-import pytest
 from decimal import Decimal
 
-from kalash.core.ids import generate_id, timestamp_from_id
-from kalash.core.errors import KalashError, ToolError, ModelError
-from kalash.core.budget import Usage, Pricing, BudgetState, estimate_tokens
-from kalash.core.events import EventBus, Event, EventType
+import pytest
 
+from kalash.core.budget import BudgetState, Pricing, Usage, estimate_tokens
+from kalash.core.errors import KalashError, ModelError, ToolError
+from kalash.core.events import Event, EventBus, EventType
+from kalash.core.ids import generate_id, timestamp_from_id
 
 # --- ID generation ---
 
@@ -28,6 +28,7 @@ class TestIDs:
 
     def test_ids_are_sortable_by_time(self):
         import time
+
         id1 = generate_id()
         time.sleep(0.002)
         id2 = generate_id()
@@ -35,6 +36,7 @@ class TestIDs:
 
     def test_timestamp_extraction(self):
         import time
+
         before = time.time() - 0.01  # small tolerance
         uid = generate_id()
         after = time.time() + 0.01
