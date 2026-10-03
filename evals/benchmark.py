@@ -250,7 +250,9 @@ def main() -> int:
     parser.add_argument("--scripted", action="store_true")
     parser.add_argument("--provider", default="sarvam")
     parser.add_argument("--model", default="glm5.3")
-    parser.add_argument("--reasoning-effort", choices=["low", "high", "max"], default="max")
+    parser.add_argument(
+        "--reasoning-effort", choices=["auto", "low", "medium", "high", "max"], default="auto"
+    )
     parser.add_argument("--input-price", type=Decimal)
     parser.add_argument("--output-price", type=Decimal)
     parser.add_argument("--cache-hit-price", type=Decimal)

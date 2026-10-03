@@ -39,7 +39,7 @@ class SarvamProvider(OpenAICompatibleProvider):
         api_key: str | None = None,
         base_url: str = "https://api.sarvam.ai",
         max_tokens: int = 32_768,
-        reasoning_effort: str | None = "max",
+        reasoning_effort: str | None = "auto",
         pricing: Pricing | None = None,
     ) -> None:
         if model not in SARVAM_MODELS:
@@ -47,8 +47,22 @@ class SarvamProvider(OpenAICompatibleProvider):
                 f"Unknown Sarvam model {model!r}; choose one of {', '.join(SARVAM_MODELS)}"
             )
         profile = SARVAM_MODELS[model]
-        if reasoning_effort not in {None, "low", "high", "max"}:
-            raise ValueError("reasoning_effort must be low, high, max or None")
+        if reasoning_effort == "auto":
+            reasoning_effort = "high" if profile.version == "v1" else "max"
+        allowed_efforts = (
+            {None, "low", "medium", "high"}
+            if profile.version == "v1"
+            else {None, "low", "high", "max"}
+        )
+        if reasoning_effort not in allowed_efforts:
+            raise ValueError(
+                f"Sarvam {profile.version.upper()} does not support reasoning_effort={reasoning_effort!r}; "
+                + (
+                    "use low, medium, high or None"
+                    if profile.version == "v1"
+                    else "use low, high or max"
+                )
+            )
         if profile.version == "v2" and profile.reasoning and reasoning_effort is None:
             raise ValueError("Sarvam V2 reasoning models require low, high or max effort")
         super().__init__(

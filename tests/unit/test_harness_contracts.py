@@ -116,7 +116,7 @@ async def test_sarvam_reasoning_usage_tail_and_wire_roundtrip():
     )
     assert wire[0]["reasoning_content"] == "inspect source"
     assert wire[1]["tool_call_id"] == "call"
-    assert create.call_args.kwargs["reasoning_effort"] == "max"
+    assert create.call_args.kwargs["reasoning_effort"] == "high"
 
 
 async def test_sarvam_complete_preserves_sdk_reasoning_and_usage():
