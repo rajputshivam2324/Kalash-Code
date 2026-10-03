@@ -9,9 +9,11 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from collections.abc import Callable, Coroutine
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Any
+
+from kalash.core.privacy import scrub_metadata
 
 
 class EventType(StrEnum):
@@ -113,6 +115,7 @@ class EventBus:
         if not handlers:
             return
 
+        event = replace(event, data=scrub_metadata(event.data))
         tasks = [asyncio.create_task(_safe_call(h, event)) for h in handlers]
         if tasks:
             await asyncio.gather(*tasks)

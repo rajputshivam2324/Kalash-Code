@@ -309,7 +309,7 @@ async def test_child_inherits_tools_mode_extensions_and_accounts_usage(tmp_path)
     assert outcome["status"] == "completed"
     assert {tool["name"] for tool in provider.requests[0]["tools"]} == {"read"}
     assert "Mode: PLAN" in provider.requests[0]["system"]
-    assert "skills" not in provider.requests[0]["system"]
+    assert "<skills>" not in provider.requests[0]["system"]
     assert agent.budget.tokens_used == 110
     assert agent.budget.tokens_reserved == 0
     assert not agent.history

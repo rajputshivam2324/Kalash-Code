@@ -1,7 +1,4 @@
-"""SQLite connection management with WAL mode and single-writer queue.
-
-All writes serialize through one queue. Reads go wide via WAL.
-"""
+"""Owned SQLite connections; WAL snapshots and SQLite serialize mixed writers."""
 
 from __future__ import annotations
 
@@ -22,48 +19,80 @@ class StorageEngine:
 
     def __init__(self, db_path: Path | None = None) -> None:
         self._db_path = db_path or kalash_db_path()
-        self._write_lock = asyncio.Lock()
         self._conn: sqlite3.Connection | None = None
+        self._bootstrap_lock = threading.Lock()
+
+    def _new_connection(self) -> sqlite3.Connection:
+        conn = sqlite3.connect(
+            str(self._db_path), timeout=5.0, isolation_level=None, check_same_thread=False
+        )
+        try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            conn.execute("PRAGMA foreign_keys=ON")
+            conn.execute("PRAGMA synchronous=NORMAL")
+        except BaseException:
+            conn.close()
+            raise
+        return conn
 
     def _get_connection(self) -> sqlite3.Connection:
-        """Get or create the database connection."""
-        if self._conn is None:
-            self._conn = sqlite3.connect(
-                str(self._db_path),
-                timeout=5.0,  # busy_timeout equivalent
-                isolation_level=None,  # autocommit; we manage transactions explicitly
-                check_same_thread=False,  # We serialize writes via asyncio.Lock
-            )
-            self._conn.row_factory = sqlite3.Row
-            # WAL mode, foreign keys, synchronous=NORMAL (I-023)
-            self._conn.execute("PRAGMA journal_mode=WAL")
-            self._conn.execute("PRAGMA busy_timeout=5000")
-            self._conn.execute("PRAGMA foreign_keys=ON")
-            self._conn.execute("PRAGMA synchronous=NORMAL")
-        return self._conn
+        """Legacy bootstrap handle. Runtime operations own separate connections."""
+        with self._bootstrap_lock:
+            if self._conn is None:
+                self._conn = self._new_connection()
+            return self._conn
 
     @contextmanager
     def read(self) -> Iterator[sqlite3.Connection]:
-        """Get a connection for reading. Concurrent reads are fine with WAL."""
-        conn = self._get_connection()
-        yield conn
+        """Own a connection for the scope; never observe another caller's uncommitted data."""
+        conn = self._new_connection()
+        try:
+            yield conn
+        finally:
+            conn.close()
+
+    def _begin_write(self) -> sqlite3.Connection:
+        conn = self._new_connection()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+        except BaseException:
+            conn.close()
+            raise
+        return conn
 
     @asynccontextmanager
     async def write(self) -> AsyncIterator[sqlite3.Connection]:
-        """Get a connection for writing. Serialized via lock (I-023)."""
-        async with self._write_lock:
-            conn = self._get_connection()
-            conn.execute("BEGIN IMMEDIATE")
+        """Wait for SQLite's writer off the event loop, then own the transaction.
+
+        Cancellation while waiting must still close the eventual connection.
+        Cleanup may wait up to the SQLite busy timeout; no user SQL runs then.
+        """
+        opening = asyncio.create_task(asyncio.to_thread(self._begin_write))
+        try:
+            conn = await asyncio.shield(opening)
+        except asyncio.CancelledError:
+            while not opening.done():
+                try:
+                    await asyncio.shield(opening)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break  # _begin_write already closed its failed connection
+            if not opening.cancelled() and opening.exception() is None:
+                opening.result().close()  # closes and rolls back the empty transaction
+            raise
+        try:
             try:
                 yield conn
                 conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
                 raise
-
-    # Thread-level lock for synchronous callers (session manager, scheduler)
-    # that cannot await the async write lock.
-    _sync_lock: threading.Lock = threading.Lock()
+        finally:
+            conn.close()
 
     async def execute_write(self, sql: str, params: tuple[Any, ...] = ()) -> None:
         """Execute a single write statement."""
@@ -71,20 +100,23 @@ class StorageEngine:
             conn.execute(sql, params)
 
     def execute_write_sync(self, sql: str, params: tuple[Any, ...] = ()) -> None:
-        """Execute a single write statement synchronously with lock (A-1).
-
-        Safe to call from non-async code (SessionManager, SchedulerManager).
-        Uses a threading.Lock so it serialises even across threads.
-        """
-        with self._sync_lock:
-            conn = self._get_connection()
-            conn.execute("BEGIN IMMEDIATE")
+        """Synchronous writer; SQLite orders it with async writers on the same database."""
+        conn = self._begin_write()
+        try:
             try:
                 conn.execute(sql, params)
                 conn.execute("COMMIT")
-            except Exception:
-                conn.execute("ROLLBACK")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
                 raise
+        finally:
+            conn.close()
+
+    def execute_script(self, script: str) -> None:
+        """Run bootstrap DDL on an owned connection, outside managed transactions."""
+        with self.read() as conn:
+            conn.executescript(script)
 
     async def execute_many(self, sql: str, params_list: list[tuple[Any, ...]]) -> None:
         """Execute many write statements in a single transaction."""
@@ -107,10 +139,11 @@ class StorageEngine:
         await run_migrations(self)
 
     def close(self) -> None:
-        """Close the database connection."""
-        if self._conn:
-            self._conn.close()
-            self._conn = None
+        """Release the legacy bootstrap handle; managed scopes close themselves."""
+        with self._bootstrap_lock:
+            if self._conn:
+                self._conn.close()
+                self._conn = None
 
 
 # Global engine singleton

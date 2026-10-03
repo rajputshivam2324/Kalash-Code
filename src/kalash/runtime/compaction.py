@@ -7,8 +7,10 @@ from dataclasses import dataclass
 
 from kalash.core.budget import BudgetState
 from kalash.core.events import Event, EventBus, EventType
+from kalash.core.privacy import scrub_text
 from kalash.models.gateway import ModelGateway
 from kalash.models.normalize import Message, Role, TextBlock
+from kalash.runtime.evidence import receipt_tail, split_receipts
 from kalash.runtime.history import extractive_summary
 from kalash.runtime.request import request
 from kalash.storage.repositories.sessions import SessionRepository
@@ -40,6 +42,8 @@ class Compactor:
                 data={"message_count": len(messages)},
             )
         )
+        receipts = receipt_tail(messages, previous)
+        previous, _, _ = split_receipts(previous)
         # Reasoning blocks are deliberately excluded by extractive_summary.
         # Leave room for the summary prompt, framing and output in small windows.
         limit = min(80_000, max(1_000, (self.context_window - 4_096) * 2))
@@ -78,8 +82,13 @@ class Compactor:
             ):
                 summary = result.text_content.strip()
                 method = "semantic"
-        if len(summary) > 12_000:
-            summary = summary[:3_000] + "\n[observations omitted]\n" + summary[-8_900:]
+        # The model cannot supply runtime receipts, even by mimicking their delimiters.
+        summary = split_receipts(summary)[0]
+        room = 12_000 - len(receipts)
+        if len(summary) > room:
+            head = min(2_000, room // 3)
+            summary = summary[:head] + "\n[observations omitted]\n" + summary[-(room - head - 30) :]
+        summary = scrub_text(summary + receipts)
         if self.session_repo is not None:
             await self.session_repo.append_turn(
                 session_id=session_id,

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from kalash.core.budget import Usage
+from kalash.core.privacy import scrub_blocks
 from kalash.models.normalize import Message
 from kalash.runtime.serialize import serialize_blocks
 from kalash.storage.repositories.sessions import SessionRepository
@@ -22,7 +23,7 @@ class Transcript:
             await self.repository.append_turn(
                 session_id=self.session_id,
                 role=message.role.value,
-                content=serialize_blocks(message.content),
+                content=serialize_blocks(scrub_blocks(message.content)),
                 model=model,
                 token_count=usage.total_tokens if usage else None,
             )

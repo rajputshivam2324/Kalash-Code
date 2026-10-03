@@ -44,6 +44,7 @@ from typing import Any
 from kalash.core.budget import estimate_tokens
 from kalash.core.encode import fold_paths
 from kalash.core.paths import kalash_home
+from kalash.core.privacy import scrub_metadata, scrub_text
 from kalash.storage.blobs import compute_digest, read_blob, store_blob
 
 # Bodies at or below this size live in the index rather than the blob store.
@@ -192,6 +193,9 @@ class Scratchpad:
         """
         self._ensure_loaded()
 
+        body = scrub_text(body)
+        headline = scrub_text(headline)
+        metadata = scrub_metadata(metadata or {})
         payload = body.encode("utf-8")
         digest = compute_digest(payload)
         deferred = estimate_tokens(body)

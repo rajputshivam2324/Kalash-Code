@@ -55,6 +55,8 @@ _STATIC_RISK: dict[str, RiskClass] = {
     "search": RiskClass.READ,
     "list": RiskClass.READ,
     "expand": RiskClass.READ,
+    "skill": RiskClass.READ,
+    "tool_search": RiskClass.READ,
     "note": RiskClass.READ,
     "todo": RiskClass.READ,
     "recall": RiskClass.READ,

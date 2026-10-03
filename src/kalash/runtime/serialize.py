@@ -48,6 +48,7 @@ def _block_to_json(block: ContentBlock) -> dict[str, Any] | None:
                 "tool_use_id": block.tool_use_id,
                 "content": content,
                 "is_error": block.is_error,
+                "evidence": block.evidence,
             }
         case ThinkingBlock():
             return {"t": "thinking", "thinking": block.thinking, "signature": block.signature}
@@ -89,6 +90,7 @@ def _block_from_json(raw: dict[str, Any]) -> ContentBlock | None:
                     tool_use_id=str(raw["tool_use_id"]),
                     content=str(raw.get("content", "")),
                     is_error=bool(raw.get("is_error", False)),
+                    evidence=dict(raw.get("evidence") or {}),
                 )
             case "thinking":
                 return ThinkingBlock(

@@ -73,6 +73,7 @@ def trim_oversized_results(
                     tool_use_id=block.tool_use_id,
                     content=block.content[:max_chars] + f"\n[observation truncated. {hint}]",
                     is_error=block.is_error,
+                    evidence=block.evidence,
                 )
             blocks.append(block)
         result.append(Message(role=message.role, content=blocks))

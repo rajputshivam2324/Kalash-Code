@@ -5,11 +5,15 @@ Each migration is a numbered SQL file. No down-migrations.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import sqlite3
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
     from kalash.storage.engine import StorageEngine
 
 # Migration SQL statements in order
@@ -406,35 +410,55 @@ CREATE INDEX IF NOT EXISTS idx_kalash_grants_session
 ]
 
 
+def _statements(sql: str) -> Iterator[str]:
+    """Split trusted migration SQL without executescript's implicit commit."""
+    start = 0
+    for index, char in enumerate(sql):
+        if char == ";" and sqlite3.complete_statement(sql[start : index + 1]):
+            yield sql[start : index + 1]
+            start = index + 1
+    remainder = sql[start:].strip()
+    if remainder:
+        yield remainder
+
+
+def run_migrations_sync(engine: StorageEngine) -> None:
+    """Commit each migration and its receipt together, including competing callers."""
+    with engine.read() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL,
+                checksum TEXT NOT NULL
+            )
+        """)
+        for version, name, sql in MIGRATIONS:
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                applied = conn.execute(
+                    "SELECT version FROM schema_migrations WHERE version = ?", (version,)
+                ).fetchone()
+                if applied is None:
+                    for statement in _statements(sql):
+                        conn.execute(statement)
+                    conn.execute(
+                        "INSERT INTO schema_migrations "
+                        "(version, name, applied_at, checksum) VALUES (?, ?, ?, ?)",
+                        (
+                            version,
+                            name,
+                            datetime.now(UTC).isoformat(),
+                            hashlib.sha256(sql.encode()).hexdigest(),
+                        ),
+                    )
+                conn.execute("COMMIT")
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+
+
 async def run_migrations(engine: StorageEngine) -> None:
-    """Run all pending migrations."""
-
-    # Ensure migrations table exists (use raw connection for setup)
-    conn = engine._get_connection()
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-            version INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            applied_at TEXT NOT NULL,
-            checksum TEXT NOT NULL
-        )
-    """)
-
-    # Check current version
-    rows = engine.execute_read("SELECT MAX(version) as v FROM schema_migrations")
-    current_version = rows[0]["v"] if rows and rows[0]["v"] else 0
-
-    # Apply pending migrations (executescript manages its own transactions)
-    for version, name, sql in MIGRATIONS:
-        if version <= current_version:
-            continue
-
-        checksum = hashlib.sha256(sql.encode()).hexdigest()
-        now = datetime.now(UTC).isoformat()
-
-        # executescript commits implicitly, so we use it outside our transaction wrapper
-        conn.executescript(sql)
-        conn.execute(
-            "INSERT INTO schema_migrations (version, name, applied_at, checksum) VALUES (?, ?, ?, ?)",
-            (version, name, now, checksum),
-        )
+    """Keep SQLite's writer wait off the event loop during initialization."""
+    await asyncio.to_thread(run_migrations_sync, engine)

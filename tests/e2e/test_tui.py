@@ -563,6 +563,10 @@ class TestWebSearchIsAvailable:
     """
 
     async def test_small_model_still_gets_web_search(self, tui_env, monkeypatch):
+        from kalash.core.paths import kalash_home
+
+        kalash_home().mkdir(parents=True, exist_ok=True)
+        (kalash_home() / "settings.json").write_text('{"permissions":{"network":true}}')
         app = KalashApp()
         _connect(monkeypatch, app, [_text_turn("ok")])
         app.model_id = "openai/gpt-oss-20b"
@@ -577,6 +581,10 @@ class TestWebSearchIsAvailable:
         assert "fetch" in names
 
     async def test_tools_command_lists_web_search(self, tui_env, monkeypatch):
+        from kalash.core.paths import kalash_home
+
+        kalash_home().mkdir(parents=True, exist_ok=True)
+        (kalash_home() / "settings.json").write_text('{"permissions":{"network":true}}')
         app = KalashApp()
         _connect(monkeypatch, app, [_text_turn("ok")])
         app.model_id = "openai/gpt-oss-20b"
@@ -587,6 +595,17 @@ class TestWebSearchIsAvailable:
             lines = "\n".join(app._tool_lines())
 
         assert "web_search" in lines
+
+    @pytest.mark.usefixtures("tui_env")
+    async def test_network_disabled_hides_web_tools(self, monkeypatch):
+        app = KalashApp()
+        _connect(monkeypatch, app, [_text_turn("ok")])
+        async with app.run_test(size=(100, 30)) as pilot:
+            await pilot.pause()
+            agent = await app._ensure_agent()  # noqa: SLF001 -- verify the TUI lifecycle boundary
+            assert agent is not None
+            names = {schema["name"] for schema in agent.host.schemas()}
+            assert not {"web_search", "fetch"} & names
 
 
 class TestDiffsAppearInTheTranscript:

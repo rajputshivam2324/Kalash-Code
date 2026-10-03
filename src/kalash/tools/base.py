@@ -106,6 +106,9 @@ class ToolContext:
     config: KalashConfig | None = None
     """The owning agent's configuration, including memory policy."""
 
+    discover_tools: Callable[..., ToolEnvelope] | None = None
+    """Session-local, permission-filtered extension discovery; no execution."""
+
     @property
     def can_spawn(self) -> bool:
         """Whether this context is allowed to create another child."""

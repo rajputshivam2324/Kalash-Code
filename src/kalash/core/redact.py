@@ -1,4 +1,4 @@
-"""Secret and PII scrubbing — used before ANY egress.
+"""Secret and PII detection for configured observation and egress boundaries.
 
 Detection uses three signals:
 1. Pattern matching for known credential formats
@@ -17,7 +17,10 @@ import os
 import re
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 
 class RedactionProfile(StrEnum):
@@ -76,7 +79,10 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], SecretKind]] = [
     (re.compile(r"AIza[A-Za-z0-9\-_]{35}"), SecretKind.GENERIC_TOKEN),
     (re.compile(r"eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_]+"), SecretKind.JWT),
     (
-        re.compile(r"-----BEGIN\s(?:RSA\s|EC\s|DSA\s|ENCRYPTED\s)?PRIVATE KEY-----"),
+        re.compile(
+            r"-----BEGIN\s(?:RSA\s|EC\s|DSA\s|ENCRYPTED\s)?PRIVATE KEY-----"
+            r"[\s\S]*?(?:-----END\s(?:RSA\s|EC\s|DSA\s|ENCRYPTED\s)?PRIVATE KEY-----|$)"
+        ),
         SecretKind.PEM_PRIVATE_KEY,
     ),
     (
@@ -88,7 +94,7 @@ _SECRET_PATTERNS: list[tuple[re.Pattern[str], SecretKind]] = [
 # Context patterns (variable assignment to secret-looking names)
 _CONTEXT_PATTERN = re.compile(
     r"(?i)(?:secret|token|password|passwd|api[_\-]?key|credential|auth|bearer|private[_\-]?key)"
-    r"\s*[=:]\s*['\"]?([^\s'\"]{8,})['\"]?"
+    r"['\"]?\s*[=:]\s*['\"]?([^\s'\",}]{8,})['\"]?"
 )
 
 # PII patterns
@@ -127,7 +133,12 @@ def _shannon_entropy(text: str) -> float:
     return -sum((c / length) * math.log2(c / length) for c in freq.values())
 
 
-def redact(text: str, profile: RedactionProfile = RedactionProfile.SECRETS) -> RedactionResult:
+def redact(
+    text: str,
+    profile: RedactionProfile = RedactionProfile.SECRETS,
+    *,
+    known_secrets: Iterable[str] = (),
+) -> RedactionResult:
     """Redact secrets and optionally PII from text.
 
     Args:
@@ -145,6 +156,12 @@ def redact(text: str, profile: RedactionProfile = RedactionProfile.SECRETS) -> R
 
     result = text
     redactions: list[dict[str, Any]] = []
+
+    # Longest first prevents a shorter credential exposing another's suffix.
+    for secret in sorted(set(known_secrets), key=len, reverse=True):
+        if secret and secret in result and not secret.startswith("[REDACTED:"):
+            result = result.replace(secret, _make_marker("known_secret", secret))
+            redactions.append({"kind": "known_secret"})
 
     # Pattern-based detection (high confidence)
     for pattern, kind in _SECRET_PATTERNS:

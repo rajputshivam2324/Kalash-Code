@@ -229,7 +229,7 @@ class TestSkills:
 
         assert env.ok
         assert "alpha" in env.content and "beta" in env.content
-        assert env.metadata["count"] == 2
+        assert env.metadata["count"] == 14
 
     @pytest.mark.asyncio
     async def test_unknown_skill_lists_alternatives(self, workspace):
@@ -243,13 +243,14 @@ class TestSkills:
         assert "alpha" in env.error.message
 
     @pytest.mark.asyncio
-    async def test_no_skills_installed_is_not_an_error(self, workspace):
+    async def test_bundled_skills_available_without_user_installation(self, workspace):
         from kalash.tools.skill import SkillParams, SkillTool
 
         ctx = ToolContext(session_id="s", run_id="r", cwd=workspace)
         env = await SkillTool().execute(SkillParams(), ctx)
         assert env.ok
-        assert env.metadata["count"] == 0
+        assert env.metadata["count"] == 12
+        assert "pdf" in env.content
 
 
 # --- sandbox ---------------------------------------------------------------

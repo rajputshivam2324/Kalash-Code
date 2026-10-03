@@ -78,6 +78,13 @@ class ToolRegistry:
         """Check if a tool is registered."""
         return name in self._tools
 
+    def source(self, name: str) -> str:
+        """Source of the resolved registration, including name collisions."""
+        entries = self._tools.get(name)
+        if not entries:
+            raise KeyError(f"Unknown tool: '{name}'")
+        return entries[0][0]
+
     def list_tools(self, *, source: str | None = None) -> list[Tool]:
         """List all registered tools, optionally filtered by source.
 

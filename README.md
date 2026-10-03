@@ -42,6 +42,8 @@ See [Sarvam's model contract](https://docs.sarvam.ai/api/getting-started/models/
 - Plan mode and child capability/tool restrictions are enforced during dispatch.
 - Shell commands require a working OS sandbox unless full access is explicitly
   configured. Subprocess environments exclude API keys by default.
+- Each settled tool result is saved before the next dependent write starts.
+  SQLite operations own their transaction connections.
 - Interrupted tool calls retain their intent and receive an unknown-outcome
   result on resume. Inspect the workspace before retrying a mutation.
 
@@ -54,15 +56,24 @@ loaded before the first change under a subdirectory.
 
 Skills are folders containing `SKILL.md` with YAML `name` and `description`.
 Only metadata loads initially; the `skill` tool loads a body and optional bounded
-references. Project definitions override user definitions, which override plugins.
+references. Project definitions override user definitions, then plugins, then
+the 12 bundled workflow skills. Bodies and individual resources load on demand.
 Loaded skill bodies and scoped guidance survive history compaction.
+
+Extension tools are discovered with `tool_search`; only selected MCP/plugin
+schemas enter requests. Optional artifact workflows cover PDF, DOCX, XLSX, PPTX,
+images, archives and structured data. See [capability support and loading](docs/CAPABILITIES.md)
+for the execution paths, installation commands and format limits.
 
 Context assembly keeps identity, catalog and root guidance stable. Environment
 and bounded memory are labeled separately from conversation. Near the actual
 model window, the runtime summarizes complete older exchanges with a charged
 model request and a labeled extractive fallback. User instructions remain
 verbatim; recent tool exchanges stay paired. Oversized observations can be
-retrieved through `expand`.
+retrieved through `expand`. Runtime command/file receipts survive summaries as
+bounded structured facts; ordinary observations are scrubbed before retention
+and outgoing requests. See [the design and acceptance gates](docs/HARNESS_DESIGN.md)
+for remaining security, context and evaluation work.
 
 ## Memory
 

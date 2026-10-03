@@ -1,6 +1,6 @@
 """SKILL.md discovery and loading with progressive disclosure.
 
-Discovery order: ~/.kalash/skills/ → .kalash/skills/ → plugin-provided.
+Precedence: project → user → plugin → bundled.
 Only name+description in context initially; body loads on invocation;
 references/ load only when body directs.
 """
@@ -38,7 +38,7 @@ class SkillEntry:
 
     metadata: SkillMetadata
     path: Path
-    source: str  # "user" | "project" | "plugin"
+    source: str  # "builtin" | "user" | "project" | "plugin"
 
     # Lazy-loaded content
     _body: str | None = None
@@ -59,9 +59,7 @@ class SkillLoader:
     """Discovers and loads SKILL.md files with progressive disclosure.
 
     Skills are discovered from multiple locations with precedence:
-    1. ~/.kalash/skills/ (user-level)
-    2. .kalash/skills/ (project-level)
-    3. Plugin-provided paths
+    Project overrides user, then plugin, then packaged built-in definitions.
     """
 
     def __init__(self, project_dir: Path | None = None) -> None:
@@ -90,11 +88,11 @@ class SkillLoader:
         """
         self._loaded.clear()
 
-        # Project definitions override user definitions; plugins have lowest priority.
+        # Project definitions override user definitions, then plugins, then bundled.
         # Later discoveries with same name override earlier ones
-        sources: list[tuple[Path, str]] = []
+        sources: list[tuple[Path, str]] = [(Path(__file__).parent / "bundled", "builtin")]
 
-        # Plugin-provided (lowest priority)
+        # Plugin-provided definitions override bundled defaults.
         for plugin_dir in self._plugin_dirs:
             sources.append((plugin_dir, "plugin"))
 
@@ -162,6 +160,45 @@ class SkillLoader:
 
         entry._references = references
         return references
+
+    def list_resources(self, skill_name: str) -> list[str]:
+        """List resource paths without loading their contents."""
+        entry = self._loaded.get(skill_name)
+        if entry is None:
+            return []
+        root = entry.path.parent.resolve()
+        resources = []
+        for folder in ("references", "scripts", "assets"):
+            for path in sorted((root / folder).glob("**/*")):
+                if path.is_file() and path.resolve().is_relative_to(root):
+                    resources.append(path.relative_to(root).as_posix())
+                    if len(resources) >= 100:
+                        return resources
+        return resources
+
+    def read_resource(
+        self, skill_name: str, resource: str, *, offset: int = 0, limit: int = 20_000
+    ) -> tuple[str, bool]:
+        """Read a bounded text range inside a skill; reject traversal and symlinks out."""
+        entry = self._loaded.get(skill_name)
+        if entry is None:
+            raise ValueError(f"Unknown skill: {skill_name}")
+        root = entry.path.parent.resolve()
+        relative = Path(resource)
+        path = (root / relative).resolve()
+        if (
+            relative.is_absolute()
+            or not relative.parts
+            or relative.parts[0] not in {"references", "scripts", "assets"}
+            or not path.is_relative_to(root)
+        ):
+            raise ValueError("Resource must stay inside this skill's references/scripts/assets")
+        if offset < 0 or offset > 1_000_000 or not 1 <= limit <= 20_000:
+            raise ValueError("Resource range exceeds limits")
+        with path.open(encoding="utf-8") as stream:
+            stream.read(offset)
+            content = stream.read(limit + 1)
+        return content[:limit], len(content) > limit
 
     def get_entry(self, skill_name: str) -> SkillEntry | None:
         """Get a skill entry by name."""

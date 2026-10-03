@@ -55,12 +55,12 @@ remain bounds on execution; they are separate from provider throughput policy.
 | Area | Current boundary and outstanding concern |
 | --- | --- |
 | core/config | Value types and supplied configuration. Removed unused concurrency setting. Configured model fallback is not wired into Agent construction. |
-| runtime | One loop and delegation path. Unknown effects are retained on interruption without replaying mutations. Durable event reduction and crash/replay equivalence remain unproved. |
+| runtime | One loop and delegation path. Unknown effects are retained on interruption without replaying mutations. Per-tool receipts and abrupt-exit recovery have regression coverage; durable event reduction remains unimplemented. |
 | models | Sarvam V1/V2 wire tests, max reasoning and 32,768 output default. Static capabilities/prices for other providers need validation. Unknown compatible pricing is zero, making dollar ceilings unreliable there. |
 | tools | Dedicated file tools, errors/timeouts and bounded model observations. Scratchpad cache/index and regex searches still need hostile-input resource limits. |
 | permissions/sandbox | Fail-closed shell execution and restricted environment. Shell classification remains heuristic; readable host credentials and extension authority still need adversarial proof. |
 | memory | SQLite FTS and configured provider protocol. Configuration-aware service caching has no eviction/refcount lifecycle for long-lived multi-project services. No vector/graph quality claim. |
-| storage | Atomic transcripts and compatible migrations. Mixed sync/async connection access needs a concurrency proof. No exactly-once external-effect claim. |
+| storage | Atomic transcripts and compatible migrations. Mixed sync/async writers now own connections; isolation, cancellation and migration rollback have regression tests. No exactly-once external-effect claim. |
 | agents/skills | Proper discovery and progressive loading. Delegated named agents inherit the parent model; explicit model overrides use standalone execution. |
 | hooks/MCP | Optional, configurable, hash-trusted extensions with cleanup. They execute with host authority rather than tool sandbox authority. OAuth automation is explicitly unavailable. SSE needs real-server interoperability coverage. |
 | scheduler | Configured budgets/permissions and honest termination. Multi-worker service isolation is outside the tested local boundary. |
@@ -115,3 +115,18 @@ Benchmarking remains paused. No performance benchmark was executed during this
 restructuring verification. Sarvam's
 [GLM-5.3 contract](https://docs.sarvam.ai/api/getting-started/models/openweight/glm-5-3)
 documents the selected model's separate access and API requirements.
+
+## Recovery hardening update (2026-10-02)
+
+Owned SQLite connections replace runtime shared-connection access; synchronous
+and asynchronous migrations now use one atomic implementation. Each settled tool
+result is persisted before the next dependent write, and failed read receipts
+cancel/join siblings. Abrupt subprocess-exit tests cover before effects, after an
+effect without a receipt, and after the first receipt of a two-call batch.
+
+Observation, scratchpad, transcript, request and event boundaries apply secret
+scrubbing. Runtime receipts preserve built-in command exit codes and file facts
+outside semantic summaries. See [HARNESS_DESIGN.md](HARNESS_DESIGN.md) for precise
+limits: opaque provider blocks, split streaming chunks, credential-file admission,
+host extensions, power-loss durability and independent completion verification
+remain unresolved. The update does not establish public benchmark performance.

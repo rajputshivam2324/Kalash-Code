@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from kalash.tools.base import Tool
+from kalash.tools.discovery import ToolSearchTool
 from kalash.tools.fs import (
     EditTool,
     GlobTool,
@@ -48,6 +49,7 @@ def core_tools() -> list[Tool]:
         ExpandTool(),
         # Extensibility
         SkillTool(),
+        ToolSearchTool(),
     ]
 
 

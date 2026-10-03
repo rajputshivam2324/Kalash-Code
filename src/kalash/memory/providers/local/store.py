@@ -79,8 +79,7 @@ class LocalProvider:
         # executescript() issues implicit commits, which breaks the engine's
         # explicit BEGIN/COMMIT wrapper — run DDL on the raw connection instead.
         def _init_schema() -> None:
-            conn = self._engine._get_connection()  # noqa: SLF001
-            conn.executescript(SCHEMA_DDL)
+            self._engine.execute_script(SCHEMA_DDL)
 
         await asyncio.to_thread(_init_schema)
 

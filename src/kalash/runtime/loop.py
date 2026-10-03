@@ -28,6 +28,7 @@ from kalash.models.normalize import (
     ToolUseBlock,
 )
 from kalash.storage.repositories.sessions import SessionRepository
+from kalash.tools.schema import schema_tokens
 
 from .compaction import COMPACTION_THRESHOLD, Compactor
 from .context import ContextAssembler
@@ -128,6 +129,7 @@ class AgentLoop:
             self.session_id,
             self._cancel_event,
             self.read_concurrency,
+            settle=self._settle_tool_result,
         )
         self._transcript = Transcript(self.session_repo, self.session_id)
 
@@ -223,6 +225,9 @@ class AgentLoop:
         # Seed conversation with the user message
         self._conversation = list(recent_turns or [])
         self._conversation.append(user_message)
+        restore_tools = getattr(self.tool_registry, "restore_tools", None)
+        if restore_tools is not None:
+            restore_tools(self._conversation)
 
         if self.hooks:
             from kalash.hooks.events import HookEvent, SessionStartPayload
@@ -331,14 +336,7 @@ class AgentLoop:
                         final=stream_result.text_content,
                     )
 
-                tool_results = await self._tools_until_cancelled(stream_result.tool_calls)
-
-                tool_result_msg = Message(
-                    role=Role.USER,
-                    content=tool_results,
-                )
-                self._conversation.append(tool_result_msg)
-                await self._persist_tool_results(tool_result_msg)
+                await self._tools_until_cancelled(stream_result.tool_calls)
 
                 if self._cancelled:
                     return await self._finish(TerminationReason.USER_INTERRUPT)
@@ -485,6 +483,8 @@ class AgentLoop:
                 data={
                     "iteration": self._iteration,
                     "react_step": self._iteration,
+                    "tool_schema_count": len(tools),
+                    "tool_schema_tokens_estimate": schema_tokens(tools),
                     "prompt_tokens": prompt_tokens,
                     "context_window": self.assembler.context_window,
                     "fill_ratio": round(prompt_tokens / max(self.assembler.context_window, 1), 3),
@@ -639,6 +639,20 @@ class AgentLoop:
 
     async def persist_user_message(self, message: Message) -> None:
         await self._transcript.append(message)
+
+    async def _settle_tool_result(self, result: ToolResultBlock) -> None:
+        """Make the receipt durable before permitting another dependent effect."""
+        message = Message(role=Role.USER, content=[result])
+        await self._persist_tool_results(message)
+        # Keep one protocol turn even when concurrent reads settle out of order.
+        if (
+            self._conversation
+            and self._conversation[-1].role == Role.USER
+            and all(isinstance(b, ToolResultBlock) for b in self._conversation[-1].content)
+        ):
+            self._conversation[-1].content.append(result)
+        else:
+            self._conversation.append(message)
 
     async def _persist_tool_results(self, message: Message) -> None:
         await self._transcript.append(message)

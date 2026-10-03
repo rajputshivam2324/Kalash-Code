@@ -43,16 +43,9 @@ class SchedulerManager:
         self._ensure_schema()
 
     def _ensure_schema(self) -> None:
-        from kalash.storage.migrations import MIGRATIONS
+        from kalash.storage.migrations import run_migrations_sync
 
-        rows = self._engine.execute_read(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='schedules'"
-        )
-        if rows:
-            return
-        for _version, _name, sql in MIGRATIONS:
-            conn = self._engine._get_connection()
-            conn.executescript(sql)
+        run_migrations_sync(self._engine)
 
     def add(
         self,

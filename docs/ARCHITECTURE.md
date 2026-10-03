@@ -25,8 +25,8 @@ own wire formats; tools own local operations. Permission checks precede effects.
 | Tools | `runtime/execution.py`, `toolhost.py`, `tools/registry.py` | Ordered batches, gates, capability checks and timeouts |
 | Static prompt | `runtime/prompt.py` | Identity, workflow and build/plan behavior |
 | Guidance | `runtime/instructions.py` | Hierarchical discovery, sources and scoped loading |
-| Context | `runtime/context.py`, `history.py`, `compaction.py` | Stable prefix, token estimate, closed batches and summaries |
-| Persistence | `runtime/transcript.py`, `serialize.py`, `storage/` | Atomic turn recording and unknown-outcome recovery |
+| Context | `runtime/context.py`, `history.py`, `compaction.py`, `evidence.py` | Stable prefix, token estimate, closed batches and summaries |
+| Persistence | `runtime/transcript.py`, `serialize.py`, `storage/` | Intent recording, per-tool receipts and unknown-outcome recovery |
 | Delegation | `runtime/delegation.py`, `tools/task.py`, `agents/loader.py` | Fresh child context, restricted tools and charged usage |
 | Skills | `skills/loader.py`, `tools/skill.py`, `core/frontmatter.py` | Metadata, on-demand bodies and bounded references |
 | Filesystem | `tools/fs/{read,write,edit,listing,common}.py` | File operations, unique edits, digests and path checks |
@@ -50,7 +50,14 @@ own wire formats; tools own local operations. Permission checks precede effects.
    are late user messages. They cannot grant runtime permissions.
 
 Tool schemas use the API tools field; they are not repeated as prose in the
-system prompt. Runtime budgets do not decide which instructions to omit.
+system prompt. Core schemas are immediate; selected plugin/MCP schemas append
+after `tool_search` discovery and persist through compaction. Discovery is
+filtered by capabilities, mode and network policy; it does not grant permissions.
+Runtime budgets do not decide which instructions to omit.
+
+The 12 bundled workflow skills load metadata first, then bodies and individual
+resources. Optional artifact inspection runs as `python -m kalash.artifacts`
+through the existing shell sandbox. See [capability support](CAPABILITIES.md).
 
 ## Child ownership
 
@@ -79,3 +86,16 @@ Token counts are conservative character estimates rather than model tokenizers.
 A transcript provides interruption recovery, not full event replay or exactly-once
 external effects. Trusted hooks/MCP are host extensions; they are disabled in the
 hermetic evaluation profile. See the review for the proof still needed.
+
+## Recovery and evidence
+
+Tool intents are persisted before effects; each settled result is persisted before
+another dependent write. Failed receipt storage stops the batch and joins read
+siblings. Runtime SQLite paths own separate connections and migrations atomically
+commit DDL with their receipts. Unknown effects remain unknown on recovery.
+
+Built-in command/file receipts survive trimming and compaction separately from
+model-written summaries. Ordinary observation text is scrubbed before deferral,
+transcript storage and requests; event subscribers receive scrubbed copies. These
+are tested boundaries, not a complete DLP or exactly-once effect guarantee. See
+[the harness design and gates](HARNESS_DESIGN.md) for limits and priorities.

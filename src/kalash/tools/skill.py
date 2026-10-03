@@ -21,6 +21,9 @@ class SkillParams(BaseModel):
         default=False,
         description="Also load the skill's bundled reference files.",
     )
+    resource: str = Field(default="", description="One relative resource path to read on demand")
+    offset: int = Field(default=0, ge=0, le=1_000_000, description="Resource character offset")
+    limit: int = Field(default=20_000, ge=1, le=20_000, description="Max resource characters")
 
 
 class SkillTool:
@@ -87,6 +90,19 @@ class SkillTool:
         assert isinstance(args, SkillParams)
         loader = self._get_loader(ctx)
 
+        if args.resource:
+            try:
+                content, more = loader.read_resource(
+                    args.name, args.resource, offset=args.offset, limit=args.limit
+                )
+            except (OSError, UnicodeError, ValueError) as exc:
+                return ToolEnvelope.fail("KALASH_TOOL_ERROR", str(exc), recoverable=True)
+            suffix = (f"\n[more: offset={args.offset + len(content)}]") if more else ""
+            return ToolEnvelope.success(
+                content=f"# resource: {args.name}/{args.resource}\n{content}{suffix}",
+                metadata={"skill": args.name, "resource": args.resource, "more": more},
+            )
+
         if not args.name.strip():
             names = loader.list_names()
             if not names:
@@ -123,6 +139,16 @@ class SkillTool:
                 parts.append(f"## reference: {filename}\n{clipped}{suffix}")
 
         entry = loader.get_entry(args.name)
+        if entry is not None:
+            parts.append(f"Skill directory: {entry.path.parent.resolve()}")
+        resources = loader.list_resources(args.name)
+        if resources:
+            parts.append(
+                "Available resources (contents not loaded):\n"
+                + "\n".join(f"- {path}" for path in resources)
+                + "\nRead one with skill(name=..., resource=..., offset=..., limit=...). "
+                "Scripts execute only through shell under the normal permissions."
+            )
         return ToolEnvelope.success(
             content="\n\n".join(parts),
             metadata={

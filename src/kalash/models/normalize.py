@@ -65,6 +65,8 @@ class ToolResultBlock:
     tool_use_id: str
     content: str | list[ContentBlock]
     is_error: bool = False
+    evidence: dict[str, Any] = field(default_factory=dict)
+    """Runtime receipts; not provider-authored content or wire arguments."""
     type: str = field(default="tool_result", init=False)
 
 

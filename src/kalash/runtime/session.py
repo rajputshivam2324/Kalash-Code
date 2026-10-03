@@ -47,34 +47,9 @@ class SessionManager:
     @staticmethod
     def _run_migrations_sync(engine: StorageEngine) -> None:
         """Apply pending schema migrations synchronously."""
-        import hashlib
-        from datetime import datetime
+        from kalash.storage.migrations import run_migrations_sync
 
-        from kalash.storage.migrations import MIGRATIONS
-
-        conn = engine._get_connection()
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-                version INTEGER PRIMARY KEY,
-                name TEXT NOT NULL,
-                applied_at TEXT NOT NULL,
-                checksum TEXT NOT NULL
-            )
-            """
-        )
-        row = conn.execute("SELECT MAX(version) as v FROM schema_migrations").fetchone()
-        current_version = int(row["v"]) if row and row["v"] is not None else 0
-        now = datetime.now(UTC).isoformat()
-        for version, name, sql in MIGRATIONS:
-            if version <= current_version:
-                continue
-            conn.executescript(sql)
-            checksum = hashlib.sha256(sql.encode()).hexdigest()
-            conn.execute(
-                "INSERT INTO schema_migrations (version, name, applied_at, checksum) VALUES (?, ?, ?, ?)",
-                (version, name, now, checksum),
-            )
+        run_migrations_sync(engine)
 
     def _get_repo(self) -> SessionRepository:
         """Get the session repository."""

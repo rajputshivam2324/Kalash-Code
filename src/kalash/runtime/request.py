@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Any
 
 from kalash.core.budget import BudgetState, Usage
+from kalash.core.privacy import scrub_messages, scrub_metadata, scrub_text
 from kalash.models.gateway import ModelGateway
 from kalash.models.normalize import Message, StreamError
 from kalash.runtime.history import estimate_request_tokens
@@ -26,6 +27,9 @@ async def request(
     on_text_delta: Any | None,
 ) -> StreamResult:
     """Reserve an output allowance before sending; close every stream on exit."""
+    messages = scrub_messages(messages)
+    system = scrub_text(system)
+    tools = [scrub_metadata(tool) for tool in tools] if tools is not None else None
     handler = StreamHandler(on_text_delta=on_text_delta)
     prompt_tokens = estimate_request_tokens(system, messages, tools or [])
     output = min(max_output_tokens, budget.remaining_tokens() - prompt_tokens)

@@ -1,5 +1,11 @@
 # Repository Guidelines
 
+## Session Continuity
+
+Before continuing harness work, read [NEXT_SESSION.md](NEXT_SESSION.md) for the
+completed refactor, verified results, remaining priorities and benchmark pause.
+Check the current working tree before relying on its recorded baseline.
+
 ## Project Structure & Module Organization
 
 Application code lives in `src/kalash/`. The CLI and terminal UI are in `cli/` and `tui/`; agent execution, models, tools, permissions, memory, and storage have their own packages. Put new behavior in the relevant package rather than growing CLI entry points. Tests live in `tests/unit/`, `tests/integration/`, and `tests/e2e/`; shared fixtures belong in `tests/conftest.py`. Evaluation scripts and fixtures are under `evals/`. Project agent definitions and skills live in `.kalash/agents/` and `.kalash/skills/`.

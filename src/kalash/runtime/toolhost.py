@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import re
 import shlex
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol
 
 from kalash.core.config import KalashConfig
 from kalash.core.events import Event, EventBus, EventType
+from kalash.core.privacy import scrub_metadata, scrub_text
 from kalash.models.limits import supports_tools
+from kalash.models.normalize import Message, ToolResultBlock, ToolUseBlock
 from kalash.permissions.classify import ToolRisk, classify_tool_call
 from kalash.permissions.policy import (
     Decision,
@@ -25,7 +29,7 @@ from kalash.permissions.policy import (
 from kalash.permissions.prompt import ApprovalPrompt, ApprovalResponse, PromptContext
 from kalash.runtime.instructions import InstructionLoader
 from kalash.runtime.scratchpad import get_scratchpad
-from kalash.tools.base import SideEffect, ToolContext, ToolEnvelope
+from kalash.tools.base import SideEffect, Tool, ToolContext, ToolEnvelope
 from kalash.tools.registry import ToolRegistry
 from kalash.tools.schema import tool_schema
 
@@ -44,6 +48,7 @@ class ToolCategory(StrEnum):
 class ToolExecutionResult:
     content: str
     is_error: bool = False
+    evidence: dict[str, Any] = field(default_factory=dict)
 
 
 class ToolHostProtocol(Protocol):
@@ -235,6 +240,7 @@ class ToolHost:
     capability_limit: frozenset[str] | None = None
     instruction_loader: InstructionLoader | None = None
     loaded_skills: dict[str, str] = field(default_factory=dict, init=False)
+    loaded_tools: list[str] = field(default_factory=list, init=False)
     config: KalashConfig | None = None
 
     # Session grants earned from "allow session"/"allow always" answers. Also
@@ -272,20 +278,147 @@ class ToolHost:
             hooks=self.hooks,
             delegate=self.delegate,
             config=self.config,
+            discover_tools=self.discover_tools,
         )
 
     # -- loop-facing interface ----------------------------------------------
 
     def schemas(self) -> list[dict[str, Any]]:
-        """Expose the complete permitted tool set, stable across turns."""
+        """Core schemas followed by extensions in activation order.
+
+        Discovery changes the schema prefix once; subsequent requests keep it
+        stable. Compaction never evicts activated tools.
+        """
         if not supports_tools(self.model_id):
             return []
+        tools = self._permitted_tools()
+        core = [tool for tool in tools if self.registry.source(tool.name) == "builtin"]
+        extensions = {
+            tool.name: tool for tool in tools if self.registry.source(tool.name) != "builtin"
+        }
+        return [tool_schema(tool) for tool in core] + [
+            tool_schema(extensions[name]) for name in self.loaded_tools if name in extensions
+        ]
+
+    def _permitted_tools(self) -> list[Tool]:
         return [
-            tool_schema(tool)
+            tool
             for tool in self.registry.list_tools()
             if not (self.mode == "plan" and tool.side_effect in (SideEffect.WRITE, SideEffect.EXEC))
             and tool.capabilities <= self.capabilities
+            and (
+                self.network_enabled
+                or not any(cap.startswith("network.") for cap in tool.capabilities)
+            )
         ]
+
+    def discover_tools(
+        self, *, query: str = "", names: list[str] | None = None, limit: int = 5, offset: int = 0
+    ) -> ToolEnvelope:
+        """Search metadata, then load only selected schemas. Never widen policy."""
+        available = {
+            tool.name: tool
+            for tool in self._permitted_tools()
+            if self.registry.source(tool.name) != "builtin"
+        }
+        selected = names or []
+        if selected and any(name not in available for name in selected):
+            return ToolEnvelope.fail(
+                "KALASH_TOOL_UNKNOWN",
+                "A requested extension is unavailable under current policy",
+                recoverable=True,
+            )
+        words = set(re.findall(r"[\w]+", query.casefold()))
+        if words and not selected:
+            ranked = []
+            for name, tool in available.items():
+                title = name.casefold()
+                description = tool.description.casefold()
+                score = sum(
+                    3 if word in title else 1
+                    for word in words
+                    if word in title or word in description
+                )
+                if score:
+                    ranked.append((-score, name))
+            selected = [name for _, name in sorted(ranked)[:limit]]
+        loading = bool(names or words)
+        if not loading:
+            selected = sorted(available)[offset : offset + limit]
+        selected = list(dict.fromkeys(selected))[:limit]
+        if loading:
+            for name in selected:
+                if name not in self.loaded_tools:
+                    self.loaded_tools.append(name)
+        payload = {
+            "catalog_size": len(available),
+            "loaded": selected if loading else [],
+            "tools": [
+                {
+                    "name": name,
+                    "description": available[name].description[:512],
+                    "source": self.registry.source(name),
+                }
+                for name in selected
+            ],
+            "next_offset": offset + len(selected)
+            if not loading and offset + len(selected) < len(available)
+            else None,
+        }
+        # Full schemas travel in the next API tools field, not twice in context.
+        return ToolEnvelope.success(json.dumps(payload, ensure_ascii=False), metadata=payload)
+
+    def restore_tools(self, history: list[Message]) -> None:
+        """Restore activation from recorded successful searches and prior calls.
+
+        This only restores availability; effects and discovery calls are never replayed.
+        Current policy and the current registry remain authoritative.
+        """
+        searches: set[str] = set()
+        skills: dict[str, str] = {}
+        for message in history:
+            for block in message.content:
+                if isinstance(block, ToolUseBlock):
+                    if block.name == "tool_search":
+                        searches.add(block.id)
+                    elif block.name == "skill" and not block.input.get("resource"):
+                        name = block.input.get("name")
+                        if isinstance(name, str) and name:
+                            skills[block.id] = name
+                    elif (
+                        self.registry.has(block.name)
+                        and self.registry.source(block.name) != "builtin"
+                        and block.name not in self.loaded_tools
+                    ):
+                        self.loaded_tools.append(block.name)
+                elif (
+                    isinstance(block, ToolResultBlock)
+                    and not block.is_error
+                    and block.tool_use_id in skills
+                    and isinstance(block.content, str)
+                    and block.content.startswith(f"# skill: {skills[block.tool_use_id]}\n")
+                ):
+                    self.loaded_skills[skills[block.tool_use_id]] = block.content
+                elif (
+                    isinstance(block, ToolResultBlock)
+                    and not block.is_error
+                    and block.tool_use_id in searches
+                    and isinstance(block.content, str)
+                ):
+                    try:
+                        payload = json.loads(block.content)
+                    except (ValueError, TypeError):
+                        continue
+                    if not isinstance(payload, dict) or not isinstance(payload.get("loaded"), list):
+                        continue
+                    for name in payload["loaded"]:
+                        if (
+                            isinstance(name, str)
+                            and self.registry.has(name)
+                            and self.registry.source(name) != "builtin"
+                            and name not in self.loaded_tools
+                        ):
+                            self.loaded_tools.append(name)
 
     def category(self, name: str) -> ToolCategory:
         """Concurrency class, derived from the tool's declared side effect."""
@@ -384,16 +517,50 @@ class ToolHost:
 
         start_time = time.monotonic()
         envelope = await self.registry.dispatch(name, arguments, context)
-        if name == "skill" and envelope.ok and envelope.metadata.get("skill"):
-            self.loaded_skills[str(envelope.metadata["skill"])] = envelope.content
+        envelope = replace(
+            envelope,
+            content=scrub_text(envelope.content),
+            metadata=scrub_metadata(envelope.metadata),
+            error=replace(
+                envelope.error,
+                message=scrub_text(envelope.error.message),
+                remediation=scrub_text(envelope.error.remediation),
+            )
+            if envelope.error is not None
+            else None,
+        )
         duration_ms = int((time.monotonic() - start_time) * 1000)
         rendered = self._render(name, envelope, risk)
         # Apply the tool contract even to third-party tools and error bodies.
         limit = min(max(tool.max_output_bytes, 1024), 65536) if tool else 65536
         rendered = self._bound_observation(name, rendered, limit)
+        if (
+            name == "skill"
+            and envelope.ok
+            and envelope.metadata.get("skill")
+            and not arguments.get("resource")
+        ):
+            self.loaded_skills[str(envelope.metadata["skill"])] = rendered
         await self._publish_result(name, tool_use_id, envelope, duration_ms=duration_ms)
         await self._run_post_hooks(name, arguments, envelope)
-        return ToolExecutionResult(rendered, is_error=not envelope.ok)
+        evidence: dict[str, Any] = {}
+        if (
+            tool is not None
+            and self.registry.source(name) == "builtin"
+            and name
+            in {
+                "shell",
+                "write",
+                "edit",
+                "multi_edit",
+            }
+        ):
+            evidence = {"tool": name, "ok": envelope.ok}
+            for key in ("command", "cwd", "exit_code", "path", "content_digest", "operation"):
+                if key in envelope.metadata:
+                    value = envelope.metadata[key]
+                    evidence[key] = value[:2048] if isinstance(value, str) else value
+        return ToolExecutionResult(rendered, is_error=not envelope.ok, evidence=evidence)
 
     async def _publish_result(
         self, name: str, tool_use_id: str, envelope: ToolEnvelope, *, duration_ms: int = 0
