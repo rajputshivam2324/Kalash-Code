@@ -1,0 +1,71 @@
+{
+  "verified_on": "2026-10-07",
+  "python": "3.12.12",
+  "pytest": {
+    "name": "pytest",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "840",
+    "time": "54.781",
+    "timestamp": "2026-10-07T18:34:05.702888+05:30",
+    "hostname": "192.168.1.9",
+    "evidence": "pytest_canonical_home_2026_10_07.xml",
+    "reported_elapsed_seconds": 54.92
+  },
+  "mypy": {
+    "source_files": 169,
+    "passed": true
+  },
+  "ruff": {
+    "all_configured_rules_and_RUF100_passed": true,
+    "global_ignores": [
+      "S101",
+      "S603",
+      "S607"
+    ],
+    "frozen_reference_exclusion": "evals/golden_kvstore",
+    "historical_embedded_reference_exception": {
+      "file": "evals/project_build.py",
+      "rules": [
+        "E501"
+      ]
+    }
+  },
+  "formatting": {
+    "python_files": 258,
+    "passed": true
+  },
+  "whitespace_check_passed": true,
+  "build": {
+    "wheel_sha256": "91d6ea0562ed1fcd00889e3f546b47bf4b458ba9310436bcf0b50b0dc4f43681",
+    "sdist_sha256": "b1cbd5d2f7dfa238ea2276c64139690eb6b3781dd3f84621868939c19c4e2b45",
+    "all_packaged_source_files_match_current_workspace": true,
+    "base_installation": "wheel_canonical_home_2026_10_07.json",
+    "packaged_source_file_count": 188
+  },
+  "terminal": "terminal_2026_10_07/result.json",
+  "recovered_program_offline_acceptance": "recovered_build_acceptance_2026_10_07.json",
+  "historical_python314": {
+    "tests_passed": 824,
+    "date": "2026-10-05",
+    "evidence": "recovered_tool_outputs/line-1493.txt",
+    "additional_october7_regressions_not_rerun": true
+  },
+  "remote_ci_run": false,
+  "python313_locally_tested": false,
+  "paid_model_calls_during_october7_continuation": 0,
+  "git_commit_or_push": false,
+  "limits": [
+    "Local checks do not establish real-model completion reliability.",
+    "No physical macOS/Windows sandbox or SSH/terminal-emulator certification.",
+    "Known-credential scanning is not comprehensive secret detection.",
+    "Original per-request ledgers and complete provider traces were lost; recovered summaries are not resumable."
+  ],
+  "final_regressions": [
+    "Relative configured home retains authorization-registry protection.",
+    "Symlinked configured home retains authorization-registry protection.",
+    "Repointing a configured home alias cannot substitute forged authorization records."
+  ],
+  "earlier_verification_records_preserved": true
+}

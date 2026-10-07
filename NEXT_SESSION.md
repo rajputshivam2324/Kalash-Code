@@ -26,7 +26,7 @@ presentation delivery; public run/attempt/fallback events and SDK verification;
 nested MCP schema/HTTP/OAuth validation and required-hook failure handling; full-rule
 lint, Python-version CI, package/resource checks, and persistent eval output defaults.
 The final October 5 suites passed **824 tests on Python 3.12 and 3.14**; strict mypy
-passed **169 source files**. The final October 7 suite passed **837 tests** on
+passed **169 source files**. The final October 7 suite passed **840 tests** on
 Python 3.12, mypy passed 169 files, all configured Ruff plus unused-annotation
 checks and formatting passed, and Linux PTY/base-wheel checks passed. Evidence is
 in `docs/evals/harness_session3_2026_10_05/`; the CI matrix is configured, not
@@ -49,11 +49,17 @@ records now validate strictly, use private atomic writes, and require explicit
 `kalash hooks untrust PATH` to revoke a missing policy file. Filesystem tools and
 existing OS sandbox overlays protect the user authorization registry. External
 privileged deletion of the whole registry and symlink inventories are not attested.
+The final three regressions cover relative and symlinked `KALASH_HOME` protection
+and repointing a home alias to forged authorization records. The configured home
+is now resolved and pinned before tools run. Latest evidence is
+[canonical-home verification](docs/evals/harness_session3_2026_10_05/verification_canonical_home_2026_10_07.json);
+earlier verification records remain preserved.
 
 Continue from demonstrated failures: reduce repeated exploration and large recent
 observations before reservations become impossible, then test actual read → edit →
 independent check completion under an intact user-scoped ledger. Preserve OS sandboxing,
-permission gates, digests and independent graders. No commits or pushes are authorized.
+permission gates, digests and independent graders. The user subsequently authorized
+committing this reliability work on October 7. No push is authorized.
 
 The sections below are historical records, not current spending or completion authority.
 

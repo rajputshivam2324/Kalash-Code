@@ -138,6 +138,65 @@ async def test_tools_cannot_rewrite_user_authorization_registry(tmp_path: Path) 
     assert registry in protected_existing_paths([tmp_path])
 
 
+@pytest.mark.parametrize("home_kind", ["relative", "symlink"])
+async def test_authorization_protection_uses_canonical_home(
+    tmp_path: Path, monkeypatch, home_kind: str
+) -> None:
+    from kalash.core.paths import kalash_home
+    from kalash.core.trust import trust_file
+    from kalash.tools.fs.common import _content_digest
+    from kalash.tools.fs.write import WriteParams, WriteTool
+
+    monkeypatch.chdir(tmp_path)
+    if home_kind == "relative":
+        monkeypatch.setenv("KALASH_HOME", "state")
+    else:
+        target = tmp_path / "actual-state"
+        target.mkdir()
+        alias = tmp_path / "state"
+        alias.symlink_to(target, target_is_directory=True)
+        monkeypatch.setenv("KALASH_HOME", str(alias))
+    policy = tmp_path / "policy.json"
+    policy.write_text("{}")
+    trust_file(policy)
+    registry = (kalash_home() / "trusted-files.json").resolve()
+    before = registry.read_bytes()
+    result = await WriteTool().execute(
+        WriteParams(path=str(registry), content="{}", digest=_content_digest(before)),
+        ToolContext(session_id="fixture", run_id="run", cwd=tmp_path, writable_roots=(tmp_path,)),
+    )
+    assert not result.ok
+    assert result.error.code == "KALASH_SANDBOX_PATH_PROTECTED"
+    assert registry.read_bytes() == before
+
+
+def test_repointing_home_alias_cannot_replace_authorization_scope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import hashlib
+    import json
+
+    from kalash.core.trust import is_trusted, trust_file
+
+    original = tmp_path / "original-home"
+    original.mkdir()
+    forged = tmp_path / "forged-home"
+    forged.mkdir()
+    alias = tmp_path / "home-alias"
+    alias.symlink_to(original, target_is_directory=True)
+    monkeypatch.setenv("KALASH_HOME", str(alias))
+    policy = tmp_path / "policy.json"
+    policy.write_text("authorized content")
+    trust_file(policy)
+    policy.write_text("unreviewed replacement")
+    (forged / "trusted-files.json").write_text(
+        json.dumps({str(policy.resolve()): hashlib.sha256(policy.read_bytes()).hexdigest()})
+    )
+    alias.unlink()
+    alias.symlink_to(forged, target_is_directory=True)
+    assert not is_trusted(policy)
+
+
 def test_required_hook_runner_initialization_cannot_fail_open(tmp_path: Path, monkeypatch) -> None:
     from kalash.core.errors import HookDeniedError
     from kalash.core.trust import trust_file

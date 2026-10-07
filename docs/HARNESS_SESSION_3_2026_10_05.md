@@ -135,6 +135,9 @@ startup; `kalash hooks untrust PATH` explicitly revokes their authorization.
 The registry rejects malformed/oversized data, preserves it for repair, and uses
 private atomic writes and cooperating-process locks. Filesystem tools and existing
 OS overlays protect the registry from rewrites when its home is inside a workspace.
+Three final regressions reproduced protection failures for relative/symlinked
+`KALASH_HOME` paths and acceptance of forged records after repointing a home alias.
+The configured home is now resolved and pinned before tools run; those checks pass.
 Fresh-schema hook result storage now works. Post-effect hook errors are reported
 without claiming that a completed write was undone. Trusted Python callbacks
 have cooperative deadlines; blocking native/Python code is not forcibly isolated.
@@ -162,7 +165,7 @@ embedded reference/prompt strings in `evals/project_build.py` retain a scoped E5
 exception. No grader was weakened to make a model pass. The review also caught and
 fixed unsafe mechanical changes to SQLite-row access and provider boolean precedence.
 
-The October 7 final Python 3.12 suite passed **837 tests in 50.74 seconds**;
+The October 7 final Python 3.12 suite passed **840 tests in 54.92 seconds**;
 strict mypy passed 169 source files; all configured Ruff rules plus RUF100 passed;
 258 Python files passed formatting; whitespace checks passed. The additional
 October 7 regressions have not been rerun on Python 3.14.
@@ -170,10 +173,12 @@ October 7 regressions have not been rerun on Python 3.14.
 The final wheel and source distribution build passed. A fresh base installation
 outside the source tree passed SDK/import, local schema, CLI help and all **19**
 bundled resource hash comparisons. Every packaged source file also matches the
-current workspace bytes. See [final verification](evals/harness_session3_2026_10_05/verification_final_2026_10_07.json),
-[the installed-wheel record](evals/harness_session3_2026_10_05/wheel_final_2026_10_07.json),
+current workspace bytes. See [final verification](evals/harness_session3_2026_10_05/verification_canonical_home_2026_10_07.json),
+[the installed-wheel record](evals/harness_session3_2026_10_05/wheel_canonical_home_2026_10_07.json),
 and [offline build recheck](evals/harness_session3_2026_10_05/recovered_build_acceptance_2026_10_07.json).
+Earlier verification records remain preserved alongside these final records.
 
-No Git commits or pushes were made.
+No Git commits or pushes were made during the reliability evaluation. The user
+subsequently authorized committing the changes; no push was requested.
 The remaining reliability priority is real task completion and cost per verified
 artifact under intact, matched trials—not a universal reliability or 9.5/10 claim.

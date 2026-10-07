@@ -11,8 +11,11 @@ from pathlib import Path
 
 def kalash_home() -> Path:
     """Return the Kalash home directory (creates if needed)."""
-    home = Path(os.environ.get("KALASH_HOME", Path.home() / ".kalash"))
+    home = Path(os.environ.get("KALASH_HOME", Path.home() / ".kalash")).expanduser().resolve()
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    # Pin relative/symlink configuration before tools run. Repointing the alias
+    # or changing cwd must not redirect the authority registry mid-session.
+    os.environ["KALASH_HOME"] = str(home)
     return home
 
 
