@@ -1,5 +1,6 @@
 """
-This is being done by this file .  Simply in CLI app if i changes something , like i switch model to xyz , it changes it into the main config file.
+This is being done by this file .  Simply in CLI app if i changes something , like i switch
+model to xyz , it changes it into the main config file.
 User action
     ↓
 "set model.primary to gpt-5.6"
@@ -18,11 +19,14 @@ Kalash later reads the new configuration
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.core.config import load_config
 from kalash.core.paths import settings_path
+from kalash.core.secure_io import atomic_private_write, private_lock
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class ConfigManager:
@@ -40,14 +44,16 @@ class ConfigManager:
             return {}
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-            return data if isinstance(data, dict) else {}
-        except (json.JSONDecodeError, OSError):
-            return {}
+            if not isinstance(data, dict):
+                raise ValueError(f"Settings must be an object: {path}")
+            return data
+        except (json.JSONDecodeError, OSError) as error:
+            raise ValueError(f"Cannot update malformed settings: {path}") from error
 
     def _save_scope_file(self, scope: str, data: dict[str, Any]) -> None:
         path = self.get_config_path(scope=scope)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        atomic_private_write(path, (json.dumps(data, indent=2) + "\n").encode())
 
     @staticmethod
     def _get_nested(data: dict[str, Any], key: str) -> Any:
@@ -102,11 +108,13 @@ class ConfigManager:
     def set(self, key: str, value: str, *, scope: str = "project") -> None:
         """Set a configuration value in a scope-specific settings file."""
         normalized = "user" if scope in ("global", "user") else "project"
-        data = self._load_scope_file(normalized)
-        self._set_nested(data, key, value)
-        self._save_scope_file(normalized, data)
+        path = self.get_config_path(scope=normalized)
+        with private_lock(path.with_suffix(".lock")):
+            data = self._load_scope_file(normalized)
+            self._set_nested(data, key, value)
+            self._save_scope_file(normalized, data)
 
-    def render(self, *, scope: str | None = None, format: str = "toml") -> str:
+    def render(self, *, scope: str | None = None, format: str = "toml") -> str:  # noqa: A002 - Keep the established public keyword/CLI spelling.
         """Render the resolved configuration."""
         if scope in ("global", "user"):
             data = self._load_scope_file("user")

@@ -163,7 +163,7 @@ def resume(
 
 # Register sub-apps
 
-# noqa means no quality assuarance  to that line , when we run lint check
+
 # E402 means specific rule and module level import
 
 
@@ -210,7 +210,8 @@ def version_cmd() -> None:
     console.print(f"kalash {__version__}")
 
 
-# This is project initialization command what it does it , it scaffolds a new project and agents read from there.
+# This is project initialization command what it does it , it scaffolds a new project and agents
+# read from there.
 @app.command("init")
 def init() -> None:
     """Scaffold .kalash/ and a starter KALASH.md for this project."""

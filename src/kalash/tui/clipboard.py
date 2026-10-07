@@ -9,6 +9,7 @@ Provides multi-backend clipboard copying:
 from __future__ import annotations
 
 import base64
+import logging
 import os
 import shutil
 import subprocess
@@ -33,8 +34,10 @@ def copy_text(text: str, app: Any | None = None) -> tuple[bool, str]:
             app.copy_to_clipboard(text)
             success = True
             used_backends.append("textual")
-        except Exception:
-            pass
+        except Exception as error:
+            logging.getLogger(__name__).debug(
+                "Optional backend unavailable: %s", type(error).__name__
+            )
 
     # 2. OSC 52 escape sequence (works across remote SSH & modern terminals)
     try:
@@ -46,8 +49,8 @@ def copy_text(text: str, app: Any | None = None) -> tuple[bool, str]:
             sys.__stdout__.flush()
             success = True
             used_backends.append("osc52")
-    except Exception:
-        pass
+    except Exception as error:
+        logging.getLogger(__name__).debug("Optional backend unavailable: %s", type(error).__name__)
 
     # 3. Native desktop clipboard utilities
     desktop_backend = _copy_desktop(text)
@@ -74,8 +77,10 @@ def _copy_desktop(text: str) -> str | None:
                 stderr=subprocess.DEVNULL,
             )
             return "wl-copy"
-        except Exception:
-            pass
+        except Exception as error:
+            logging.getLogger(__name__).debug(
+                "Optional backend unavailable: %s", type(error).__name__
+            )
 
     # X11 xclip
     if os.environ.get("DISPLAY") and shutil.which("xclip"):
@@ -89,8 +94,10 @@ def _copy_desktop(text: str) -> str | None:
                 stderr=subprocess.DEVNULL,
             )
             return "xclip"
-        except Exception:
-            pass
+        except Exception as error:
+            logging.getLogger(__name__).debug(
+                "Optional backend unavailable: %s", type(error).__name__
+            )
 
     # X11 xsel
     if os.environ.get("DISPLAY") and shutil.which("xsel"):
@@ -104,8 +111,10 @@ def _copy_desktop(text: str) -> str | None:
                 stderr=subprocess.DEVNULL,
             )
             return "xsel"
-        except Exception:
-            pass
+        except Exception as error:
+            logging.getLogger(__name__).debug(
+                "Optional backend unavailable: %s", type(error).__name__
+            )
 
     # macOS pbcopy
     if sys.platform == "darwin" and shutil.which("pbcopy"):
@@ -119,8 +128,10 @@ def _copy_desktop(text: str) -> str | None:
                 stderr=subprocess.DEVNULL,
             )
             return "pbcopy"
-        except Exception:
-            pass
+        except Exception as error:
+            logging.getLogger(__name__).debug(
+                "Optional backend unavailable: %s", type(error).__name__
+            )
 
     return None
 

@@ -8,11 +8,11 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.core.budget import Pricing, Usage
+from kalash.core.ids import generate_id
 
 from ..normalize import (
     BlockDelta,
@@ -33,6 +33,9 @@ from ..normalize import (
     ToolUseBlock,
     UsageUpdate,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +66,18 @@ def _map_stop_reason(reason: Any) -> StopReason:
     return StopReason.UNKNOWN
 
 
+def _normalize_usage(metadata: Any) -> Usage:
+    # Gemini prompt includes cached content; candidates excludes thoughts.
+    thoughts = getattr(metadata, "thoughts_token_count", 0) or 0
+    return Usage(
+        input_tokens=getattr(metadata, "prompt_token_count", 0) or 0,
+        output_tokens=(getattr(metadata, "candidates_token_count", 0) or 0) + thoughts,
+        cache_read_tokens=getattr(metadata, "cached_content_token_count", 0) or 0,
+        reasoning_tokens=thoughts,
+        source="provider_reported",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Message serialization
 # ---------------------------------------------------------------------------
@@ -83,6 +98,7 @@ def _serialize_messages(
     if system:
         system_instruction = types.Content(parts=[types.Part.from_text(text=system)])
 
+    tool_names: dict[str, str] = {}
     for msg in messages:
         if msg.role == Role.SYSTEM:
             text = " ".join(b.text for b in msg.content if isinstance(b, TextBlock))
@@ -100,16 +116,25 @@ def _serialize_messages(
             if isinstance(block, TextBlock):
                 parts.append(types.Part.from_text(text=block.text))
             elif isinstance(block, ToolUseBlock):
+                tool_names[block.id] = block.name
                 sig = getattr(block, "thought_signature", None)
                 if sig is not None:
                     parts.append(
                         types.Part(
-                            function_call=types.FunctionCall(name=block.name, args=block.input),
+                            function_call=types.FunctionCall(
+                                id=block.id, name=block.name, args=block.input
+                            ),
                             thought_signature=sig,
                         )
                     )
                 else:
-                    parts.append(types.Part.from_function_call(name=block.name, args=block.input))
+                    parts.append(
+                        types.Part(
+                            function_call=types.FunctionCall(
+                                id=block.id, name=block.name, args=block.input
+                            )
+                        )
+                    )
             elif isinstance(block, ToolResultBlock):
                 if isinstance(block.content, str):
                     try:
@@ -119,7 +144,13 @@ def _serialize_messages(
                 else:
                     content_dict = {"result": str(block.content)}
                 parts.append(
-                    types.Part.from_function_response(name=block.tool_use_id, response=content_dict)
+                    types.Part(
+                        function_response=types.FunctionResponse(
+                            id=block.tool_use_id,
+                            name=tool_names.get(block.tool_use_id, block.tool_use_id),
+                            response=content_dict,
+                        )
+                    )
                 )
             elif isinstance(block, ImageBlock):
                 if block.source_type == "url":
@@ -276,7 +307,7 @@ class GeminiProvider:
         if system:
             system_instruction = types.Content(parts=[types.Part.from_text(text=system)])
 
-        config = types.GenerateContentConfig(
+        return types.GenerateContentConfig(
             max_output_tokens=max_tokens or self._default_max_tokens,
             temperature=temperature,
             stop_sequences=stop_sequences,
@@ -286,7 +317,6 @@ class GeminiProvider:
             if hasattr(types, "ThinkingConfig")
             else None,
         )
-        return config
 
     async def complete(
         self,
@@ -297,7 +327,7 @@ class GeminiProvider:
         max_tokens: int | None = None,
         temperature: float | None = None,
         stop_sequences: list[str] | None = None,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ARG002 - Preserve provider/tool callback signature.
     ) -> ModelResponse:
         """Send a completion request to Gemini."""
         client = self._get_client()
@@ -339,7 +369,7 @@ class GeminiProvider:
 
                     blocks.append(
                         ToolUseBlock(
-                            id=part.function_call.name,
+                            id=getattr(part.function_call, "id", None) or generate_id("tu_"),
                             name=part.function_call.name,
                             input=args or {},
                             thought_signature=getattr(part, "thought_signature", None),
@@ -352,16 +382,7 @@ class GeminiProvider:
             if any(isinstance(b, ToolUseBlock) for b in blocks):
                 stop_reason = StopReason.TOOL_USE
 
-        usage = Usage(
-            input_tokens=response.usage_metadata.prompt_token_count
-            if response.usage_metadata
-            else 0,
-            output_tokens=response.usage_metadata.candidates_token_count
-            if response.usage_metadata
-            else 0,
-            source="provider_reported",
-            provider_raw={},
-        )
+        usage = _normalize_usage(response.usage_metadata)
 
         return ModelResponse(
             id="",
@@ -380,7 +401,7 @@ class GeminiProvider:
         max_tokens: int | None = None,
         temperature: float | None = None,
         stop_sequences: list[str] | None = None,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ARG002 - Preserve provider/tool callback signature.
     ) -> AsyncIterator[StreamEvent]:
         """Stream a response from Gemini."""
         client = self._get_client()
@@ -408,9 +429,12 @@ class GeminiProvider:
 
         async for chunk in stream:
             if chunk.usage_metadata:
+                usage = _normalize_usage(chunk.usage_metadata)
                 yield UsageUpdate(
-                    input_tokens=chunk.usage_metadata.prompt_token_count or 0,
-                    output_tokens=chunk.usage_metadata.candidates_token_count or 0,
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    cache_read_tokens=usage.cache_read_tokens,
+                    reasoning_tokens=usage.reasoning_tokens,
                 )
 
             if not chunk.candidates:
@@ -434,7 +458,8 @@ class GeminiProvider:
                         yield BlockStart(
                             index=current_block_index,
                             block_type="tool_use",
-                            tool_use_id=part.function_call.name,
+                            tool_use_id=getattr(part.function_call, "id", None)
+                            or generate_id("tu_"),
                             tool_name=part.function_call.name,
                             thought_signature=getattr(part, "thought_signature", None),
                         )

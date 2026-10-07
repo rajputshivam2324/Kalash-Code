@@ -1,0 +1,168 @@
+{
+  "source": "Current conversation tool outputs; selected relevant chunks only",
+  "recovered_on": "2026-10-07",
+  "evidence_type": "Historical tool-result excerpts, not reconstructed provider traces or resumable ledgers",
+  "files": [
+    {
+      "path": "recovered_tool_outputs/line-0607.txt",
+      "source_line": 607,
+      "call_id": "call_ZjrXcxfn44FZVRelzeww2GSU",
+      "sha256": "13a2f6a760325b61ad8380ef53cd6edc469f48d5d26f8aca57a886d7d1651399",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-0626.txt",
+      "source_line": 626,
+      "call_id": "call_3HqcdHFYoHgtgmEQkxlMkMbf",
+      "sha256": "bc2796dcbd608a4b3dac56e74234ce43444c23a789affd4814cd502b68ebdbf9",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-0661.txt",
+      "source_line": 661,
+      "call_id": "call_oFRwRPYUp6un2r4ggzDub6C8",
+      "sha256": "8a065afd4de74f5c8e6296f3bf5ac3888beeedf0e1f5a79058709e024b2461b4",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-0669.txt",
+      "source_line": 669,
+      "call_id": "call_1SIppG9E4XSDXf0QBVGhRd4E",
+      "sha256": "39760999a458875941c1094c1608d382dcaf011935e20cc0fdfe1cafcf1bf876",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-0695.txt",
+      "source_line": 695,
+      "call_id": "call_fA5edppGayqWxFmv5b50Nn0K",
+      "sha256": "bba39b0f50d3f284e1737ebf7e8e99af5b10ae8e944d4c634da9341f414e40b2",
+      "truncated": true
+    },
+    {
+      "path": "recovered_tool_outputs/line-0778.txt",
+      "source_line": 778,
+      "call_id": "call_ZrUUVpnRL7mgakF9AdxebAmr",
+      "sha256": "e283ea44ebaf9995f4752b38dce4f6b23ce93b775737f0deca1a00947887403a",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-0786.txt",
+      "source_line": 786,
+      "call_id": "call_hgIQvFw0zxqM6prZZjBiZFMH",
+      "sha256": "67d2ea1794236cfe836d14f70b94b3282dd36263ea1c9591578acff8e42e1ac4",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-0824.txt",
+      "source_line": 824,
+      "call_id": "call_5ygAUUa0i1wFdlQL3ZmtKXe7",
+      "sha256": "25655381883dcdb0aa6717a615ecf8bf6ccb8eca4e4271f312f2c3a26b65aaae",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-0937.txt",
+      "source_line": 937,
+      "call_id": "call_1zRdIkjwXZJTSgbAI8LXYxuk",
+      "sha256": "06d513500a4ee9c545a5646550e7f4e4ed13c3306e41766db6df91ddd0558a9d",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-1021.txt",
+      "source_line": 1021,
+      "call_id": "call_BCWwhkmJKckZNpbunrhLJkeS",
+      "sha256": "59e4deee758c06702c91246c6456c2bf1d58a02d3af5dbd970868130220a3125",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-1101.txt",
+      "source_line": 1101,
+      "call_id": "call_CXw7O28OhbTaz8HfnIAYAHTt",
+      "sha256": "105a9d189f9f248cd888dc487bccfa5aeb5d7e67ced0754a8cc1fd9404633f08",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-1136.txt",
+      "source_line": 1136,
+      "call_id": "call_xC69QEYS8P38O2SOgdewDBBC",
+      "sha256": "2937e4527df94fd1fbf3226ee437046ff810b958007e08c3392c43405265d4d8",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-1145.txt",
+      "source_line": 1145,
+      "call_id": "call_9Ikjgl3itwW5ebtuKudxHBEO",
+      "sha256": "13ab62d65be68cd85d6f3b43c199eabd9aafa9d8bca5ac965d4edf4a534bf042",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-1153.txt",
+      "source_line": 1153,
+      "call_id": "call_dFpOxCGoAR91y531P6RzZoWR",
+      "sha256": "9085f16524852339eef31cede7ba710a5904a7c921b6c380c0d5437376c2d57c",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-1207.txt",
+      "source_line": 1207,
+      "call_id": "call_JrRzij0HQ6JB532cf8AR5jDt",
+      "sha256": "a1792500852fdbdab7c93390d0baeffecde8eb3aea65cf993077f41e6373a624",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-1215.txt",
+      "source_line": 1215,
+      "call_id": "call_qthbnyDIKsLD3ATyT70xCexe",
+      "sha256": "4eb166c5830d86d9d5217227bc414c9370237cad5ca0e611e8ebb2b20026c1e3",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-1224.txt",
+      "source_line": 1224,
+      "call_id": "call_NldmhC2jZEw3GLafDSkRCL4V",
+      "sha256": "0db90573589831cbfb0b0e4b0802893b6c5a6f13a740cb5273b6b91779cb89c4",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-1338.txt",
+      "source_line": 1338,
+      "call_id": "call_vCqjLqtMUFVDucfy7q2fl999",
+      "sha256": "9661bc945ad7fbf505680bb8782f803ecffca5eab56cd3ee3b2a9d8b9ef9910b",
+      "truncated": true
+    },
+    {
+      "path": "recovered_tool_outputs/line-1348.txt",
+      "source_line": 1348,
+      "call_id": "call_qAT7YTQ6eMklWmlhtYqQ2mLT",
+      "sha256": "629d882588bc053d16f7475fedaf9f3929da345c7971e68f0d3ed1e3a9f86d69",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-1361.txt",
+      "source_line": 1361,
+      "call_id": "call_1c1IrwoedJOZwU7hO2oMRen7",
+      "sha256": "f5b52879df35f5eaa7bd6a4cb91bfab33a597003bc137369cad3bd5d898981f6",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-1371.txt",
+      "source_line": 1371,
+      "call_id": "call_lBL5gfWzxZbn3iTJPu54wO4R",
+      "sha256": "e62ea3473517b236c5b54b987144ad125568589cf476967e4c7e94b965bf97cf",
+      "truncated": true
+    },
+    {
+      "path": "recovered_tool_outputs/line-1378.txt",
+      "source_line": 1378,
+      "call_id": "call_UzANCPoRL2SKAxaJihKEWfVP",
+      "sha256": "754b5d947d07a1373238e9b63766eadcd5905f36ec629634577f9c7c2dfe7e31",
+      "truncated": false
+    },
+    {
+      "path": "recovered_tool_outputs/line-1493.txt",
+      "source_line": 1493,
+      "call_id": "call_UuvBpCyTSqVC5FmMLV2i4D9U",
+      "sha256": "7745681e0c87b8110e318e3c001eec36911bdac649e5b8350183a308f5bf4742",
+      "truncated": true
+    }
+  ]
+}

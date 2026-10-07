@@ -9,17 +9,20 @@ Pure developer-grade terminal interface:
 
 from __future__ import annotations
 
-import time
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from rich.console import RenderableType
+from rich.console import Group, RenderableType
 from rich.markdown import Markdown
-from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
-from textual.events import Click
-from textual.widgets import Static
+from textual.containers import Horizontal
+from textual.message import Message
+from textual.widgets import Button, Static
+
+if TYPE_CHECKING:
+    from textual.events import Click
+    from textual.timer import Timer
 
 LOGO = """\
  ██╗  ██╗ █████╗ ██╗      █████╗ ███████╗██╗  ██╗
@@ -36,8 +39,42 @@ OUTPUT_PREVIEW_LINES = 6
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
 TOOL_BADGES: dict[str, str] = {
-    # OpenCode style: no explicit textual badges, rely on the summarized label (e.g. `$ cmd`, `Edited file`)
+    # OpenCode style: no explicit textual badges, rely on the summarized label (e.g. `$ cmd`,
+    # `Edited file`)
 }
+
+
+class TranscriptChanged(Message):
+    """Content changed; follow only after Textual has recomputed its layout."""
+
+
+class StreamingMessage(Static):
+    """Coalesce bursts, including the trailing chunk when a provider pauses."""
+
+    FRAME_SECONDS = 0.05
+    _paint_timer: Timer | None = None
+
+    def request_repaint(self) -> None:
+        if not self.is_mounted:
+            self._repaint()
+        elif self._paint_timer is None:
+            self._paint_timer = self.set_timer(self.FRAME_SECONDS, self.flush)
+
+    def flush(self) -> None:
+        if self._paint_timer is not None:
+            self._paint_timer.stop()
+            self._paint_timer = None
+        self._repaint()
+        if self.is_mounted:
+            self.post_message(TranscriptChanged())
+
+    def on_unmount(self) -> None:
+        if self._paint_timer is not None:
+            self._paint_timer.stop()
+            self._paint_timer = None
+
+    def _repaint(self) -> None:
+        raise NotImplementedError
 
 
 class WelcomeBanner(Static):
@@ -82,7 +119,7 @@ class UserMessage(Static):
         super().__init__(Text(text))
 
 
-class AssistantMessage(Static):
+class AssistantMessage(StreamingMessage):
     """A streaming model response rendered with rich Markdown and code syntax."""
 
     DEFAULT_CSS = """
@@ -95,11 +132,10 @@ class AssistantMessage(Static):
     """
 
     def __init__(self) -> None:
-        super().__init__(Text("…", style="dim"))
+        super().__init__(Text("Thinking…", style="dim"))
         self._chunks: list[str] = []
         self._done = False
         self._error: str | None = None
-        self._last_repaint = 0.0
 
     @property
     def text(self) -> str:
@@ -109,17 +145,18 @@ class AssistantMessage(Static):
     def plain_text(self) -> str:
         return self.text
 
+    @property
+    def has_content(self) -> bool:
+        return bool(self._chunks or self._error)
+
     def append(self, delta: str) -> None:
-        """Add a streamed chunk and repaint in place (throttled for high-FPS smoothness)."""
+        """Queue text without rebuilding Markdown for every provider token."""
         self._chunks.append(delta)
-        now = time.monotonic()
-        if now - self._last_repaint >= 0.035 or self._done:
-            self._last_repaint = now
-            self._repaint()
+        self.request_repaint()
 
     def finish(self) -> None:
         self._done = True
-        self._repaint()
+        self.flush()
 
     def set_working(self) -> None:
         """Shown when the model delegated to tools without saying anything first."""
@@ -129,25 +166,20 @@ class AssistantMessage(Static):
     def set_error(self, message: str) -> None:
         self._done = True
         self._error = message
-        self._repaint()
+        self.flush()
 
     def _repaint(self) -> None:
-        """Rebuild the rendered body with Markdown."""
-        if self._error is not None:
-            self.update(Text.assemble(("✗ ", "bold red"), (self._error, "red")))
-            return
-
+        """Keep incomplete Markdown literal; format it once at a response boundary."""
         body = self.text
-        if not body:
-            # OpenCode style subtle thinking indicator
-            self.update(Text("…", style="dim"))
-            return
-
-        try:
-            md = Markdown(body, code_theme="monokai")
-            self.update(md)
-        except Exception:
-            self.update(body)
+        content: RenderableType = (
+            Markdown(body, code_theme="monokai") if self._done and body else Text(body)
+        )
+        if self._error is not None:
+            self.update(Group(content, Text(f"Interrupted: {self._error}", style="red")))
+        elif body:
+            self.update(content)
+        else:
+            self.update(Text("Thinking…", style="dim"))
 
 
 class SystemMessage(Static):
@@ -239,7 +271,7 @@ class PlanMessage(Static):
         super().__init__(table)
 
 
-class ToolCallLine(Static):
+class ToolCallLine(StreamingMessage):
     """Antigravity/Claude Code style tool call widget."""
 
     DEFAULT_CSS = """
@@ -261,6 +293,8 @@ class ToolCallLine(Static):
         self._duration_ms = 0
         self._exit_code: int | None = None
         self._output: list[str] = []
+        self._output_tail = ""
+        self._elapsed = 0.0
         self._diff_text = ""
         self._diff_stat = ""
         self._path = ""
@@ -270,7 +304,7 @@ class ToolCallLine(Static):
         self._badge = TOOL_BADGES.get(tool_name, "")
         super().__init__(self._build_line())
 
-    async def on_click(self, event: Click) -> None:
+    async def on_click(self, event: Click) -> None:  # noqa: ARG002 - Preserve provider/tool callback signature.
         if self.is_expandable:
             self.toggle_expand()
 
@@ -278,16 +312,11 @@ class ToolCallLine(Static):
         if self._done or elapsed < self.SLOW_AFTER_SECONDS:
             return
         self._spinner_idx = (self._spinner_idx + 1) % len(SPINNER_FRAMES)
-        spinner = SPINNER_FRAMES[self._spinner_idx]
-        text = Text()
-        if self._badge:
-            text.append(f"{spinner} {self._badge} ", style="bold cyan")
-        else:
-            text.append(f"{spinner} ", style="bold cyan")
-        text.append(self._label, style="bold")
-        text.append(f"  {elapsed:.0f}s", style="yellow")
-        text.append("   ctrl+c to stop", style="dim")
-        self.update(text)
+        self._elapsed = elapsed
+        self.request_repaint()
+
+    def _repaint(self) -> None:
+        self.update(self._build_line())
 
     def finish(
         self,
@@ -302,43 +331,56 @@ class ToolCallLine(Static):
             self._duration_ms = duration_ms
         if exit_code is not None:
             self._exit_code = exit_code
-        self.update(self._build_line())
+        self.flush()
 
     def append_output(self, chunk: str) -> None:
-        for line in chunk.splitlines(keepends=True):
-            if line.endswith("\n"):
-                self._output.append(line.rstrip("\n"))
-            elif self._output:
-                self._output[-1] += line
-            else:
-                self._output.append(line)
-        self.update(self._build_line())
+        parts = (self._output_tail + chunk).split("\n")
+        self._output.extend(parts[:-1])
+        self._output_tail = parts[-1]
+        self.request_repaint()
 
     def set_diff(self, path: str, diff_text: str, stat: str = "") -> None:
         self._path = path
         self._diff_text = diff_text
         self._diff_stat = stat
-        self.update(self._build_line())
+        self.flush()
 
     def set_summary(self, summary: str) -> None:
         self._summary = summary.strip()
-        self.update(self._build_line())
+        self.flush()
 
     def toggle_expand(self) -> None:
         self._expanded = not self._expanded
-        self.update(self._build_line())
+        self.flush()
 
     @property
     def is_done(self) -> bool:
         return self._done
 
     @property
+    def plain_text(self) -> str:
+        state = "failed" if self._failed else "done" if self._done else "running"
+        output = "\n".join([*self._output, self._output_tail]).rstrip()
+        return "\n".join(
+            part
+            for part in (
+                f"{self._label} [{state}] exit={self._exit_code}",
+                self._summary,
+                output,
+                self._diff_text,
+            )
+            if part
+        )
+
+    @property
     def is_expandable(self) -> bool:
-        return bool(self._output or self._diff_text or self._summary)
+        return bool(self._output or self._output_tail or self._diff_text or self._summary)
 
     @property
     def plain_output(self) -> str:
-        return "\n".join(self._output) if self._output else self._diff_text
+        if self._output or self._output_tail:
+            return "\n".join([*self._output, self._output_tail])
+        return self._diff_text
 
     def _build_line(self) -> Any:
         from rich.console import Group
@@ -357,6 +399,9 @@ class ToolCallLine(Static):
             text.append(f"✓ {badge_part}", style="bold green")
 
         text.append(self._label, style="bold")
+        if not self._done and self._elapsed >= self.SLOW_AFTER_SECONDS:
+            text.append(f"  {self._elapsed:.0f}s", style="dim")
+            text.append("   ctrl+c to stop", style="dim")
 
         meta: list[tuple[str, str]] = []
         if self._diff_stat:
@@ -379,29 +424,18 @@ class ToolCallLine(Static):
             diff_text = Text()
             _append_folded_diff(diff_text, self._diff_text, expanded=self._expanded)
             renderables.append(diff_text)
-        elif self._output:
-            visible = self._output if self._expanded else self._output[:OUTPUT_PREVIEW_LINES]
-            output_text = Text("\n".join(visible))
-            hidden = len(self._output) - len(visible)
-            if hidden > 0 and not self._expanded:
-                output_text.append(
-                    f"\n\n… {hidden} output lines hidden · ctrl+o to expand", style="italic"
-                )
-            elif self._expanded and len(self._output) > OUTPUT_PREVIEW_LINES:
-                output_text.append("\n\n… ctrl+o to fold output", style="italic")
-
-            panel = Panel(
-                output_text,
-                style="dim",
-                border_style="bright_black",
-                padding=(0, 1),
-            )
-            renderables.append(panel)
+        elif self._output or self._output_tail:
+            lines = [*self._output, *([self._output_tail] if self._output_tail else [])]
+            output_text = Text()
+            _append_folded_output(output_text, lines, expanded=self._expanded)
+            renderables.append(output_text)
 
         if self._summary:
             summary_text = Text()
             summary_text.append("  │ ")
-            style = "yellow" if "unwrapped" in self._summary.lower() else "dim"
+            style = (
+                "red" if failed else ("yellow" if "unwrapped" in self._summary.lower() else "dim")
+            )
             summary_text.append(self._summary, style=style)
             renderables.append(summary_text)
 
@@ -425,7 +459,9 @@ class SubagentLine(Static):
     def __init__(self, brief: str) -> None:
         self._brief = brief
         self._done = False
-        super().__init__(self._compose_text("running"))
+        text = self._compose_text("running")
+        self.plain_text = text.plain
+        super().__init__(text)
 
     def _compose_text(self, state: str, detail: str = "") -> Text:
         text = Text()
@@ -439,14 +475,16 @@ class SubagentLine(Static):
     def finish(self, *, failed: bool = False, turns: int = 0, tokens: int = 0) -> None:
         self._done = True
         detail = f"{turns} turns, {tokens:,} tok" if turns else ""
-        self.update(self._compose_text("failed" if failed else "done", detail))
+        text = self._compose_text("failed" if failed else "done", detail)
+        self.plain_text = text.plain
+        self.update(text)
 
 
 def _append_folded_diff(text: Text, diff_text: str, *, expanded: bool) -> None:
     lines = diff_text.splitlines()
     visible = lines if expanded else lines[:DIFF_PREVIEW_LINES]
     for line in visible:
-        if line.startswith("+++") or line.startswith("---"):
+        if line.startswith(("+++", "---")):
             text.append("  │ " + line + "\n", style="bold cyan")
         elif line.startswith("@@"):
             text.append("  │ " + line + "\n", style="bold magenta")
@@ -492,9 +530,8 @@ def _short_path(path: str) -> str:
         return str(Path(*parts[-3:])) if len(parts) > 3 else path
 
 
-from textual.app import ComposeResult
-from textual.containers import Horizontal
-from textual.widgets import Button
+if TYPE_CHECKING:
+    from textual.app import ComposeResult
 
 
 class DiffReview(Static):

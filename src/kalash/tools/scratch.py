@@ -23,6 +23,8 @@ concurrent calls cannot interleave a read-modify-write on the index.
 
 from __future__ import annotations
 
+import asyncio
+
 from pydantic import BaseModel, Field
 
 from kalash.runtime.scratchpad import (
@@ -56,8 +58,11 @@ class ExpandParams(BaseModel):
     grep: str = Field(
         default="",
         description=(
-            "Return only lines matching this regex, with 2 lines of surrounding "
-            "context. Usually far cheaper than the whole body."
+            (
+                "Return only lines containing this literal text, "
+                "case-insensitive, with 2 lines of surrounding "
+            )
+            + "context. Usually far cheaper than the whole body."
         ),
     )
     offset: int = Field(
@@ -125,14 +130,15 @@ class ExpandTool:
     def cancellable(self) -> bool:
         return False
 
-    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:
+    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:  # noqa: ARG002 - Preserve provider/tool callback signature.
         return frozenset()
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:
         assert isinstance(args, ExpandParams)
 
         pad = get_scratchpad(ctx.session_id)
-        result = pad.expand(
+        result = await asyncio.to_thread(
+            pad.expand,
             args.ref,
             offset=args.offset,
             limit=args.limit or None,
@@ -251,7 +257,7 @@ class NoteTool:
     def cancellable(self) -> bool:
         return False
 
-    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:
+    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:  # noqa: ARG002 - Preserve provider/tool callback signature.
         return frozenset()
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:

@@ -1,0 +1,1050 @@
+{
+  "date": "2026-10-03",
+  "phases": {
+    "control": {
+      "artifact_root": "/tmp/kalash-compact-control-20261003",
+      "manifest": {
+        "suite": "compact-v1",
+        "mode": "scripted",
+        "model": "scripted",
+        "reasoning": "high",
+        "sdk_retries": 0,
+        "gateway_attempts_per_request": 1,
+        "source_tree_sha256": "de50cbe005098ac47c0e4a5d1901e43bbaa78bde12b0e6903a971070346c0333",
+        "output_limit": 4096,
+        "total_token_allowance": 240000,
+        "task_actual_ceiling": 52000,
+        "reservation": "wire UTF8 bytes + 4096 + output allowance",
+        "tasks_sha256": "12cc4dbf370c600259ca7f472def2035d585a915983c4e57b9a56a6babfdff9d",
+        "python": "3.12.12",
+        "platform": "Linux-7.1.13-200.fc44.x86_64-x86_64-with-glibc2.43",
+        "commit": "dfdf903055a5011a653763462c3c00e1ab917119",
+        "dirty": true,
+        "source_diff_sha256": "aff91f0bb85367b3b2a8299a34047ae51b6df738dfe67350db1c6f16e9eb3574",
+        "pricing_source": "https://docs.sarvam.ai/api/getting-started/pricing",
+        "pricing_currency": "INR",
+        "pricing_checked": "2026-10-03",
+        "grading": "independent hidden assertions in a fresh network-disabled OS sandbox"
+      },
+      "summary": {
+        "suite": "compact-v1",
+        "mode": "scripted",
+        "model": "scripted",
+        "tasks": 4,
+        "attempted": 4,
+        "resolved": 4,
+        "results": [
+          {
+            "task": "ttl-lru",
+            "baseline": "failed",
+            "outcome": "resolved",
+            "termination": "no_tool_calls",
+            "duration_s": 0.224,
+            "charged_tokens": 0,
+            "tool_calls": 2,
+            "detail": "KALASH_VERIFIED_ec875106c571bf9362aac03a1f589e78\n"
+          },
+          {
+            "task": "dag-waves",
+            "baseline": "failed",
+            "outcome": "resolved",
+            "termination": "no_tool_calls",
+            "duration_s": 0.239,
+            "charged_tokens": 0,
+            "tool_calls": 2,
+            "detail": "KALASH_VERIFIED_0647c1f2709aca910da2903fbe0750db\n"
+          },
+          {
+            "task": "decimal-ledger",
+            "baseline": "failed",
+            "outcome": "resolved",
+            "termination": "no_tool_calls",
+            "duration_s": 0.197,
+            "charged_tokens": 0,
+            "tool_calls": 2,
+            "detail": "KALASH_VERIFIED_ece30e2b105afb04291bad4a7215c632\n"
+          },
+          {
+            "task": "streaming-jsonl",
+            "baseline": "failed",
+            "outcome": "resolved",
+            "termination": "no_tool_calls",
+            "duration_s": 0.21,
+            "charged_tokens": 0,
+            "tool_calls": 2,
+            "detail": "KALASH_VERIFIED_e1ea2b1da01ca700a3941342636a9d78\n"
+          }
+        ],
+        "allowance": 240000,
+        "charged_tokens": 0,
+        "provider_reported_tokens": 0,
+        "estimated_cost_inr": null,
+        "within_allowance": true,
+        "note": "One attempt/task; local smoke suite; no competitor or public-benchmark claim."
+      }
+    },
+    "live": {
+      "artifact_root": "/tmp/kalash-compact-live-20261003",
+      "manifest": {
+        "suite": "compact-v1",
+        "mode": "live",
+        "model": "sarvam/sarvam-105b",
+        "reasoning": "high",
+        "sdk_retries": 0,
+        "gateway_attempts_per_request": 1,
+        "source_tree_sha256": "de50cbe005098ac47c0e4a5d1901e43bbaa78bde12b0e6903a971070346c0333",
+        "output_limit": 4096,
+        "total_token_allowance": 240000,
+        "task_actual_ceiling": 52000,
+        "reservation": "wire UTF8 bytes + 4096 + output allowance",
+        "tasks_sha256": "12cc4dbf370c600259ca7f472def2035d585a915983c4e57b9a56a6babfdff9d",
+        "python": "3.12.12",
+        "platform": "Linux-7.1.13-200.fc44.x86_64-x86_64-with-glibc2.43",
+        "commit": "dfdf903055a5011a653763462c3c00e1ab917119",
+        "dirty": true,
+        "source_diff_sha256": "aff91f0bb85367b3b2a8299a34047ae51b6df738dfe67350db1c6f16e9eb3574",
+        "pricing_source": "https://docs.sarvam.ai/api/getting-started/pricing",
+        "pricing_currency": "INR",
+        "pricing_checked": "2026-10-03",
+        "grading": "independent hidden assertions in a fresh network-disabled OS sandbox"
+      },
+      "summary": {
+        "suite": "compact-v1",
+        "mode": "live",
+        "model": "sarvam/sarvam-105b",
+        "tasks": 4,
+        "attempted": 4,
+        "resolved": 0,
+        "results": [
+          {
+            "task": "ttl-lru",
+            "baseline": "failed",
+            "outcome": "failed",
+            "termination": "error",
+            "duration_s": 46.338,
+            "charged_tokens": 10838,
+            "tool_calls": 4,
+            "detail": "Model output was truncated before completion\n[stderr]\nTraceback (most recent call last):\n  File \"/tmp/kalash-compact-live-20261003/ttl-lru/validation/verify.py\", line 11, in <module>\n    assert c.get('b', 'missing') == 'missing'\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+          },
+          {
+            "task": "dag-waves",
+            "baseline": "failed",
+            "outcome": "failed",
+            "termination": "error",
+            "duration_s": 54.816,
+            "charged_tokens": 31445,
+            "tool_calls": 10,
+            "detail": "Model output was truncated before completion\n[stderr]\nTraceback (most recent call last):\n  File \"/tmp/kalash-compact-live-20261003/dag-waves/validation/verify.py\", line 7, in <module>\n    assert waves({'c':['a','b','a'],'b':['a']}) == [['a'],['b'],['c']]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+          },
+          {
+            "task": "decimal-ledger",
+            "baseline": "failed",
+            "outcome": "failed",
+            "termination": "error",
+            "duration_s": 53.126,
+            "charged_tokens": 31945,
+            "tool_calls": 12,
+            "detail": "Model output was truncated before completion\n[stderr]\nTraceback (most recent call last):\n  File \"/tmp/kalash-compact-live-20261003/decimal-ledger/validation/verify.py\", line 6, in <module>\n    assert reconcile('id,amount\\n001,2.675\\n002,1.005\\n003,3\\n','id,amount\\n001,2.685\\n002,1.015\\n004,4\\n') == [\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<3 lines>...\n     {'id':'004','difference':'4.00','status':'unexpected'}]\n     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+          },
+          {
+            "task": "streaming-jsonl",
+            "baseline": "failed",
+            "outcome": "failed",
+            "termination": "error",
+            "duration_s": 41.938,
+            "charged_tokens": 8488,
+            "tool_calls": 2,
+            "detail": "Model output was truncated before completion\n[stderr]\nTraceback (most recent call last):\n  File \"/tmp/kalash-compact-live-20261003/streaming-jsonl/validation/verify.py\", line 9, in <module>\n    assert list(records(iter(raw[i:i+width] for i in range(0,len(raw),width)))) == values\n           ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/kalash-compact-live-20261003/streaming-jsonl/validation/src/streaming.py\", line 7, in records\n    yield json.loads(line)\n          ~~~~~~~~~~^^^^^^\n  File \"/usr/lib64/python3.14/json/__init__.py\", line 352, in loads\n    return _default_decoder.decode(s)\n           ~~~~~~~~~~~~~~~~~~~~~~~^^^\n  File \"/usr/lib64/python3.14/json/decoder.py\", line 345, in decode\n    obj, end = self.raw_decode(s, idx=_w(s, 0).end())\n               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib64/python3.14/json/decoder.py\", line 361, in raw_decode\n    obj, end = self.scan_once(s, idx)\n               ~~~~~~~~~~~~~~^^^^^^^^\njson.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)\n"
+          }
+        ],
+        "allowance": 240000,
+        "charged_tokens": 99241,
+        "provider_reported_tokens": 82857,
+        "estimated_cost_inr": "2.503923",
+        "within_allowance": true,
+        "note": "One attempt/task; local smoke suite; no competitor or public-benchmark claim."
+      }
+    },
+    "expanded": {
+      "artifact_root": "/tmp/kalash-compact-expanded-20261003",
+      "manifest": {
+        "suite": "compact-v1",
+        "mode": "live",
+        "model": "sarvam/sarvam-105b",
+        "reasoning": "high",
+        "sdk_retries": 0,
+        "gateway_attempts_per_request": 1,
+        "source_tree_sha256": "c87b7f5a544eb9461d99f165dbe0d19f4b97e3241cc8a7453f7261b17694977f",
+        "output_limit": 16384,
+        "prior_ledger": "/tmp/kalash-compact-live-20261003/ledger.json",
+        "total_token_allowance": 240000,
+        "task_actual_ceiling": 52000,
+        "reservation": "wire UTF8 bytes + 4096 + output allowance",
+        "tasks_sha256": "12cc4dbf370c600259ca7f472def2035d585a915983c4e57b9a56a6babfdff9d",
+        "python": "3.12.12",
+        "platform": "Linux-7.1.13-200.fc44.x86_64-x86_64-with-glibc2.43",
+        "commit": "dfdf903055a5011a653763462c3c00e1ab917119",
+        "dirty": true,
+        "source_diff_sha256": "2697dfde0e10d1bd3f7695e9550f850d52828787c0369b74e368f2ab7bf79bd0",
+        "pricing_source": "https://docs.sarvam.ai/api/getting-started/pricing",
+        "pricing_currency": "INR",
+        "pricing_checked": "2026-10-03",
+        "grading": "independent hidden assertions in a fresh network-disabled OS sandbox"
+      },
+      "summary": {
+        "suite": "compact-v1",
+        "mode": "live",
+        "model": "sarvam/sarvam-105b",
+        "tasks": 4,
+        "attempted": 4,
+        "resolved": 0,
+        "results": [
+          {
+            "task": "ttl-lru",
+            "baseline": "failed",
+            "outcome": "failed",
+            "termination": "error",
+            "duration_s": 28.654,
+            "charged_tokens": 9908,
+            "tool_calls": 4,
+            "detail": "Compact-suite token allowance cannot fit the next request\n[stderr]\nTraceback (most recent call last):\n  File \"/tmp/kalash-compact-expanded-20261003/ttl-lru/validation/verify.py\", line 11, in <module>\n    assert c.get('b', 'missing') == 'missing'\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+          },
+          {
+            "task": "dag-waves",
+            "baseline": "failed",
+            "outcome": "failed",
+            "termination": "budget_exhausted",
+            "duration_s": 171.728,
+            "charged_tokens": 32844,
+            "tool_calls": 9,
+            "detail": "Insufficient run budget for the next request\n[stderr]\nTraceback (most recent call last):\n  File \"/tmp/kalash-compact-expanded-20261003/dag-waves/validation/verify.py\", line 7, in <module>\n    assert waves({'c':['a','b','a'],'b':['a']}) == [['a'],['b'],['c']]\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+          },
+          {
+            "task": "decimal-ledger",
+            "baseline": "failed",
+            "outcome": "failed",
+            "termination": "error",
+            "duration_s": 155.835,
+            "charged_tokens": 19907,
+            "tool_calls": 2,
+            "detail": "Compact-suite token allowance cannot fit the next request\n[stderr]\nTraceback (most recent call last):\n  File \"/tmp/kalash-compact-expanded-20261003/decimal-ledger/validation/verify.py\", line 6, in <module>\n    assert reconcile('id,amount\\n001,2.675\\n002,1.005\\n003,3\\n','id,amount\\n001,2.685\\n002,1.015\\n004,4\\n') == [\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<3 lines>...\n     {'id':'004','difference':'4.00','status':'unexpected'}]\n     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+          },
+          {
+            "task": "streaming-jsonl",
+            "baseline": "failed",
+            "outcome": "failed",
+            "termination": "error",
+            "duration_s": 6.096,
+            "charged_tokens": 18040,
+            "tool_calls": 14,
+            "detail": "Compact-suite token allowance cannot fit the next request\n[stderr]\nTraceback (most recent call last):\n  File \"/tmp/kalash-compact-expanded-20261003/streaming-jsonl/validation/verify.py\", line 9, in <module>\n    assert list(records(iter(raw[i:i+width] for i in range(0,len(raw),width)))) == values\n           ~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/tmp/kalash-compact-expanded-20261003/streaming-jsonl/validation/src/streaming.py\", line 7, in records\n    yield json.loads(line)\n          ~~~~~~~~~~^^^^^^\n  File \"/usr/lib64/python3.14/json/__init__.py\", line 352, in loads\n    return _default_decoder.decode(s)\n           ~~~~~~~~~~~~~~~~~~~~~~~^^^\n  File \"/usr/lib64/python3.14/json/decoder.py\", line 345, in decode\n    obj, end = self.raw_decode(s, idx=_w(s, 0).end())\n               ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/lib64/python3.14/json/decoder.py\", line 361, in raw_decode\n    obj, end = self.scan_once(s, idx)\n               ~~~~~~~~~~~~~~^^^^^^^^\njson.decoder.JSONDecodeError: Expecting property name enclosed in double quotes: line 1 column 2 (char 1)\n"
+          }
+        ],
+        "allowance": 240000,
+        "charged_tokens": 179940,
+        "provider_reported_tokens": 163556,
+        "estimated_cost_inr": "5.799607",
+        "within_allowance": true,
+        "note": "One attempt/task; local smoke suite; no competitor or public-benchmark claim."
+      }
+    },
+    "fixed": {
+      "artifact_root": "/tmp/kalash-compact-fixed-20261003",
+      "manifest": {
+        "suite": "compact-v1",
+        "mode": "live",
+        "model": "sarvam/sarvam-105b",
+        "reasoning": "high",
+        "sdk_retries": 0,
+        "gateway_attempts_per_request": 1,
+        "source_tree_sha256": "30d1e27a309174316cd273b8564eb6e45e2964f75beff8bf2cb66a87770973fe",
+        "output_limit": 16384,
+        "prior_ledger": "/tmp/kalash-compact-expanded-20261003/ledger.json",
+        "total_token_allowance": 240000,
+        "task_actual_ceiling": 52000,
+        "reservation": "wire UTF8 bytes + 4096 + output allowance",
+        "tasks_sha256": "8850b7b1fdccf62e3cf7016822fab9cc365d0fad911efa9df8825b477d5d0b3d",
+        "python": "3.12.12",
+        "platform": "Linux-7.1.13-200.fc44.x86_64-x86_64-with-glibc2.43",
+        "commit": "dfdf903055a5011a653763462c3c00e1ab917119",
+        "dirty": true,
+        "source_diff_sha256": "23898dc4f49332be651610ff03d30248b51f05f71dcd3f17d9ebf8bf30bbdaeb",
+        "pricing_source": "https://docs.sarvam.ai/api/getting-started/pricing",
+        "pricing_currency": "INR",
+        "pricing_checked": "2026-10-03",
+        "grading": "independent hidden assertions in a fresh network-disabled OS sandbox"
+      },
+      "summary": {
+        "suite": "compact-v1",
+        "mode": "live",
+        "model": "sarvam/sarvam-105b",
+        "tasks": 1,
+        "attempted": 1,
+        "resolved": 0,
+        "results": [
+          {
+            "task": "decimal-ledger",
+            "baseline": "failed",
+            "outcome": "failed",
+            "termination": "error",
+            "duration_s": 168.314,
+            "charged_tokens": 25129,
+            "tool_calls": 4,
+            "detail": "Model output was truncated before completion\n[stderr]\nTraceback (most recent call last):\n  File \"/tmp/kalash-compact-fixed-20261003/decimal-ledger/validation/verify.py\", line 6, in <module>\n    assert reconcile('id,amount\\n001,2.675\\n002,1.005\\n003,3\\n','id,amount\\n001,2.685\\n002,1.015\\n004,4\\n') == [\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n    ...<3 lines>...\n     {'id':'004','difference':'4.00','status':'unexpected'}]\n     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nAssertionError\n"
+          }
+        ],
+        "allowance": 240000,
+        "charged_tokens": 205069,
+        "provider_reported_tokens": 188685,
+        "estimated_cost_inr": "7.239202",
+        "within_allowance": true,
+        "note": "One attempt/task; local smoke suite; no competitor or public-benchmark claim."
+      }
+    }
+  },
+  "access": {
+    "sandbox_available": true,
+    "requests": [
+      {
+        "model": "glm5.3",
+        "route": "/v2/chat/completions",
+        "max_output_tokens": 128,
+        "conservative_token_charge": 8192,
+        "http_status": 400,
+        "usage": null,
+        "access": "blocked",
+        "error": "{'message': 'This endpoint is currently in beta and not available. To request beta access, please contact our support team', 'code': 'invalid_request_error'}"
+      },
+      {
+        "model": "sarvam-105b",
+        "route": "/v1/chat/completions",
+        "max_output_tokens": 128,
+        "conservative_token_charge": 8192,
+        "http_status": 400,
+        "usage": null,
+        "access": "blocked",
+        "error": "{'message': \"body.reasoning_effort : Input should be 'low', 'medium' or 'high'\", 'code': 'invalid_request_error'}"
+      },
+      {
+        "model": "sarvam-105b",
+        "route": "/v1/chat/completions",
+        "max_output_tokens": 128,
+        "conservative_token_charge": 8192,
+        "http_status": 200,
+        "usage": {
+          "completion_tokens": 128,
+          "prompt_tokens": 13,
+          "total_tokens": 141,
+          "completion_tokens_details": null,
+          "prompt_tokens_details": null
+        },
+        "access": "available"
+      }
+    ]
+  },
+  "final_shared_ledger": {
+    "limit": 240000,
+    "charged_tokens": 205069,
+    "violated": false,
+    "attempts": [
+      {
+        "task": "access_probe",
+        "reserved_tokens": 8192,
+        "charged_tokens": 8192,
+        "status": "rejected_http",
+        "usage": null
+      },
+      {
+        "task": "access_probe",
+        "reserved_tokens": 8192,
+        "charged_tokens": 8192,
+        "status": "rejected_http",
+        "usage": null
+      },
+      {
+        "task": "access_probe",
+        "reserved_tokens": 8192,
+        "charged_tokens": 141,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 13,
+          "output_tokens": 128,
+          "cache_read_tokens": 0,
+          "reasoning_tokens": 0
+        }
+      },
+      {
+        "task": "ttl-lru",
+        "reserved_tokens": 15621,
+        "charged_tokens": 2110,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2007,
+          "output_tokens": 103,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "ttl-lru",
+        "reserved_tokens": 16680,
+        "charged_tokens": 2231,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2185,
+          "output_tokens": 46,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "ttl-lru",
+        "reserved_tokens": 17548,
+        "charged_tokens": 6497,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2401,
+          "output_tokens": 4096,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "dag-waves",
+        "reserved_tokens": 15630,
+        "charged_tokens": 2166,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 1982,
+          "output_tokens": 184,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "dag-waves",
+        "reserved_tokens": 16678,
+        "charged_tokens": 2085,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2036,
+          "output_tokens": 49,
+          "cache_read_tokens": 1920,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "dag-waves",
+        "reserved_tokens": 17112,
+        "charged_tokens": 2173,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2128,
+          "output_tokens": 45,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "dag-waves",
+        "reserved_tokens": 17531,
+        "charged_tokens": 2248,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2203,
+          "output_tokens": 45,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "dag-waves",
+        "reserved_tokens": 17950,
+        "charged_tokens": 2331,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2278,
+          "output_tokens": 53,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "dag-waves",
+        "reserved_tokens": 18679,
+        "charged_tokens": 2488,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2439,
+          "output_tokens": 49,
+          "cache_read_tokens": 2240,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "dag-waves",
+        "reserved_tokens": 19157,
+        "charged_tokens": 2588,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2541,
+          "output_tokens": 47,
+          "cache_read_tokens": 2048,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "dag-waves",
+        "reserved_tokens": 19723,
+        "charged_tokens": 2723,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2684,
+          "output_tokens": 39,
+          "cache_read_tokens": 2560,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "dag-waves",
+        "reserved_tokens": 20067,
+        "charged_tokens": 2779,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2738,
+          "output_tokens": 41,
+          "cache_read_tokens": 2432,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "dag-waves",
+        "reserved_tokens": 20428,
+        "charged_tokens": 2849,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2801,
+          "output_tokens": 48,
+          "cache_read_tokens": 2752,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "dag-waves",
+        "reserved_tokens": 20918,
+        "charged_tokens": 7015,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2919,
+          "output_tokens": 4096,
+          "cache_read_tokens": 2816,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "decimal-ledger",
+        "reserved_tokens": 15862,
+        "charged_tokens": 2164,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2042,
+          "output_tokens": 122,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "decimal-ledger",
+        "reserved_tokens": 17112,
+        "charged_tokens": 2248,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2228,
+          "output_tokens": 20,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "decimal-ledger",
+        "reserved_tokens": 17756,
+        "charged_tokens": 2394,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2374,
+          "output_tokens": 20,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "decimal-ledger",
+        "reserved_tokens": 18400,
+        "charged_tokens": 2579,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2520,
+          "output_tokens": 59,
+          "cache_read_tokens": 1984,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "decimal-ledger",
+        "reserved_tokens": 19318,
+        "charged_tokens": 2722,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2694,
+          "output_tokens": 28,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "decimal-ledger",
+        "reserved_tokens": 19976,
+        "charged_tokens": 2846,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2826,
+          "output_tokens": 20,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "decimal-ledger",
+        "reserved_tokens": 20620,
+        "charged_tokens": 3007,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2972,
+          "output_tokens": 35,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "decimal-ledger",
+        "reserved_tokens": 21223,
+        "charged_tokens": 3107,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 3059,
+          "output_tokens": 48,
+          "cache_read_tokens": 2560,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "decimal-ledger",
+        "reserved_tokens": 21952,
+        "charged_tokens": 3328,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 3308,
+          "output_tokens": 20,
+          "cache_read_tokens": 2944,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "decimal-ledger",
+        "reserved_tokens": 22596,
+        "charged_tokens": 7550,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 3454,
+          "output_tokens": 4096,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "streaming-jsonl",
+        "reserved_tokens": 15693,
+        "charged_tokens": 2227,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2007,
+          "output_tokens": 220,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "streaming-jsonl",
+        "reserved_tokens": 17365,
+        "charged_tokens": 6261,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2165,
+          "output_tokens": 4096,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:ttl-lru",
+        "reserved_tokens": 27913,
+        "charged_tokens": 2266,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2007,
+          "output_tokens": 259,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:ttl-lru",
+        "reserved_tokens": 29841,
+        "charged_tokens": 5227,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2256,
+          "output_tokens": 2971,
+          "cache_read_tokens": 0,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:ttl-lru",
+        "reserved_tokens": 41558,
+        "charged_tokens": 2415,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2390,
+          "output_tokens": 25,
+          "cache_read_tokens": 2240,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:dag-waves",
+        "reserved_tokens": 27922,
+        "charged_tokens": 2213,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 1982,
+          "output_tokens": 231,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:dag-waves",
+        "reserved_tokens": 29250,
+        "charged_tokens": 2201,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2112,
+          "output_tokens": 89,
+          "cache_read_tokens": 1920,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:dag-waves",
+        "reserved_tokens": 29984,
+        "charged_tokens": 2279,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2239,
+          "output_tokens": 40,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:dag-waves",
+        "reserved_tokens": 30488,
+        "charged_tokens": 2412,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2370,
+          "output_tokens": 42,
+          "cache_read_tokens": 2176,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:dag-waves",
+        "reserved_tokens": 30996,
+        "charged_tokens": 2550,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2506,
+          "output_tokens": 44,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:dag-waves",
+        "reserved_tokens": 31515,
+        "charged_tokens": 2695,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2650,
+          "output_tokens": 45,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:dag-waves",
+        "reserved_tokens": 31938,
+        "charged_tokens": 18494,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2725,
+          "output_tokens": 15769,
+          "cache_read_tokens": 2240,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:decimal-ledger",
+        "reserved_tokens": 28154,
+        "charged_tokens": 2127,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2042,
+          "output_tokens": 85,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:decimal-ledger",
+        "reserved_tokens": 29026,
+        "charged_tokens": 17780,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2213,
+          "output_tokens": 15567,
+          "cache_read_tokens": 1984,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:streaming-jsonl",
+        "reserved_tokens": 27985,
+        "charged_tokens": 2258,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2007,
+          "output_tokens": 251,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:streaming-jsonl",
+        "reserved_tokens": 29912,
+        "charged_tokens": 2279,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2202,
+          "output_tokens": 77,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:streaming-jsonl",
+        "reserved_tokens": 31515,
+        "charged_tokens": 2515,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2484,
+          "output_tokens": 31,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:streaming-jsonl",
+        "reserved_tokens": 32105,
+        "charged_tokens": 2582,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2566,
+          "output_tokens": 16,
+          "cache_read_tokens": 1984,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:streaming-jsonl",
+        "reserved_tokens": 32415,
+        "charged_tokens": 2656,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2605,
+          "output_tokens": 51,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:streaming-jsonl",
+        "reserved_tokens": 33322,
+        "charged_tokens": 2826,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2754,
+          "output_tokens": 72,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-expanded-20261003:streaming-jsonl",
+        "reserved_tokens": 33847,
+        "charged_tokens": 2924,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2870,
+          "output_tokens": 54,
+          "cache_read_tokens": 2496,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-fixed-20261003:decimal-ledger",
+        "reserved_tokens": 28151,
+        "charged_tokens": 2177,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2042,
+          "output_tokens": 135,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-fixed-20261003:decimal-ledger",
+        "reserved_tokens": 29619,
+        "charged_tokens": 4105,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2359,
+          "output_tokens": 1746,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      },
+      {
+        "task": "kalash-compact-fixed-20261003:decimal-ledger",
+        "reserved_tokens": 37040,
+        "charged_tokens": 18847,
+        "status": "complete",
+        "usage": {
+          "input_tokens": 2463,
+          "output_tokens": 16384,
+          "cache_read_tokens": 1792,
+          "cache_write_tokens": 0,
+          "reasoning_tokens": 0,
+          "type": "usage_update"
+        }
+      }
+    ]
+  }
+}

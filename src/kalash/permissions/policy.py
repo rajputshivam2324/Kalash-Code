@@ -99,6 +99,7 @@ class PolicyRequest:
     arguments: dict[str, Any] = field(default_factory=dict)
     confirmation_classes: list[ConfirmationClass] = field(default_factory=list)
     grant_signature: str = ""
+    remembered_grant: bool = False
 
 
 @dataclass
@@ -167,9 +168,17 @@ class PermissionPolicy:
             await self._emit_decision(request, result)
             return result
 
+        # Confinement is an immutable ceiling, including after prior approval.
+        if self.sandbox_mode == "read_only" and request.risk_class != RiskClass.READ:
+            result = PolicyResult(Decision.DENY, 4, "State changes denied in read-only sandbox")
+            await self._emit_decision(request, result)
+            return result
+
         # Stage 3: Existing grants. A grant is the user having already answered
         # this exact question, so it is not re-litigated by stage 6.
         result = await self._stage_3_grants(request)
+        if result is None and request.remembered_grant:
+            result = PolicyResult(Decision.ALLOW, 3, "Allowed by exact session approval")
         if result:
             await self._emit_decision(request, result)
             return result
@@ -224,7 +233,13 @@ class PermissionPolicy:
         """Stage 2: Check protected paths and branches."""
         for path in request.paths:
             for protected in self.protected_paths:
-                if fnmatch.fnmatch(path, protected.pattern):
+                if any(
+                    fnmatch.fnmatch(candidate, protected.pattern)
+                    for candidate in [
+                        path,
+                        *["/".join(path.split("/")[i:]) for i in range(len(path.split("/")))],
+                    ]
+                ):
                     return PolicyResult(
                         decision=Decision.DENY,
                         stage=2,
@@ -262,8 +277,8 @@ class PermissionPolicy:
             return None
 
         # Consume 'once' grants
-        if grant.get("lifetime") == "once":
-            await self._grant_store.consume(grant["id"])
+        if grant.get("lifetime") == "once" and not await self._grant_store.consume(grant["id"]):
+            return None
 
         # Honour the grant's own decision. Grants can be stored with
         # decision="deny", and returning ALLOW for one of those would turn a

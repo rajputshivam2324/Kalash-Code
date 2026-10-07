@@ -27,13 +27,28 @@ class BudgetDimension(StrEnum):
 class Usage:
     """Normalized token usage from a model call."""
 
-    input_tokens: int = 0
+    input_tokens: int = 0  # Includes cache reads; excludes cache writes.
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
     reasoning_tokens: int = 0
     source: str = "provider_reported"  # or "estimated"
     provider_raw: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if any(
+            value < 0
+            for value in (
+                self.input_tokens,
+                self.output_tokens,
+                self.cache_read_tokens,
+                self.cache_write_tokens,
+                self.reasoning_tokens,
+            )
+        ):
+            raise ValueError("Usage counters must be nonnegative")
+        if self.cache_read_tokens > self.input_tokens:
+            raise ValueError("Cache reads must be a subset of normalized input tokens")
 
     @property
     def total_tokens(self) -> int:
@@ -59,8 +74,8 @@ class BudgetState:
     """Current spend against budget ceilings."""
 
     # Ceilings
-    max_tokens: int = 500_000
-    max_cost: Decimal = field(default_factory=lambda: Decimal("2.00"))
+    max_tokens: int | None = None
+    max_cost: Decimal | None = None
     max_wallclock_s: int = 3600
     max_turns: int = 100
     max_tool_calls: int = 500
@@ -73,22 +88,31 @@ class BudgetState:
     turns_used: int = 0
     tool_calls_used: int = 0
     current_depth: int = 0
+    unknown_usage_attempts: int = 0
+    unknown_tokens_reserved: int = 0
+    unknown_cost_reserved: Decimal = field(default_factory=lambda: Decimal("0"))
 
     # Reservations (for child agents)
     tokens_reserved: int = 0
     cost_reserved: Decimal = field(default_factory=lambda: Decimal("0"))
 
-    def remaining_tokens(self) -> int:
-        return self.max_tokens - self.tokens_used - self.tokens_reserved
+    def remaining_tokens(self) -> int | None:
+        if self.max_tokens is None:
+            return None
+        return (
+            self.max_tokens - self.tokens_used - self.tokens_reserved - self.unknown_tokens_reserved
+        )
 
-    def remaining_cost(self) -> Decimal:
-        return self.max_cost - self.cost_used - self.cost_reserved
+    def remaining_cost(self) -> Decimal | None:
+        if self.max_cost is None:
+            return None
+        return self.max_cost - self.cost_used - self.cost_reserved - self.unknown_cost_reserved
 
     def check_ceiling(self) -> BudgetDimension | None:
         """Check if any ceiling is hit. Returns the dimension or None."""
-        if self.tokens_used >= self.max_tokens:
+        if self.max_tokens is not None and self.tokens_used >= self.max_tokens:
             return BudgetDimension.TOKENS
-        if self.cost_used >= self.max_cost:
+        if self.max_cost is not None and self.cost_used >= self.max_cost:
             return BudgetDimension.COST
         if self.wallclock_used_s >= self.max_wallclock_s:
             return BudgetDimension.WALLCLOCK
@@ -100,9 +124,9 @@ class BudgetState:
 
     def check_warning(self, threshold: float = 0.75) -> BudgetDimension | None:
         """Check if any dimension is at warning level."""
-        if self.tokens_used >= self.max_tokens * threshold:
+        if self.max_tokens is not None and self.tokens_used >= self.max_tokens * threshold:
             return BudgetDimension.TOKENS
-        if self.cost_used >= self.max_cost * Decimal(str(threshold)):
+        if self.max_cost is not None and self.cost_used >= self.max_cost * Decimal(str(threshold)):
             return BudgetDimension.COST
         if self.wallclock_used_s >= self.max_wallclock_s * threshold:
             return BudgetDimension.WALLCLOCK
@@ -120,20 +144,27 @@ class BudgetState:
             if pricing.cache_read_per_mtok is not None:
                 uncached = max(0, uncached - usage.cache_read_tokens)
             cost += Decimal(uncached) * pricing.input_per_mtok / Decimal(1_000_000)
-            cost += Decimal(usage.output_tokens) * pricing.output_per_mtok / Decimal(1_000_000)
+            regular_output = usage.output_tokens
+            if pricing.reasoning_per_mtok is not None:
+                regular_output = max(0, regular_output - usage.reasoning_tokens)
+            cost += Decimal(regular_output) * pricing.output_per_mtok / Decimal(1_000_000)
             if pricing.cache_read_per_mtok and usage.cache_read_tokens:
                 cost += (
                     Decimal(usage.cache_read_tokens)
                     * pricing.cache_read_per_mtok
                     / Decimal(1_000_000)
                 )
-            if pricing.cache_write_per_mtok and usage.cache_write_tokens:
+            if usage.cache_write_tokens:
                 cost += (
                     Decimal(usage.cache_write_tokens)
-                    * pricing.cache_write_per_mtok
+                    * (
+                        pricing.cache_write_per_mtok
+                        if pricing.cache_write_per_mtok is not None
+                        else pricing.input_per_mtok
+                    )
                     / Decimal(1_000_000)
                 )
-            if pricing.reasoning_per_mtok and usage.reasoning_tokens:
+            if pricing.reasoning_per_mtok is not None and usage.reasoning_tokens:
                 cost += (
                     Decimal(usage.reasoning_tokens)
                     * pricing.reasoning_per_mtok
@@ -143,7 +174,11 @@ class BudgetState:
 
     def reserve_for_child(self, tokens: int, cost: Decimal) -> bool:
         """Reserve budget for a child agent. Returns False if insufficient."""
-        if tokens > self.remaining_tokens() or cost > self.remaining_cost():
+        remaining_tokens = self.remaining_tokens()
+        remaining_cost = self.remaining_cost()
+        if (remaining_tokens is not None and tokens > remaining_tokens) or (
+            remaining_cost is not None and cost > remaining_cost
+        ):
             return False
         self.tokens_reserved += tokens
         self.cost_reserved += cost
@@ -160,12 +195,14 @@ class BudgetState:
 
 
 def estimate_tokens(text: str, mode: str = "code") -> int:
-    """Estimate token count using character heuristic.
+    """Estimate ASCII by character ratio and non-ASCII by UTF-8 bytes.
 
-    Conservative (over-estimates): 3.2 chars/token for code, 4.0 for prose.
-    Safety multiplier: 1.05.
+    The ASCII heuristic can undercount; this is not a provider tokenizer or
+    an exact billing guarantee. A prose ratio is unsafe for Unicode text.
     """
     if not text:
         return 0
     divisor = 3.2 if mode == "code" else 4.0
-    return int(len(text) / divisor * 1.05)
+    ascii_chars = sum(ord(character) < 128 for character in text)
+    other_bytes = len(text.encode("utf-8")) - ascii_chars
+    return max(1, int((ascii_chars / divisor + other_bytes) * 1.05))

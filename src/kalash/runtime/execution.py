@@ -8,13 +8,16 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
-from kalash.core.budget import BudgetState
 from kalash.core.events import Event, EventBus, EventType
+from kalash.core.privacy import scrub_metadata, scrub_text
 from kalash.models.normalize import ContentBlock, ToolResultBlock, ToolUseBlock
+from kalash.runtime.journal import JournalError
 from kalash.runtime.toolhost import ToolCategory, ToolHostProtocol
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
+
+    from kalash.core.budget import BudgetState
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +114,7 @@ class ToolExecutor:
             data={
                 "tool_name": call.name,
                 "tool_use_id": call.id,
-                "arguments": call.input,
+                "arguments": scrub_metadata(call.input),
             },
         )
         await self.event_bus.emit(pre_event)
@@ -122,6 +125,11 @@ class ToolExecutor:
                 tool_use_id=call.id, content="Not executed: run budget exhausted", is_error=True
             )
         self.budget.tool_calls_used += 1
+        journal = getattr(self.host, "journal", None)
+        if journal is not None:
+            await journal.append(
+                "tool_attempted", {"call_id": call.id, "tool": call.name}, budget=self.budget
+            )
         if "_raw" in call.input:
             return ToolResultBlock(
                 tool_use_id=call.id,
@@ -145,6 +153,8 @@ class ToolExecutor:
                 is_error=is_error,
                 evidence=evidence,
             )
+        except JournalError:
+            raise
         except Exception as exc:
             logger.warning("Tool %s failed: %s", call.name, exc)
             duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -158,13 +168,13 @@ class ToolExecutor:
                         "tool_use_id": call.id,
                         "duration_ms": duration_ms,
                         "ok": False,
-                        "error": str(exc),
+                        "error": scrub_text(str(exc)),
                     },
                 )
             )
 
             return ToolResultBlock(
                 tool_use_id=call.id,
-                content=f"Error executing {call.name}: {exc}",
+                content=scrub_text(f"Error executing {call.name}: {exc}"),
                 is_error=True,
             )

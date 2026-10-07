@@ -69,10 +69,10 @@ def edit(
         console.print(f"[green]Config saved: {config_path}[/green]")
     except FileNotFoundError:
         console.print(f"[red]Editor not found: {editor}[/red]")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
     except subprocess.CalledProcessError:
         console.print("[red]Editor exited with error.[/red]")
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from None
 
 
 @config_app.command("show")
@@ -81,7 +81,7 @@ def show(
         str | None,
         typer.Option("--scope", "-s", help="Filter by scope: global, project"),
     ] = None,
-    format: Annotated[
+    format: Annotated[  # noqa: A002 - Keep the established public keyword/CLI spelling.
         str,
         typer.Option("--format", "-f", help="Output format: toml, json, yaml"),
     ] = "toml",

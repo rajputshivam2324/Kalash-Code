@@ -1,0 +1,110 @@
+{
+  "record_type": "observed historical summaries recovered from conversation tool results",
+  "resumable": false,
+  "warning": "Not an original request ledger; never supply this file as --prior-ledger. Original attempts and usage records are missing.",
+  "allowance": 200000,
+  "charged_tokens_observed": 187770,
+  "remaining_by_observed_total": 12230,
+  "provider_reported_tokens_observed": 187770,
+  "controller_cost_estimate_inr": "5.026278",
+  "rates_recorded_on": "2026-10-03",
+  "phases": [
+    {
+      "id": "original-repair-matrix",
+      "new_charged_tokens": 100383,
+      "cumulative_charged_tokens": 100383,
+      "outcome": "2/4 independently resolved",
+      "tasks": {
+        "ttl-lru": {
+          "tokens": 26850,
+          "passed": false
+        },
+        "dag-waves": {
+          "tokens": 27019,
+          "passed": false
+        },
+        "decimal-ledger": {
+          "tokens": 25439,
+          "passed": true
+        },
+        "streaming-jsonl": {
+          "tokens": 21075,
+          "passed": true
+        }
+      },
+      "evidence": [
+        "recovered_tool_outputs/line-0607.txt",
+        "recovered_tool_outputs/line-0626.txt"
+      ]
+    },
+    {
+      "id": "build",
+      "new_charged_tokens": 29595,
+      "cumulative_charged_tokens": 129978,
+      "outcome": "1/10 acceptance checks; 10 candidate-test failures and 1 error",
+      "evidence": [
+        "recovered_tool_outputs/line-0661.txt",
+        "recovered_tool_outputs/line-0669.txt",
+        "recovered_tool_outputs/line-1338.txt"
+      ]
+    },
+    {
+      "id": "recovery",
+      "new_charged_tokens": 18204,
+      "cumulative_charged_tokens": 148182,
+      "outcome": "Same broken partial build; 1/10 acceptance checks",
+      "evidence": [
+        "recovered_tool_outputs/line-0778.txt",
+        "recovered_tool_outputs/line-0786.txt",
+        "recovered_tool_outputs/line-1338.txt"
+      ]
+    },
+    {
+      "id": "ttl-original-tools-retry",
+      "new_charged_tokens": 25516,
+      "cumulative_charged_tokens": 173698,
+      "outcome": "Failed TTL semantics",
+      "evidence": [
+        "recovered_tool_outputs/line-1145.txt"
+      ]
+    },
+    {
+      "id": "ttl-minimal-tools-retry",
+      "new_charged_tokens": 10974,
+      "cumulative_charged_tokens": 184672,
+      "outcome": "Harness failure: initial tool identities emitted twice",
+      "evidence": [
+        "recovered_tool_outputs/line-1145.txt",
+        "recovered_tool_outputs/line-1153.txt"
+      ]
+    },
+    {
+      "id": "ttl-identity-fixed-retry",
+      "new_charged_tokens": 3098,
+      "cumulative_charged_tokens": 187770,
+      "outcome": "Normal identities; no patch; controller reservation refusal",
+      "evidence": [
+        "recovered_tool_outputs/line-1207.txt",
+        "recovered_tool_outputs/line-1348.txt",
+        "recovered_tool_outputs/line-1361.txt"
+      ]
+    }
+  ],
+  "evidence_gap": {
+    "original_temporary_run_directories_missing": true,
+    "complete_provider_traces_missing": true,
+    "original_per_request_ledger_missing": true,
+    "complete_candidate_workspaces_missing": true
+  },
+  "old_allowances_untouched": [
+    {
+      "limit": 60000,
+      "charged": 29953
+    },
+    {
+      "limit": 240000,
+      "charged": 219708
+    }
+  ],
+  "paid_calls_during_october_7_continuation": 0
+}

@@ -27,6 +27,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from kalash.core.errors import HookDeniedError
 from kalash.hooks.events import HookEvent
 from kalash.hooks.runner import HandlerType, HookConfig
 
@@ -45,8 +46,13 @@ def _parse_trigger(raw: str) -> HookEvent | None:
 def _parse_hook(raw: dict[str, Any], source: Path) -> HookConfig | None:
     """Build one HookConfig, or None if the record is unusable."""
     trigger = _parse_trigger(raw.get("trigger", ""))
+    required = raw.get("required", False)
+    if not isinstance(required, bool):
+        raise ValueError("Hook required must be a boolean")
     if trigger is None:
         logger.warning("hook in %s has unknown trigger %r", source, raw.get("trigger"))
+        if required:
+            raise ValueError("Required hook has unknown trigger")
         return None
 
     action = raw.get("action") or {}
@@ -65,6 +71,7 @@ def _parse_hook(raw: dict[str, Any], source: Path) -> HookConfig | None:
             matcher=raw.get("matcher") or None,
             command=command,
             timeout_s=float(raw.get("timeout", 60)),
+            required=required,
         )
 
     if action_type == "http":
@@ -78,6 +85,7 @@ def _parse_hook(raw: dict[str, Any], source: Path) -> HookConfig | None:
             matcher=raw.get("matcher") or None,
             url=url,
             timeout_s=float(raw.get("timeout", 60)),
+            required=required,
         )
 
     # "agent" actions inject a prompt rather than running anything; they are not
@@ -88,14 +96,34 @@ def _parse_hook(raw: dict[str, Any], source: Path) -> HookConfig | None:
 
 def discover_hooks(cwd: Path | None = None) -> list[HookConfig]:
     """Find and parse hook definitions for a project."""
+    from kalash.core.trust import has_trust_record, is_trusted, trusted_paths
+
     base = (cwd or Path.cwd()).resolve()
     configs: list[HookConfig] = []
+    try:
+        authorized = trusted_paths()
+    except ValueError as error:
+        raise HookDeniedError(f"Cannot validate hook authorization registry: {error}") from error
+    for path in authorized:
+        if (
+            any(path.is_relative_to(base / relative) for relative in HOOK_DIRS)
+            and not path.is_file()
+        ):
+            raise HookDeniedError(
+                f"Previously authorized hook configuration is missing: {path}; "
+                "restore it or explicitly revoke it with kalash hooks untrust"
+            )
 
     for relative in HOOK_DIRS:
         directory = base / relative
         if not directory.is_dir():
             continue
         for path in sorted(directory.glob("*.json")):
+            if has_trust_record(path) and not is_trusted(path):
+                raise HookDeniedError(
+                    f"Previously authorized hook configuration changed: {path}; "
+                    "review it and authorize the new contents with kalash hooks trust"
+                )
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError) as exc:
@@ -108,9 +136,18 @@ def discover_hooks(cwd: Path | None = None) -> list[HookConfig]:
                 continue
 
             for raw in entries:
-                if isinstance(raw, dict) and (config := _parse_hook(raw, path)):
-                    config.source_path = str(path.resolve())
-                    configs.append(config)
+                if isinstance(raw, dict):
+                    try:
+                        config = _parse_hook(raw, path)
+                        if config is None and raw.get("required") is True:
+                            raise ValueError("Required hook has no supported executable action")
+                    except (ValueError, TypeError) as error:
+                        raise HookDeniedError(
+                            f"Invalid hook configuration in {path}: {error}"
+                        ) from error
+                    if config is not None:
+                        config.source_path = str(path.resolve())
+                        configs.append(config)
 
     return configs
 
@@ -128,6 +165,10 @@ def build_hook_runner(cwd: Path | None = None) -> Any | None:
         if is_trusted(Path(config.source_path)):
             configs.append(config)
         else:
+            if config.required:
+                raise HookDeniedError(
+                    f"Required hook configuration is untrusted: {config.source_path}"
+                )
             logger.warning(
                 "Skipping untrusted hook config %s; authorize with kalash hooks trust",
                 config.source_path,
@@ -140,8 +181,12 @@ def build_hook_runner(cwd: Path | None = None) -> Any | None:
         from kalash.storage.engine import get_engine
 
         runner = HookRunner(get_engine())
-    except Exception:
-        logger.warning("could not initialise the hook runner", exc_info=True)
+    except Exception as error:
+        if any(config.required for config in configs):
+            raise HookDeniedError(
+                f"Could not initialise required hook runner: {type(error).__name__}"
+            ) from error
+        logger.warning("could not initialise the hook runner: %s", type(error).__name__)
         return None
 
     for config in configs:

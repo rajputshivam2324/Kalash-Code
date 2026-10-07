@@ -205,7 +205,7 @@ async def trial(task: CodingTask, args: argparse.Namespace, attempt: int) -> dic
         "duration_s": round(time.monotonic() - started, 3),
         "usage": usage,
         "cost_usd": str(agent.budget.cost_used) if agent else "0",
-        "iterations": agent.loop._iteration if agent else 0,
+        "iterations": agent.loop._iteration if agent else 0,  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         "tool_calls": agent.budget.tool_calls_used if agent else 0,
     }
     (root / "result.json").write_text(json.dumps(result, indent=2) + "\n")
@@ -222,7 +222,7 @@ async def run(args: argparse.Namespace) -> int:
         for attempt in range(1, args.trials + 1):
             result = await trial(task, args, attempt)
             results.append(result)
-            print(f"{task.id} #{attempt}: {result['outcome']}")
+            print(f"{task.id} #{attempt}: {result['outcome']}")  # noqa: T201 - Evaluation CLI progress output.
     summary = {
         "suite": "local-coding-smoke",
         "mode": "scripted" if args.scripted else "live",
@@ -237,7 +237,7 @@ async def run(args: argparse.Namespace) -> int:
         / len(tasks),
     }
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
-    print(json.dumps(summary))
+    print(json.dumps(summary))  # noqa: T201 - Evaluation CLI progress output.
     return int(summary["resolved"] != len(results))
 
 

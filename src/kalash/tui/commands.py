@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -20,107 +19,109 @@ async def run_command(app: KalashApp, text: str) -> None:
     if command == "/exit":
         app.exit()
     elif command == "/help":
-        await app._post(SystemMessage([f"{c:<10} {d}" for c, d in SLASH_COMMANDS]))
+        await app._post(SystemMessage([f"{c:<10} {d}" for c, d in SLASH_COMMANDS]))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/clear":
         # Guard against accidental erasure of a multi-hour session (U-5).
-        transcript = app._transcript()
+        transcript = app._transcript()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         children = list(transcript.children)
         if len(children) > 1 and not getattr(app, "_clear_confirmed", False):
-            app._clear_confirmed = True
-            await app._post(
+            app._clear_confirmed = True  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+            await app._post(  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
                 SystemMessage(
                     "⚠ this will erase the entire transcript. run /clear again to confirm.",
                     error=True,
                 )
             )
             return
-        app._clear_confirmed = False
+        app._clear_confirmed = False  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         await transcript.remove_children()
-        app._banner_removed = True
+        transcript.clear_archive()
+        app._banner_removed = True  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/new":
-        if app._stream_worker is not None:
-            app._stream_worker.cancel()
-        if app._agent is not None:
-            app._agent.cancel()
-            await app._agent.close()
-            app._agent = None
-            app._agent_signature = ""
-        await app._transcript().remove_children()
-        await app._transcript().mount(WelcomeBanner())
-        app._banner_removed = False
-        app._history.clear()
+        if app._stream_worker is not None:  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+            app._stream_worker.cancel()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+        if app._agent is not None:  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+            app._agent.cancel()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+            await app._agent.close()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+            app._agent = None  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+            app._agent_signature = ""  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+        await app._transcript().remove_children()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+        app._transcript().clear_archive()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+        await app._transcript().mount(WelcomeBanner())  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+        app._banner_removed = False  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+        app._history.clear()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/status":
-        await app._post(SystemMessage(app._status_lines()))
+        await app._post(SystemMessage(app._status_lines()))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/connect":
-        await app._start_connect()
+        await app._start_connect()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/key":
         if app.provider_id:
             from kalash.models.catalog import get_provider
 
             provider = get_provider(app.provider_id)
             if provider and provider.requires_key:
-                app._pending_provider = app.provider_id
-                app._ask_for(InputIntent.API_KEY, f"paste your new {provider.name} API key")
+                app._pending_provider = app.provider_id  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+                app._ask_for(InputIntent.API_KEY, f"paste your new {provider.name} API key")  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
             else:
-                await app._post(SystemMessage("current provider does not require an API key"))
+                await app._post(SystemMessage("current provider does not require an API key"))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         else:
-            await app._post(SystemMessage("no provider connected — run /connect", error=True))
+            await app._post(SystemMessage("no provider connected — run /connect", error=True))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/theme":
-        await app._start_theme()
+        await app._start_theme()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/models":
-        await app._start_models()
+        await app._start_models()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/mode":
         app.action_toggle_mode()
-        await app._post(SystemMessage(f"mode → {app.mode}"))
+        await app._post(SystemMessage(f"mode → {app.mode}"))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command in {"/copy", "/cp"}:
         parts = text.split(maxsplit=1)
         subcmd = parts[1].lower().strip() if len(parts) > 1 else "reply"
         if subcmd in {"code", "block"}:
-            await app._post(SystemMessage(app._copy_last_code()))
+            await app._post(SystemMessage(app._copy_last_code()))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         elif subcmd in {"transcript", "all"}:
-            await app._post(SystemMessage(app._copy_full_transcript()))
+            await app._post(SystemMessage(app._copy_full_transcript()))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         else:
-            await app._post(SystemMessage(app._copy_last_reply()))
+            await app._post(SystemMessage(app._copy_last_reply()))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/export":
-        await app._post(SystemMessage(app._export_transcript()))
+        await app._post(SystemMessage(app._export_transcript()))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/plan":
-        await app._show_plan_widget()
+        await app._show_plan_widget()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/tools":
-        await app._post(SystemMessage(app._tool_lines()))
+        await app._post(SystemMessage(app._tool_lines()))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/mcp":
-        await app._post(SystemMessage(app._mcp_lines()))
+        await app._post(SystemMessage(app._mcp_lines()))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/skills":
-        await app._post(SystemMessage(app._skill_lines()))
+        await app._post(SystemMessage(app._skill_lines()))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/notes":
-        await app._post(SystemMessage(app._scratch_text(notes=True)))
+        await app._post(SystemMessage(app._scratch_text(notes=True)))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/scratch":
-        await app._post(SystemMessage(app._scratch_text(notes=False)))
+        await app._post(SystemMessage(app._scratch_text(notes=False)))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/cost":
-        await app._post(SystemMessage(app._cost_lines()))
+        await app._post(SystemMessage(app._cost_lines()))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/sessions":
-        await app._start_sessions()
+        await app._start_sessions()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     elif command == "/init":
-        await app._post(SystemMessage(app._write_starter_instructions()))
+        await app._post(SystemMessage(app._write_starter_instructions()))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     else:
-        await app._post(SystemMessage(f"unknown command: {command}", error=True))
+        await app._post(SystemMessage(f"unknown command: {command}", error=True))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
 
 async def show_plan_widget(app: KalashApp) -> None:
     from kalash.tools.todo import get_task_list
     from kalash.tui.messages import PlanMessage, SystemMessage
 
-    agent = app._agent
+    agent = app._agent  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     if agent is None:
-        await app._post(SystemMessage("no session active — send a message to begin"))
+        await app._post(SystemMessage("no session active — send a message to begin"))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         return
     task_list = get_task_list(agent.session_id)
     if task_list and task_list.tasks:
         tasks_data = [
             {"description": t.description, "completed": t.completed} for t in task_list.tasks
         ]
-        await app._post(PlanMessage(description=task_list.description, tasks=tasks_data))
+        await app._post(PlanMessage(description=task_list.description, tasks=tasks_data))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     else:
-        await app._post(SystemMessage(app._plan_text()))
+        await app._post(SystemMessage(app._plan_text()))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
 
 def status_lines(app: KalashApp) -> list[str]:
@@ -128,12 +129,12 @@ def status_lines(app: KalashApp) -> list[str]:
 
     lines = [
         f"mode      {app.mode}",
-        f"theme     {app._theme.label}",
+        f"theme     {app._theme.label}",  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         f"provider  {app.provider_id or '—'}",
         f"model     {app.model_id or '—'}",
-        f"cwd       {os.getcwd()}",
+        f"cwd       {Path.cwd()}",
     ]
-    agent = app._agent
+    agent = app._agent  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     if agent is None:
         lines.append("session   not started (send a message to begin)")
         return lines
@@ -158,7 +159,7 @@ def status_lines(app: KalashApp) -> list[str]:
 
 
 def tool_lines(app: KalashApp) -> list[str]:
-    agent = app._agent
+    agent = app._agent  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     if agent is None:
         from kalash.tools.builtins import core_tools
 
@@ -166,7 +167,7 @@ def tool_lines(app: KalashApp) -> list[str]:
     return [f"{s['name']:<12} {s['description'][:60]}" for s in agent.host.schemas()]
 
 
-def mcp_lines(app: KalashApp) -> list[str]:
+def mcp_lines(app: KalashApp) -> list[str]:  # noqa: ARG001 - Preserve callback/keyword compatibility.
     try:
         from kalash.mcp.registry import MCPRegistry
 
@@ -183,7 +184,7 @@ def mcp_lines(app: KalashApp) -> list[str]:
     return lines
 
 
-def skill_lines(app: KalashApp) -> list[str]:
+def skill_lines(app: KalashApp) -> list[str]:  # noqa: ARG001 - Preserve callback/keyword compatibility.
     try:
         from kalash.skills.loader import SkillLoader
 
@@ -201,7 +202,7 @@ def skill_lines(app: KalashApp) -> list[str]:
 def scratch_text(app: KalashApp, *, notes: bool) -> str:
     from kalash.runtime.scratchpad import get_scratchpad
 
-    agent = app._agent
+    agent = app._agent  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     if agent is None:
         return "no session yet"
     pad = get_scratchpad(agent.session_id)
@@ -210,19 +211,21 @@ def scratch_text(app: KalashApp, *, notes: bool) -> str:
 
 
 def cost_lines(app: KalashApp) -> list[str]:
-    agent = app._agent
+    agent = app._agent  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     if agent is None:
         return ["no session yet"]
     budget = agent.budget
     return [
-        f"tokens    {budget.tokens_used:,} / {budget.max_tokens:,}",
+        f"tokens    {budget.tokens_used:,} / "
+        + (f"{budget.max_tokens:,}" if budget.max_tokens is not None else "no cap"),
         f"turns     {budget.turns_used} / {budget.max_turns}",
         f"tools     {budget.tool_calls_used} / {budget.max_tool_calls}",
-        f"cost      ${budget.cost_used} / ${budget.max_cost}",
+        f"cost      ${budget.cost_used} / "
+        + (f"${budget.max_cost}" if budget.max_cost is not None else "no cap"),
     ]
 
 
-def write_starter_instructions(app: KalashApp) -> str:
+def write_starter_instructions(app: KalashApp) -> str:  # noqa: ARG001 - Preserve callback/keyword compatibility.
 
     target = Path.cwd() / "KALASH.md"
     if target.exists():

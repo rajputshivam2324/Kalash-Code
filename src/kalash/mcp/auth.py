@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -42,7 +43,7 @@ class TokenData:
     access_token: str
     refresh_token: str | None = None
     expires_at: float = 0.0  # Unix timestamp
-    token_type: str = "Bearer"
+    token_type: str = "Bearer"  # noqa: S105 - Protocol label or synthetic fixture, never a credential.
     scopes: list[str] = field(default_factory=list)
 
     @property
@@ -173,30 +174,19 @@ class MCPAuth:
         if not config or not token_data.refresh_token:
             return None
 
-        import urllib.error
-        import urllib.request
+        from kalash.mcp.oauth_http import token_request
 
-        body = urlencode(
-            {
-                "grant_type": "refresh_token",
-                "refresh_token": token_data.refresh_token,
-                "client_id": config.client_id,
-            }
-        ).encode()
+        fields = {
+            "grant_type": "refresh_token",
+            "refresh_token": token_data.refresh_token,
+            "client_id": config.client_id,
+        }
 
         if config.client_secret:
-            body += f"&client_secret={config.client_secret}".encode()
-
-        req = urllib.request.Request(
-            config.token_url,
-            data=body,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
+            fields["client_secret"] = config.client_secret
 
         try:
-            response = await asyncio.to_thread(urllib.request.urlopen, req, timeout=15)
-            data = json.loads(response.read().decode())
+            data = await token_request(config.token_url, fields)
             return TokenData(
                 access_token=data["access_token"],
                 refresh_token=data.get("refresh_token", token_data.refresh_token),
@@ -214,30 +204,19 @@ class MCPAuth:
         code_verifier: str,
     ) -> TokenData:
         """Exchange an authorization code for tokens."""
-        import urllib.request
+        from kalash.mcp.oauth_http import token_request
 
-        body = urlencode(
-            {
-                "grant_type": "authorization_code",
-                "code": code,
-                "redirect_uri": config.redirect_uri,
-                "client_id": config.client_id,
-                "code_verifier": code_verifier,
-            }
-        ).encode()
+        fields = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": config.redirect_uri,
+            "client_id": config.client_id,
+            "code_verifier": code_verifier,
+        }
 
         if config.client_secret:
-            body += f"&client_secret={config.client_secret}".encode()
-
-        req = urllib.request.Request(
-            config.token_url,
-            data=body,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST",
-        )
-
-        response = await asyncio.to_thread(urllib.request.urlopen, req, timeout=15)
-        data = json.loads(response.read().decode())
+            fields["client_secret"] = config.client_secret
+        data = await token_request(config.token_url, fields)
 
         return TokenData(
             access_token=data["access_token"],
@@ -260,29 +239,29 @@ class MCPAuth:
         received_error: str | None = None
 
         class CallbackHandler(BaseHTTPRequestHandler):
-            def do_GET(self_handler) -> None:
+            def do_GET(self) -> None:
                 nonlocal received_code, received_error
-                params = parse_qs(urlparse(self_handler.path).query)
+                params = parse_qs(urlparse(self.path).query)
 
                 state = params.get("state", [""])[0]
                 if state != expected_state:
                     received_error = "State mismatch"
-                    self_handler.send_response(400)
-                    self_handler.end_headers()
-                    self_handler.wfile.write(b"State mismatch")
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(b"State mismatch")
                     return
 
                 if "error" in params:
                     received_error = params["error"][0]
-                    self_handler.send_response(400)
-                    self_handler.end_headers()
-                    self_handler.wfile.write(received_error.encode())
+                    self.send_response(400)
+                    self.end_headers()
+                    self.wfile.write(received_error.encode())
                     return
 
                 received_code = params.get("code", [""])[0]
-                self_handler.send_response(200)
-                self_handler.end_headers()
-                self_handler.wfile.write(b"Authorization successful. You can close this tab.")
+                self.send_response(200)
+                self.end_headers()
+                self.wfile.write(b"Authorization successful. You can close this tab.")
 
             def log_message(self, *args: Any) -> None:
                 pass  # Suppress server logs
@@ -351,5 +330,7 @@ class MCPAuth:
             keyring = importlib.import_module("keyring")
 
             await asyncio.to_thread(keyring.delete_password, SERVICE_NAME, server_name)
-        except Exception:  # keyring missing or backend unavailable
-            pass
+        except Exception as error:
+            logging.getLogger(__name__).debug(
+                "Optional backend unavailable: %s", type(error).__name__
+            )

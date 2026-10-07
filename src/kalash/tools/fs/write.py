@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import contextlib
-import os
 import stat
-import tempfile
-from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -22,6 +19,8 @@ from .common import (
     _canonicalize,
     _check_writable,
     _content_digest,
+    conditional_replace,
+    post_file_edit,
 )
 
 
@@ -84,7 +83,7 @@ class WriteTool:
     def cancellable(self) -> bool:
         return False
 
-    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:
+    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:  # noqa: ARG002 - Preserve provider/tool callback signature.
         return frozenset()
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:
@@ -106,14 +105,18 @@ class WriteTool:
             if not args.digest:
                 return ToolEnvelope.fail(
                     code="KALASH_TOOL_STALE_READ",
-                    message=f"File exists; provide digest='{current_digest}' to confirm overwrite (I-012).",
+                    message=(
+                        f"File exists; provide digest='{current_digest}' "
+                        f"to confirm overwrite (I-012)."
+                    ),
                     recoverable=True,
                     remediation=f"Pass digest='{current_digest}' in the write call to overwrite.",
                 )
             if args.digest != current_digest:
                 return ToolEnvelope.fail(
                     code="KALASH_TOOL_STALE_READ",
-                    message=f"Digest mismatch — file changed since last read. Current digest is '{current_digest}'.",
+                    message="Digest mismatch — file changed since last read. "
+                    f"Current digest is '{current_digest}'.",
                     recoverable=True,
                     remediation=f"Pass digest='{current_digest}' in the write call.",
                 )
@@ -147,63 +150,22 @@ class WriteTool:
 
         # Atomic write: temp -> fsync -> replace
         content_bytes = args.content.encode("utf-8")
-        tmp_path: Path | None = None
-        try:
-            fd = tempfile.NamedTemporaryFile(
-                mode="wb",
-                dir=path.parent,
-                prefix=".kalash_",
-                suffix=".tmp",
-                delete=False,
-            )
-            tmp_path = Path(fd.name)
-            try:
-                fd.write(content_bytes)
-                fd.flush()
-                os.fsync(fd.fileno())
-            finally:
-                fd.close()
-
-            # Restore permissions if overwriting
-            if existing_mode is not None:
-                os.chmod(tmp_path, existing_mode)
-
-            os.replace(tmp_path, path)
-        except OSError as exc:
-            # Clean up temp file on failure
-            if tmp_path is not None and tmp_path.exists():
-                tmp_path.unlink(missing_ok=True)
-            return ToolEnvelope.fail(
-                code="KALASH_TOOL_ERROR",
-                message=f"Write failed: {exc}",
-                recoverable=True,
-            )
+        if error := conditional_replace(path, content_bytes, args.digest, ctx, existing_mode):
+            return error
 
         new_digest = _content_digest(content_bytes)
         kind = "modified" if existing_mode is not None else "created"
 
-        if ctx.hooks:
-            from kalash.hooks.events import FileEditPayload, HookEvent
-
-            try:
-                await ctx.hooks.dispatch(
-                    FileEditPayload(
-                        event=HookEvent.POST_FILE_EDIT,
-                        session_id=ctx.session_id,
-                        run_id=ctx.run_id,
-                        path=str(path),
-                        operation="edit" if existing_mode is not None else "create",
-                        content_preview=args.content[:100],
-                    )
-                )
-            except Exception:
-                pass
+        hook_warnings = await post_file_edit(
+            path, "edit" if existing_mode is not None else "create", args.content, ctx
+        )
 
         diff = make_diff(str(path), previous_text, args.content)
 
         return ToolEnvelope.success(
             content=f"Wrote {len(content_bytes)} bytes to {path} ({diff.stat.render()})",
             metadata={
+                "hook_warnings": hook_warnings,
                 "path": str(path),
                 "content_digest": new_digest,
                 "bytes_written": len(content_bytes),

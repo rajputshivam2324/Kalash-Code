@@ -5,8 +5,7 @@ from __future__ import annotations
 import getpass
 import logging
 from decimal import Decimal
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.core.config import KalashConfig, load_config
 from kalash.core.ids import generate_id
@@ -22,7 +21,11 @@ from kalash.memory.protocol import (
     Trust,
     Visibility,
 )
-from kalash.memory.router import MemoryRouter
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from kalash.memory.router import MemoryRouter
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +120,11 @@ class SessionMemory:
                 "content": hit.record.content,
                 "score": float(hit.score),
                 "kind": hit.record.kind.value,
+                "source": hit.record.provenance.source.value,
+                "trust": hit.record.provenance.trust.value,
+                "created_at": hit.record.provenance.created_at.isoformat(),
+                "scope": hit.record.scope.visibility.value,
+                "confidence": str(hit.record.confidence),
             }
             for hit in hits
         ]
@@ -127,6 +135,7 @@ class SessionMemory:
         *,
         scope: str = "project",
         tags: list[str] | None = None,
+        tool_call_id: str | None = None,
     ) -> str:
         router = await self._router()
         mem_id = generate_id("mem_")
@@ -139,10 +148,12 @@ class SessionMemory:
                 scope_name=scope,
             ),
             provenance=Provenance(
-                source=Source.USER_STATED,
-                trust=Trust.HIGH,
+                source=Source.AGENT_INFERRED,
+                trust=Trust.LOW,
                 session_id=self.session_id,
+                tool_call_id=tool_call_id,
             ),
+            confidence=Decimal("0.5"),
             metadata={"tags": tags or [], "requested_id": mem_id},
         )
         receipts = await router.write(intent)
@@ -155,12 +166,13 @@ class SessionMemory:
         *,
         memory_id: str = "",
         content_match: str = "",
+        scope: str = "project",
     ) -> int:
         router = await self._router()
         if memory_id:
             record = await router.get(memory_id)
-            scope = project_scope(self.cwd, session_id=self.session_id)
-            if record is None or not router.visible(record.scope, scope):
+            scope_obj = project_scope(self.cwd, session_id=self.session_id, scope_name=scope)
+            if record is None or not router.visible(record.scope, scope_obj):
                 return 0
             receipts = await router.forget(ForgetSelector(ids=[memory_id]))
             return sum(r.count for r in receipts)
@@ -168,7 +180,7 @@ class SessionMemory:
             hits = await router.recall(
                 RecallQuery(
                     text=content_match,
-                    scope=project_scope(self.cwd),
+                    scope=project_scope(self.cwd, session_id=self.session_id, scope_name=scope),
                     limit=20,
                 )
             )

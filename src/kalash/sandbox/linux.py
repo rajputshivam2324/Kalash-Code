@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from .policy import SandboxMode, SandboxPolicy
+from .policy import NetworkPolicy, SandboxMode, SandboxPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -314,17 +314,32 @@ class LinuxSandbox:
         # root beneath it — and workspaces under /tmp are common enough (tests,
         # scratch checkouts) that getting this backwards silently hides the
         # project from every command.
-        if not any(str(root).startswith("/tmp") for root in self.policy.writable_roots):
-            args.extend(["--tmpfs", "/tmp"])
+        if not any(str(root).startswith("/tmp") for root in self.policy.writable_roots):  # noqa: S108 - Virtual sandbox path or synthetic path; no host temporary file creation.
+            args.extend(["--tmpfs", "/tmp"])  # noqa: S108 - Virtual sandbox path or synthetic path; no host temporary file creation.
 
         # Writable bind mounts, at their real paths so absolute paths still work.
         for root in self.policy.writable_roots:
             root_str = str(root)
             if Path(root_str).exists():
                 args.extend(["--bind", root_str, root_str])
+        if self.policy.mode == SandboxMode.READ_ONLY:
+            root_str = str(self.policy.workspace_root.resolve())
+            args.extend(["--ro-bind", root_str, root_str])
 
         # Network isolation
-        if not network and not self.policy.network_allowed():
+        from .policy import protected_existing_paths
+
+        for protected in protected_existing_paths(
+            [self.policy.workspace_root, *self.policy.writable_roots], self.policy.extra_protected
+        ):
+            # Mountpoints cannot be overwritten/renamed by a writable parent.
+            if protected.is_file() or protected.is_dir():
+                source = str(protected) if ".git" in protected.parts else "/dev/null"
+                args.extend(["--ro-bind", source, str(protected)])
+
+        if self.policy.network_policy == NetworkPolicy.ALLOW_LISTED or (
+            not network and not self.policy.network_allowed()
+        ):
             args.append("--unshare-net")
         else:
             # DNS resolution needs whatever /etc/resolv.conf points at. On

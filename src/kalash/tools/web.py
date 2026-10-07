@@ -7,6 +7,9 @@
 
 from __future__ import annotations
 
+import asyncio
+from urllib.parse import urljoin, urlsplit
+
 from pydantic import BaseModel, Field
 
 from kalash.runtime.scratchpad import get_scratchpad
@@ -115,10 +118,10 @@ class FetchTool:
     def cancellable(self) -> bool:
         return True
 
-    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:
+    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:  # noqa: ARG002 - Preserve provider/tool callback signature.
         return frozenset()
 
-    async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:
+    async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:  # noqa: ARG002 - Preserve provider/tool callback signature.
         assert isinstance(args, FetchParams)
 
         try:
@@ -138,44 +141,90 @@ class FetchTool:
             url = "https://" + url
 
         try:
-            async with httpx.AsyncClient(
-                follow_redirects=True,
-                max_redirects=_MAX_REDIRECTS,
-                timeout=httpx.Timeout(_REQUEST_TIMEOUT_S),
-            ) as client:
-                response = await client.get(url)
-
-                # Verify final URL is still HTTPS after redirects
-                if not str(response.url).startswith("https://"):
-                    return ToolEnvelope.fail(
-                        code="KALASH_TOOL_ERROR",
-                        message="Redirect landed on non-HTTPS URL — refused for security.",
-                        recoverable=False,
-                    )
-
-                # Check content type
-                content_type = (
-                    response.headers.get("content-type", "").split(";")[0].strip().lower()
-                )
-                if content_type and not any(ct in content_type for ct in _ALLOWED_CONTENT_TYPES):
-                    return ToolEnvelope.fail(
-                        code="KALASH_TOOL_ERROR",
-                        message=f"Unsupported content type: {content_type}",
-                        recoverable=True,
-                        remediation="Only text-based content types are supported.",
-                    )
-
-                # Size check
-                content_length = len(response.content)
-                if content_length > args.max_bytes:
-                    return ToolEnvelope.fail(
-                        code="KALASH_TOOL_ERROR",
-                        message=f"Response too large: {content_length} bytes (max {args.max_bytes})",
-                        recoverable=True,
-                        remediation="Try 'truncated' mode or reduce max_bytes.",
-                    )
-
-                text = response.text
+            origin = urlsplit(url)
+            async with (
+                asyncio.timeout(_REQUEST_TIMEOUT_S),
+                httpx.AsyncClient(
+                    follow_redirects=False,
+                    timeout=httpx.Timeout(_REQUEST_TIMEOUT_S),
+                    headers={"Accept-Encoding": "identity"},
+                ) as client,
+            ):
+                for redirect in range(_MAX_REDIRECTS + 1):
+                    target = urlsplit(url)
+                    if (
+                        target.scheme != "https"
+                        or not target.hostname
+                        or target.username is not None
+                    ):
+                        return ToolEnvelope.fail(
+                            code="KALASH_TOOL_ERROR",
+                            message="Only HTTPS URLs without embedded credentials are allowed.",
+                            recoverable=False,
+                        )
+                    if (target.hostname, target.port or 443) != (
+                        origin.hostname,
+                        origin.port or 443,
+                    ):
+                        return ToolEnvelope.fail(
+                            code="KALASH_PERMISSION_DENIED",
+                            message=(
+                                "Redirect changes the approved destination; fetch the new HTTPS "
+                                "URL explicitly."
+                            ),
+                            recoverable=True,
+                        )
+                    async with client.stream("GET", url) as response:
+                        if response.status_code in {301, 302, 303, 307, 308}:
+                            location = response.headers.get("location")
+                            if not location or redirect == _MAX_REDIRECTS:
+                                raise httpx.TooManyRedirects("Redirect limit or missing location")
+                            url = urljoin(url, location)
+                            # The next destination is validated before sending.
+                            continue
+                        response.raise_for_status()
+                        if response.headers.get("content-encoding", "identity").lower() not in {
+                            "",
+                            "identity",
+                        }:
+                            return ToolEnvelope.fail(
+                                code="KALASH_TOOL_RESOURCE_LIMIT",
+                                message=(
+                                    "Server ignored Accept-Encoding: identity; "
+                                    "compressed responses "
+                                    "are unsupported by the bounded fetch path."
+                                ),
+                                recoverable=True,
+                                remediation="Use an uncompressed endpoint.",
+                            )
+                        content_type = (
+                            response.headers.get("content-type", "").split(";")[0].strip().lower()
+                        )
+                        if content_type and content_type not in _ALLOWED_CONTENT_TYPES:
+                            return ToolEnvelope.fail(
+                                code="KALASH_TOOL_ERROR",
+                                message=f"Unsupported content type: {content_type}",
+                                recoverable=True,
+                                remediation="Only text-based content types are supported.",
+                            )
+                        body = bytearray()
+                        async for chunk in response.aiter_bytes():
+                            # No decompressor can allocate an unchecked expansion.
+                            if len(body) + len(chunk) > args.max_bytes:
+                                return ToolEnvelope.fail(
+                                    code="KALASH_TOOL_RESOURCE_LIMIT",
+                                    message=f"Response exceeds {args.max_bytes} bytes",
+                                    recoverable=True,
+                                    remediation=(
+                                        "Fetch a smaller resource or raise max_bytes "
+                                        "within the tool "
+                                        "limit."
+                                    ),
+                                )
+                            body.extend(chunk)
+                        content_length = len(body)
+                        text = body.decode(response.encoding or "utf-8", errors="replace")
+                        break
 
         except httpx.TooManyRedirects:
             return ToolEnvelope.fail(
@@ -183,7 +232,7 @@ class FetchTool:
                 message=f"Too many redirects (>{_MAX_REDIRECTS})",
                 recoverable=True,
             )
-        except httpx.TimeoutException:
+        except (httpx.TimeoutException, TimeoutError):
             return ToolEnvelope.fail(
                 code="KALASH_TOOL_TIMEOUT",
                 message=f"Request timed out after {_REQUEST_TIMEOUT_S}s",
@@ -193,6 +242,12 @@ class FetchTool:
             return ToolEnvelope.fail(
                 code="KALASH_TOOL_ERROR",
                 message=f"HTTP error: {exc}",
+                recoverable=True,
+            )
+        except (ValueError, httpx.InvalidURL) as exc:
+            return ToolEnvelope.fail(
+                code="KALASH_TOOL_INVALID_ARGS",
+                message=f"Invalid fetch URL or encoding: {exc}",
                 recoverable=True,
             )
 
@@ -343,7 +398,7 @@ class WebSearchTool:
     def cancellable(self) -> bool:
         return True
 
-    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:
+    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:  # noqa: ARG002 - Preserve provider/tool callback signature.
         return frozenset()
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:

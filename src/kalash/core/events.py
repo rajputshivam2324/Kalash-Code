@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from collections.abc import Callable, Coroutine
+from collections.abc import Callable, Coroutine, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
@@ -82,6 +85,8 @@ class Event:
     data: dict[str, Any] = field(default_factory=dict)
     session_id: str | None = None
     run_id: str | None = None
+    sequence: int = 0
+    timestamp: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
 
 
 # Type for event handlers
@@ -94,6 +99,74 @@ class EventBus:
     def __init__(self) -> None:
         self._handlers: dict[EventType, list[EventHandler]] = defaultdict(list)
         self._global_handlers: list[EventHandler] = []
+        self._presentation_handlers: dict[EventType, list[EventHandler]] = defaultdict(list)
+        self._presentation_queue: asyncio.Queue[tuple[Event, list[EventHandler]]] = asyncio.Queue(
+            256
+        )
+        self._presentation_worker: asyncio.Task[None] | None = None
+        self.presentation_errors: list[str] = []
+        self._scope: ContextVar[dict[str, Any] | None] = ContextVar("event_scope", default=None)
+
+    @contextmanager
+    def scope(self, session_id: str, run_id: str) -> Iterator[None]:
+        """Task-local run identity inherited by its tools, never shared runs."""
+        token = self._scope.set({"session_id": session_id, "run_id": run_id, "sequence": 0})
+        try:
+            yield
+        finally:
+            self._scope.reset(token)
+
+    def on_presentation(self, event_type: EventType, handler: EventHandler) -> None:
+        """Ordered bounded advisory delivery; never subscribe policy here."""
+        self._presentation_handlers[event_type].append(handler)
+
+    def _enqueue_presentation(self, event: Event) -> None:
+        handlers = list(self._presentation_handlers.get(event.type, []))
+        if not handlers:
+            return
+        if self._presentation_worker is None or self._presentation_worker.done():
+            self._presentation_worker = asyncio.create_task(self._present())
+        try:
+            self._presentation_queue.put_nowait((event, handlers))
+        except asyncio.QueueFull:
+            self._presentation_failure("Presentation queue exhausted; output is incomplete")
+            self._presentation_handlers.clear()
+
+    def _presentation_failure(self, message: str) -> None:
+        if len(self.presentation_errors) < 16:
+            self.presentation_errors.append(message)
+
+    async def _present(self) -> None:
+        while True:
+            event, handlers = await self._presentation_queue.get()
+            try:
+                for handler in handlers:
+                    try:
+                        await handler(event)
+                    except Exception as error:
+                        self._presentation_failure(
+                            f"Presentation handler failed: {type(error).__name__}"
+                        )
+            finally:
+                self._presentation_queue.task_done()
+            if self._presentation_queue.empty():
+                return
+
+    async def drain_presentation(self, timeout: float = 2) -> None:
+        try:
+            await asyncio.wait_for(self._presentation_queue.join(), timeout)
+        except TimeoutError:
+            self._presentation_failure("Presentation deadline exceeded; output is incomplete")
+            await self.close_presentation()
+
+    async def close_presentation(self) -> None:
+        if self._presentation_worker is not None:
+            self._presentation_worker.cancel()
+            await asyncio.gather(self._presentation_worker, return_exceptions=True)
+            self._presentation_worker = None
+        while not self._presentation_queue.empty():
+            self._presentation_queue.get_nowait()
+            self._presentation_queue.task_done()
 
     def on(self, event_type: EventType, handler: EventHandler) -> None:
         """Subscribe to a specific event type."""
@@ -103,19 +176,33 @@ class EventBus:
         """Subscribe to all events."""
         self._global_handlers.append(handler)
 
+    def off_all(self, handler: EventHandler) -> None:
+        if handler in self._global_handlers:
+            self._global_handlers.remove(handler)
+
     def off(self, event_type: EventType, handler: EventHandler) -> None:
         """Unsubscribe from an event type."""
         handlers = self._handlers[event_type]
         if handler in handlers:
             handlers.remove(handler)
+        advisory = self._presentation_handlers[event_type]
+        if handler in advisory:
+            advisory.remove(handler)
 
     async def emit(self, event: Event) -> None:
         """Emit an event to all subscribers. Errors are logged, never propagated."""
         handlers = list(self._handlers.get(event.type, [])) + list(self._global_handlers)
-        if not handlers:
-            return
-
-        event = replace(event, data=scrub_metadata(event.data))
+        scope = self._scope.get()
+        if scope is not None:
+            scope["sequence"] += 1
+        event = replace(
+            event,
+            data=scrub_metadata(event.data),
+            session_id=event.session_id or (scope["session_id"] if scope else None),
+            run_id=event.run_id or (scope["run_id"] if scope else None),
+            sequence=scope["sequence"] if scope else event.sequence,
+        )
+        self._enqueue_presentation(event)
         tasks = [asyncio.create_task(_safe_call(h, event)) for h in handlers]
         if tasks:
             await asyncio.gather(*tasks)

@@ -13,10 +13,8 @@ that credits unbuilt work is worse than no eval.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 from decimal import Decimal
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from evals.harness import (
     ScriptedTurn,
@@ -49,6 +47,10 @@ from kalash.runtime.scratchpad import Scratchpad, reset_cache
 from kalash.runtime.toolhost import ToolHost, normalize_sandbox_mode
 from kalash.tools.builtins import default_registry
 
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
 # ---------------------------------------------------------------------------
 # Capability suite
 # ---------------------------------------------------------------------------
@@ -64,7 +66,7 @@ class _DenyingUI:
         self.seen.append(context)
         return PromptResult(response=ApprovalResponse.DENY)
 
-    async def show_info(self, message: str) -> None:
+    async def show_info(self, message: str) -> None:  # noqa: ARG002 - Preserve provider/tool callback signature.
         return None
 
 
@@ -77,7 +79,7 @@ class _AllowingUI:
         self.seen.append(context)
         return PromptResult(response=self.response)
 
-    async def show_info(self, message: str) -> None:
+    async def show_info(self, message: str) -> None:  # noqa: ARG002 - Preserve provider/tool callback signature.
         return None
 
 

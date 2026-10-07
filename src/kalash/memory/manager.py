@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
 from dataclasses import dataclass, field
-from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.memory.protocol import (
     ForgetSelector,
@@ -20,9 +18,14 @@ from kalash.memory.protocol import (
     Source,
     Trust,
 )
-from kalash.memory.registry import MemoryRegistry
-from kalash.memory.router import MemoryRouter
 from kalash.memory.session import project_scope
+
+if TYPE_CHECKING:
+    from collections.abc import Coroutine
+    from datetime import datetime
+
+    from kalash.memory.registry import MemoryRegistry
+    from kalash.memory.router import MemoryRouter
 
 
 def _run_async[T](coro: Coroutine[Any, Any, T]) -> T:
@@ -161,7 +164,7 @@ class MemoryManager:
 
         return _run_async(forget())
 
-    def export_all(self, *, format: str = "json") -> str:
+    def export_all(self, *, format: str = "json") -> str:  # noqa: A002 - Keep the established public keyword/CLI spelling.
         import json
 
         async def export() -> str:
@@ -186,7 +189,7 @@ class MemoryManager:
 
         return _run_async(export())
 
-    def import_from_file(self, path: Path, *, format: str = "json", merge: bool = True) -> int:
+    def import_from_file(self, path: Path, *, format: str = "json", merge: bool = True) -> int:  # noqa: A002 - Keep the established public keyword/CLI spelling.
         import json
 
         text = path.read_text(encoding="utf-8")
@@ -204,9 +207,9 @@ class MemoryManager:
             mem_id = str(row.get("id", ""))
             if merge and mem_id:
 
-                async def exists() -> bool:
+                async def exists(record_id: str = mem_id) -> bool:
                     router = await self._router()
-                    return (await router.get(mem_id)) is not None
+                    return (await router.get(record_id)) is not None
 
                 if _run_async(exists()):
                     continue

@@ -38,7 +38,10 @@ class Diagnosis:
     """What to do about it."""
 
     kind: str = "unknown"
-    """Machine-readable cause: tpm | max_output | no_tools | invalid_tool | auth | context | rate | unknown."""
+    """
+    Machine-readable cause: tpm | max_output | no_tools | invalid_tool | auth | context | rate
+    | unknown.
+    """
 
     adjust_max_output: int | None = None
     """When set, the request can be retried with this output cap."""
@@ -71,6 +74,11 @@ def diagnose(raw: str, model_id: str = "") -> Diagnosis:
 
     lowered = text.lower()
     label = model_id or "this model"
+
+    # A generation cap is a completed provider request with incomplete output,
+    # not a rejected max_tokens parameter. Never silently rewrite its settings.
+    if "output was truncated" in lowered:
+        return Diagnosis(summary=_readable(text), kind="output_truncated")
 
     # Output cap exceeded. Deterministic and fixable without user input.
     if "max_completion_tokens" in lowered or "max_tokens" in lowered:
@@ -141,7 +149,10 @@ def diagnose(raw: str, model_id: str = "") -> Diagnosis:
     ):
         return Diagnosis(
             summary=f"{label} emitted malformed tool arguments or failed function calling format.",
-            remedy="Formatting tool arguments cleanly. Please emit one tool call at a time with properly escaped JSON.",
+            remedy=(
+                "Formatting tool arguments cleanly. Please emit one tool call at "
+                "a time with properly escaped JSON."
+            ),
             kind="invalid_tool",
             adjust_max_output=4096,
         )

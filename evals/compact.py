@@ -1,6 +1,7 @@
 """Fresh local coding evaluation, one suite-wide allowance below 250k tokens.
 
-python -m evals.compact --output /tmp/kalash-compact --access-log /tmp/kalash-access-check.json
+python -m evals.compact --total-tokens EXPLICIT_ALLOWANCE
+Evidence defaults to the repository's ignored .kalash/eval_runs directory.
 Hidden tests grade a fresh copy. This is a local smoke suite, not SWE-bench.
 """
 
@@ -13,6 +14,7 @@ import json
 import os
 import platform
 import subprocess
+import sys
 import time
 from dataclasses import asdict
 from decimal import Decimal
@@ -22,9 +24,11 @@ from evals.benchmark import TOOLS, save_patch, scripted_provider
 from evals.benchmark_tasks import load_tasks
 from evals.benchmark_workspace import grade, materialize
 from evals.compact_budget import MeteredProvider, SuiteLedger
+from evals.output import default_output
 from kalash.core.config import BudgetConfig, KalashConfig, MemoryConfig, ModelConfig
 from kalash.core.events import Event, EventBus
 from kalash.core.privacy import scrub_text
+from kalash.models.gateway import ModelGateway, RetryConfig
 from kalash.models.providers.sarvam import SarvamProvider
 from kalash.models.resolve import credential_for
 from kalash.runtime.agent import build_agent
@@ -34,8 +38,20 @@ from kalash.tools.shell import terminate_session_backgrounds
 PRICING_SOURCE = "https://docs.sarvam.ai/api/getting-started/pricing"
 
 
+def source_hash() -> str:
+    digest = hashlib.sha256()
+    for root in (Path("src"), Path("evals")):
+        for path in sorted(root.rglob("*.py")):
+            digest.update(str(path).encode() + b"\0" + path.read_bytes() + b"\0")
+    return digest.hexdigest()
+
+
 def cost_inr(ledger: SuiteLedger) -> str | None:
-    if any(item["usage"] is None for item in ledger.attempts if item["status"] != "rejected_http"):
+    if any(
+        item["status"] != "complete" or item["usage"] is None
+        for item in ledger.attempts
+        if item["status"] != "rejected_http"
+    ):
         return None
     cost = Decimal(0)
     for item in ledger.attempts:
@@ -49,11 +65,29 @@ def cost_inr(ledger: SuiteLedger) -> str | None:
 
 async def run(args: argparse.Namespace) -> int:
     args.output = args.output.resolve()
-    args.output.mkdir(parents=True, exist_ok=False)
+    args.output.mkdir(parents=True, exist_ok=False, mode=0o700)
     tasks = load_tasks(args.tasks)
+    selected_task = getattr(args, "task", None)
+    if selected_task:
+        tasks = [task for task in tasks if task.id == selected_task]
+        if not tasks:
+            raise ValueError(f"Unknown task: {selected_task}")
+    reasoning = getattr(args, "reasoning", "high")
+    selected_tools = getattr(args, "tools", None)
+    allowed_tools = frozenset(selected_tools.split(",")) if selected_tools else TOOLS
+    if not allowed_tools or not allowed_tools <= TOOLS:
+        raise ValueError("Evaluation tools must be a nonempty subset of the frozen built-ins")
     ledger = SuiteLedger(args.output / "ledger.json", args.total_tokens)
     access = json.loads(args.access_log.read_text()) if args.access_log else {"requests": []}
-    for entry in access["requests"]:
+    if args.prior_ledger:
+        prior = json.loads(args.prior_ledger.read_text())
+        if prior["violated"] or prior["limit"] != args.total_tokens:
+            raise ValueError("Prior ledger is violated or uses another allowance")
+        ledger.attempts = prior["attempts"]
+        ledger.refusals = prior.get("refusals", [])
+        if any(item["status"] == "reserved" for item in ledger.attempts):
+            raise ValueError("Prior ledger still has an in-flight request")
+    for entry in [] if args.prior_ledger else access["requests"]:
         usage = entry.get("usage")
         ledger.attempts.append(
             {
@@ -81,8 +115,14 @@ async def run(args: argparse.Namespace) -> int:
         "suite": "compact-v1",
         "mode": "scripted" if args.scripted else "live",
         "model": "scripted" if args.scripted else "sarvam/sarvam-105b",
-        "reasoning": "high",
-        "output_limit": 4096,
+        "reasoning": reasoning,
+        "selected_task": selected_task,
+        "allowed_tools": sorted(allowed_tools),
+        "sdk_retries": 0,
+        "gateway_attempts_per_request": 1,
+        "source_tree_sha256": source_hash(),
+        "output_limit": args.output_limit,
+        "prior_ledger": str(args.prior_ledger) if args.prior_ledger else None,
         "total_token_allowance": ledger.limit,
         "task_actual_ceiling": 52_000,
         "reservation": "wire UTF8 bytes + 4096 + output allowance",
@@ -99,14 +139,9 @@ async def run(args: argparse.Namespace) -> int:
     }
     (args.output / "manifest.json").write_text(json.dumps(manifest, indent=2))
     results = []
-    available = any(
-        item.get("model") == "sarvam-105b" and item.get("access") == "available"
-        for item in access["requests"]
-    )
-    if not preflight_ok() or (not args.scripted and not available):
-        blocker = (
-            "OS sandbox unavailable" if not preflight_ok() else "Sarvam-105B access not verified"
-        )
+    key = credential_for("sarvam") if not args.scripted else ""
+    if not preflight_ok() or (not args.scripted and not key):
+        blocker = "OS sandbox unavailable" if not preflight_ok() else "No Sarvam credential"
         summary = {
             "status": "blocked",
             "reason": blocker,
@@ -114,10 +149,9 @@ async def run(args: argparse.Namespace) -> int:
             "charged_tokens": ledger.charged,
         }
         (args.output / "summary.json").write_text(json.dumps(summary, indent=2))
-        print(json.dumps(summary))
+        sys.stdout.write(json.dumps(summary) + "\n")
         return 2
     previous_home = os.environ.get("KALASH_HOME")
-    key = credential_for("sarvam") if not args.scripted else ""
     try:
         for task in tasks:
             root = args.output / task.id
@@ -133,10 +167,12 @@ async def run(args: argparse.Namespace) -> int:
                 scripted_provider(task)
                 if args.scripted
                 else SarvamProvider(
-                    model="sarvam-105b", api_key=key, max_tokens=4096, reasoning_effort="high"
+                    model="sarvam-105b",
+                    api_key=key,
+                    max_tokens=args.output_limit,
+                    reasoning_effort=None if reasoning == "off" else reasoning,
                 )
             )
-            wrapped = provider if args.scripted else MeteredProvider(provider, ledger, task.id)
             bus = EventBus()
             started = time.monotonic()
             before = ledger.charged
@@ -144,7 +180,21 @@ async def run(args: argparse.Namespace) -> int:
             detail = ""
             outcome = "infra_error"
             termination = "not_started"
-            with (root / "events.jsonl").open("w") as trace:
+            with (
+                (root / "events.jsonl").open("w") as trace,
+                (root / "provider.jsonl").open("w") as provider_trace,
+            ):
+                wrapped = (
+                    provider
+                    if args.scripted
+                    else MeteredProvider(
+                        provider,
+                        ledger,
+                        args.output.name + ":" + task.id,
+                        trace=provider_trace,
+                        credential=key,
+                    )
+                )
 
                 async def record(event: Event) -> None:
                     trace.write(
@@ -162,7 +212,7 @@ async def run(args: argparse.Namespace) -> int:
                     config = KalashConfig(
                         project_dir=workspace,
                         memory=MemoryConfig(enabled=False),
-                        model=ModelConfig(temperature=0, max_output_tokens=4096),
+                        model=ModelConfig(temperature=0, max_output_tokens=args.output_limit),
                         budget=BudgetConfig(
                             max_tokens=52_000,
                             max_cost_usd=Decimal(100),
@@ -181,11 +231,14 @@ async def run(args: argparse.Namespace) -> int:
                         interactive=False,
                         persist=False,
                         extensions=False,
-                        allowed_tools=TOOLS,
+                        allowed_tools=allowed_tools,
                         max_iterations=12,
                     )
                     if agent is None:
                         raise RuntimeError(reason)
+                    agent.loop.gateway = ModelGateway(
+                        primary=wrapped, retry_config=RetryConfig(max_attempts=1)
+                    )
                     agent.host.workspace_only = True
                     agent.host.network_enabled = False
                     result = await agent.send(task.prompt)
@@ -215,7 +268,8 @@ async def run(args: argparse.Namespace) -> int:
             }
             results.append(row)
             (root / "result.json").write_text(json.dumps(row, indent=2))
-            print(f"{task.id}: {outcome}; {row['charged_tokens']} charged tokens", flush=True)
+            sys.stdout.write(f"{task.id}: {outcome}; {row['charged_tokens']} charged tokens\n")
+            sys.stdout.flush()
             if ledger.violated:
                 break
     finally:
@@ -246,7 +300,8 @@ async def run(args: argparse.Namespace) -> int:
         "note": "One attempt/task; local smoke suite; no competitor or public-benchmark claim.",
     }
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2))
-    print(json.dumps({k: v for k, v in summary.items() if k != "results"}), flush=True)
+    sys.stdout.write(json.dumps({k: v for k, v in summary.items() if k != "results"}) + "\n")
+    sys.stdout.flush()
     return int(summary["resolved"] != len(tasks))
 
 
@@ -255,15 +310,22 @@ def main() -> int:
     parser.add_argument(
         "--tasks", type=Path, default=Path(__file__).parent / "tasks" / "compact_v1.json"
     )
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path, default=default_output("compact"))
     parser.add_argument("--access-log", type=Path)
     parser.add_argument("--total-tokens", type=int, default=240_000)
     parser.add_argument("--scripted", action="store_true")
+    parser.add_argument("--task", help="Run exactly one task from the frozen suite")
+    parser.add_argument("--tools", help="Explicit comma-separated built-in tool subset")
+    parser.add_argument("--reasoning", choices=("off", "low", "medium", "high"), default="high")
+    parser.add_argument("--output-limit", type=int, default=4096)
+    parser.add_argument(
+        "--prior-ledger", type=Path, help="Carry all prior charges into this sequential phase"
+    )
     args = parser.parse_args()
+    if not 128 <= args.output_limit <= 32768:
+        parser.error("Output limit must be between 128 and 32768")
     if not 0 < args.total_tokens < 250_000:
         parser.error("Total allowance must be between 1 and 249999")
-    if not args.scripted and args.access_log is None:
-        parser.error("Live run requires the access probe log")
     return asyncio.run(run(args))
 
 

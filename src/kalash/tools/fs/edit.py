@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import os
 import stat
-import tempfile
-from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -23,6 +20,8 @@ from .common import (
     _check_writable,
     _content_digest,
     _detect_encoding,
+    conditional_replace,
+    post_file_edit,
 )
 
 
@@ -78,7 +77,7 @@ class EditTool:
     def cancellable(self) -> bool:
         return False
 
-    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:
+    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:  # noqa: ARG002 - Preserve provider/tool callback signature.
         return frozenset()
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:
@@ -144,50 +143,19 @@ class EditTool:
                     code="KALASH_TOOL_DENIED", message=str(e), recoverable=True
                 )
 
-        # Atomic write
         existing_mode = stat.S_IMODE(path.stat().st_mode)
-        fd = tempfile.NamedTemporaryFile(
-            mode="wb", dir=path.parent, prefix=".kalash_", suffix=".tmp", delete=False
-        )
-        tmp_path = Path(fd.name)
-        try:
-            fd.write(new_bytes)
-            fd.flush()
-            os.fsync(fd.fileno())
-            fd.close()
-            os.chmod(tmp_path, existing_mode)
-            os.replace(tmp_path, path)
-        except OSError as exc:
-            tmp_path.unlink(missing_ok=True)
-            return ToolEnvelope.fail(
-                code="KALASH_TOOL_ERROR",
-                message=f"Edit write failed: {exc}",
-                recoverable=True,
-            )
+        if error := conditional_replace(path, new_bytes, args.digest, ctx, existing_mode):
+            return error
 
         new_digest = _content_digest(new_bytes)
 
-        if ctx.hooks:
-            from kalash.hooks.events import FileEditPayload, HookEvent
-
-            try:
-                await ctx.hooks.dispatch(
-                    FileEditPayload(
-                        event=HookEvent.POST_FILE_EDIT,
-                        session_id=ctx.session_id,
-                        run_id=ctx.run_id,
-                        path=str(path),
-                        operation="edit",
-                        content_preview=args.new_str[:100],
-                    )
-                )
-            except Exception:
-                pass
+        hook_warnings = await post_file_edit(path, "edit", args.new_str, ctx)
 
         diff = make_diff(str(path), text, new_text)
         return ToolEnvelope.success(
             content=f"Edited {path} ({diff.stat.render()})",
             metadata={
+                "hook_warnings": hook_warnings,
                 "path": str(path),
                 "content_digest": new_digest,
                 "diff": diff.text,
@@ -258,7 +226,7 @@ class MultiEditTool:
     def cancellable(self) -> bool:
         return False
 
-    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:
+    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:  # noqa: ARG002 - Preserve provider/tool callback signature.
         return frozenset()
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:
@@ -282,7 +250,7 @@ class MultiEditTool:
         encoding = _detect_encoding(raw)
         text = raw.decode(encoding)
 
-        # Validate all edits before applying (all-or-nothing)
+        # Validate each sequential edit against the working copy (all-or-nothing)
         for i, edit in enumerate(args.edits):
             count = text.count(edit.old_str)
             if count == 0:
@@ -298,8 +266,6 @@ class MultiEditTool:
                     recoverable=True,
                 )
 
-        # Apply edits in order
-        for edit in args.edits:
             text = text.replace(edit.old_str, edit.new_str, 1)
 
         new_bytes = text.encode(encoding)
@@ -324,48 +290,17 @@ class MultiEditTool:
                     code="KALASH_TOOL_DENIED", message=str(e), recoverable=True
                 )
 
-        # Atomic write
         existing_mode = stat.S_IMODE(path.stat().st_mode)
-        fd = tempfile.NamedTemporaryFile(
-            mode="wb", dir=path.parent, prefix=".kalash_", suffix=".tmp", delete=False
-        )
-        tmp_path = Path(fd.name)
-        try:
-            fd.write(new_bytes)
-            fd.flush()
-            os.fsync(fd.fileno())
-            fd.close()
-            os.chmod(tmp_path, existing_mode)
-            os.replace(tmp_path, path)
-        except OSError as exc:
-            tmp_path.unlink(missing_ok=True)
-            return ToolEnvelope.fail(
-                code="KALASH_TOOL_ERROR",
-                message=f"Multi-edit write failed: {exc}",
-                recoverable=True,
-            )
+        if error := conditional_replace(path, new_bytes, args.digest, ctx, existing_mode):
+            return error
 
         new_digest = _content_digest(new_bytes)
 
-        if ctx.hooks:
-            from kalash.hooks.events import FileEditPayload, HookEvent
-
-            try:
-                await ctx.hooks.dispatch(
-                    FileEditPayload(
-                        event=HookEvent.POST_FILE_EDIT,
-                        session_id=ctx.session_id,
-                        run_id=ctx.run_id,
-                        path=str(path),
-                        operation="edit",
-                        content_preview=text[:100],
-                    )
-                )
-            except Exception:
-                pass
+        hook_warnings = await post_file_edit(path, "edit", text, ctx)
         return ToolEnvelope.success(
             content=f"Applied {len(args.edits)} edits to {path}",
             metadata={
+                "hook_warnings": hook_warnings,
                 "path": str(path),
                 "content_digest": new_digest,
                 "edits_applied": len(args.edits),

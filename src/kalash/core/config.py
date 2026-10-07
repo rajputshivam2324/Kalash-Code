@@ -21,7 +21,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
+from pydantic import TypeAdapter, ValidationError
+
 from kalash.core.paths import kalash_home
+
+
+class ConfigError(ValueError):
+    """Invalid configuration; never silently replace authority with defaults."""
+
 
 # Security-relevant keys that only come from user scope
 SECURITY_KEYS = frozenset(
@@ -76,10 +83,10 @@ class PermissionsConfig:
 
 @dataclass
 class BudgetConfig:
-    """Budget ceilings."""
+    """Opt-in spending ceilings and operational loop limits."""
 
-    max_tokens: int = 500_000
-    max_cost_usd: Decimal = field(default_factory=lambda: Decimal("2.00"))
+    max_tokens: int | None = None
+    max_cost_usd: Decimal | None = None
     max_wallclock_s: int = 3600
     max_turns: int = 100
     max_tool_calls: int = 500
@@ -110,6 +117,7 @@ def load_config(
     user_settings = kalash_home() / "settings.json"
     if user_settings.exists():
         _merge(merged, _load_json(user_settings))
+    user_budget = dict(merged.get("budget", {}))
 
     # Layer 3 & 4: project settings
     proj = project_dir or Path.cwd()
@@ -126,12 +134,31 @@ def load_config(
         _filter_security_keys(local_data, str(project_local))
         _merge(merged, local_data)
 
+    # Projects may tighten a user ceiling, but cannot remove or relax it.
+    for key in (
+        "max_tokens",
+        "max_cost_usd",
+        "max_wallclock_s",
+        "max_turns",
+        "max_tool_calls",
+        "max_spawn_depth",
+    ):
+        ceiling = user_budget.get(key)
+        if ceiling is not None:
+            current = merged.setdefault("budget", {}).get(key)
+            try:
+                if current is None or Decimal(str(current)) > Decimal(str(ceiling)):
+                    merged["budget"][key] = ceiling
+            except Exception as error:
+                raise ConfigError(f"Invalid budget.{key}") from error
+
     # Layer 5: environment variables
     _apply_env(merged)
 
     # Layer 6: CLI overrides
     if overrides:
         _merge(merged, overrides)
+    _validate_sections(merged)
 
     # Resolve env references ${env:VAR}
     _resolve_env_refs(merged)
@@ -140,12 +167,23 @@ def load_config(
 
 
 def _load_json(path: Path) -> dict[str, Any]:
-    """Load a JSON file, returning empty dict on error."""
+    """Reject malformed settings rather than discard user authority."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (json.JSONDecodeError, OSError):
-        return {}
+        if not isinstance(data, dict):
+            raise ConfigError(f"Settings must be a JSON object: {path}")
+        _validate_sections(data)
+        return data
+    except (json.JSONDecodeError, OSError) as error:
+        raise ConfigError(f"Cannot read valid settings: {path}") from error
+
+
+def _validate_sections(data: dict[str, Any]) -> None:
+    for section in ("model", "memory", "permissions", "budget"):
+        if section in data and not isinstance(data[section], dict):
+            if section == "model" and isinstance(data[section], str):
+                continue
+            raise ConfigError(f"{section} must be a settings object")
 
 
 def _merge(base: dict[str, Any], overlay: dict[str, Any]) -> None:
@@ -195,12 +233,19 @@ def _apply_env(data: dict[str, Any]) -> None:
     """Apply KALASH_* environment variables."""
     prefix = "KALASH_"
     for key, value in os.environ.items():
-        if key.startswith(prefix) and key != "KALASH_HOME":
-            # KALASH_MODEL_PRIMARY -> model.primary
+        if key.startswith(prefix) and key not in {"KALASH_HOME", "KALASH_PROVIDER", "KALASH_MODEL"}:
+            # KALASH_MODEL__PRIMARY -> model.primary. Support known legacy names.
             config_key = key[len(prefix) :].lower().replace("__", ".")
+            if "." not in config_key:
+                for section in ("model", "memory", "permissions", "budget"):
+                    if config_key.startswith(section + "_"):
+                        config_key = section + "." + config_key[len(section) + 1 :]
+                        break
             parts = config_key.split(".")
             target = data
             for part in parts[:-1]:
+                if part in target and not isinstance(target[part], dict):
+                    raise ConfigError(f"Cannot override non-object settings section: {part}")
                 target = target.setdefault(part, {})
             target[parts[-1]] = value
 
@@ -213,7 +258,9 @@ def _resolve_env_refs(data: dict[str, Any]) -> None:
             match = pattern.search(value)
             if match:
                 env_var = match.group(1)
-                env_val = os.environ.get(env_var, "")
+                if env_var not in os.environ:
+                    raise ConfigError(f"Missing referenced environment variable: {env_var}")
+                env_val = os.environ[env_var]
                 data[key] = pattern.sub(env_val, value)
         elif isinstance(value, dict):
             _resolve_env_refs(value)
@@ -263,13 +310,48 @@ def _build_config(data: dict[str, Any], project_dir: Path) -> KalashConfig:
     )
 
     budget = BudgetConfig(
-        max_tokens=budget_data.get("max_tokens", 500_000),
-        max_cost_usd=Decimal(str(budget_data.get("max_cost_usd", "2.00"))),
+        max_tokens=budget_data.get("max_tokens"),
+        max_cost_usd=budget_data.get("max_cost_usd"),
         max_wallclock_s=budget_data.get("max_wallclock_s", 3600),
         max_turns=budget_data.get("max_turns", 100),
         max_tool_calls=budget_data.get("max_tool_calls", 500),
         max_spawn_depth=budget_data.get("max_spawn_depth", 3),
     )
+
+    try:
+        model = TypeAdapter(ModelConfig).validate_python(model.__dict__)
+        memory = TypeAdapter(MemoryConfig).validate_python(memory.__dict__)
+        permissions = TypeAdapter(PermissionsConfig).validate_python(permissions.__dict__)
+        budget = TypeAdapter(BudgetConfig).validate_python(budget.__dict__)
+    except ValidationError as error:
+        fields = ", ".join(".".join(map(str, e["loc"])) for e in error.errors(include_input=False))
+        raise ConfigError(f"Invalid configuration fields: {fields}") from None
+    if permissions.sandbox not in {
+        "read-only",
+        "read_only",
+        "workspace-write",
+        "workspace_write",
+        "danger-full-access",
+        "danger_full_access",
+    }:
+        raise ConfigError("Unsupported permissions.sandbox")
+    if permissions.approval not in {"on-request", "untrusted", "never"}:
+        raise ConfigError("Unsupported permissions.approval")
+    for key in (
+        "max_tokens",
+        "max_cost_usd",
+        "max_wallclock_s",
+        "max_turns",
+        "max_tool_calls",
+        "max_spawn_depth",
+    ):
+        value = getattr(budget, key)
+        if value is not None and (not Decimal(str(value)).is_finite() or value < 0):
+            raise ConfigError(f"budget.{key} must be finite and nonnegative")
+    if model.max_output_tokens is not None and model.max_output_tokens < 1:
+        raise ConfigError("model.max_output_tokens must be positive")
+    if not 0 <= memory.recall_budget <= 1:
+        raise ConfigError("memory.recall_budget must be between zero and one")
 
     return KalashConfig(
         model=model,

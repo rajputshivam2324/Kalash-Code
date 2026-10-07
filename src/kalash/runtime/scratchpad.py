@@ -38,14 +38,16 @@ import json
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.core.budget import estimate_tokens
 from kalash.core.encode import fold_paths
 from kalash.core.paths import kalash_home
 from kalash.core.privacy import scrub_metadata, scrub_text
 from kalash.storage.blobs import compute_digest, read_blob, store_blob
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # Bodies at or below this size live in the index rather than the blob store.
 # Small observations are the majority, and a blob file per grep hit would spray
@@ -55,6 +57,10 @@ INLINE_MAX_BYTES = 2048
 # Default ceiling on a single expand() result. An expand that returns 200 KiB
 # defeats the purpose of having stored it out of context in the first place.
 DEFAULT_EXPAND_MAX_BYTES = 16 * 1024
+PROMPT_SECTION_MAX_BYTES = 8192
+MAX_OBSERVATION_BYTES = 8 * 1024 * 1024
+MAX_INDEX_BYTES = 16 * 1024 * 1024
+MAX_OBSERVATIONS = 5000
 
 # Lines of surrounding context returned around each grep match.
 GREP_CONTEXT_LINES = 2
@@ -167,6 +173,7 @@ class Scratchpad:
         self._by_digest: dict[str, str] = {}
         self._counters: dict[str, int] = {}
         self._loaded = False
+        self._load_error = ""
 
     # -- paths ---------------------------------------------------------------
 
@@ -193,9 +200,15 @@ class Scratchpad:
         """
         self._ensure_loaded()
 
+        if self._load_error:
+            raise OSError(self._load_error)
+        if len(body.encode("utf-8")) > MAX_OBSERVATION_BYTES:
+            raise OSError("Observation exceeds the 8 MiB scratchpad limit; narrow the output")
         body = scrub_text(body)
-        headline = scrub_text(headline)
+        headline = scrub_text(headline)[:1000]
         metadata = scrub_metadata(metadata or {})
+        if len(json.dumps(metadata).encode("utf-8")) > 8192:
+            raise OSError("Observation metadata exceeds 8 KiB; narrow the metadata")
         payload = body.encode("utf-8")
         digest = compute_digest(payload)
         deferred = estimate_tokens(body)
@@ -211,6 +224,8 @@ class Scratchpad:
             )
 
         normalized_kind = kind if kind in KIND_LETTERS else "other"
+        if len(self._observations) >= MAX_OBSERVATIONS:
+            raise OSError("Scratchpad entry limit reached; use a new session")
         ref = self._next_ref(normalized_kind)
 
         inline: str | None = None
@@ -233,7 +248,12 @@ class Scratchpad:
 
         self._observations[ref] = observation
         self._by_digest[digest] = ref
-        self.save()
+        try:
+            self.save()
+        except OSError:
+            self._observations.pop(ref, None)
+            self._by_digest.pop(digest, None)
+            raise
 
         return PutResult(
             ref=ref,
@@ -274,7 +294,9 @@ class Scratchpad:
         if observation.inline is not None:
             return observation.inline
         try:
-            return read_blob(observation.digest).decode("utf-8", errors="replace")
+            return read_blob(observation.digest, max_bytes=MAX_OBSERVATION_BYTES).decode(
+                "utf-8", errors="replace"
+            )
         except (FileNotFoundError, ValueError, OSError):
             return None
 
@@ -348,6 +370,7 @@ class Scratchpad:
         *,
         kinds: tuple[str, ...] | None = None,
         limit: int | None = None,
+        max_bytes: int = PROMPT_SECTION_MAX_BYTES,
     ) -> str:
         """Render the compact index that goes into the context window.
 
@@ -375,7 +398,10 @@ class Scratchpad:
                 # fold_paths preserves length and order; strict=True makes that
                 # contract explicit rather than silently truncating if it changes.
                 folded_lookup = dict(zip(foldable, folded.items, strict=True))
-                preamble = f"@ = {folded.prefix}"
+                prefix = folded.prefix.encode("utf-8")[:256].decode("utf-8", errors="ignore")
+                preamble = f"@ = {prefix}"
+                if prefix != folded.prefix:
+                    preamble += " [prefix omitted; expand(ref) for full path]"
 
         lines: list[str] = []
         for observation in observations:
@@ -383,14 +409,15 @@ class Scratchpad:
             label = folded_lookup.get(path, observation.headline) if path else observation.headline
             lines.append(f"{observation.ref} {label} {_size_hint(observation)}".rstrip())
 
-        body = "\n".join([preamble, *lines]) if preamble else "\n".join(lines)
+        body = _bounded_rows(lines, max(0, max_bytes - 512))
+        body = "\n".join([preamble, body]) if preamble else body
         return (
             f"<scratchpad refs={len(observations)}>\n{body}\n"
             f"expand(ref) to retrieve any of these in full\n</scratchpad>"
         )
 
-    def render_notes(self) -> str:
-        """Render agent notes in full. Never dropped by compaction."""
+    def render_notes(self, *, max_bytes: int = PROMPT_SECTION_MAX_BYTES) -> str:
+        """Render recent notes under a prompt bound; originals remain addressable."""
         self._ensure_loaded()
         notes = [o for o in self._observations.values() if o.kind == "note"]
         notes.sort(key=lambda o: o.created_at)
@@ -398,9 +425,11 @@ class Scratchpad:
             return ""
         rendered = []
         for note in notes:
-            text = self.body(note.ref) or note.headline
+            # A bounded prefix is sufficient for the prompt; large stored notes
+            # remain accessible through expand rather than repeated disk reads.
+            text = note.inline or note.headline
             rendered.append(f"{note.ref} {text}")
-        return "<notes>\n" + "\n".join(rendered) + "\n</notes>"
+        return "<notes>\n" + _bounded_rows(rendered, max(0, max_bytes - 512)) + "\n</notes>"
 
     def stats(self) -> dict[str, Any]:
         """Counts and deferred-byte totals, for `/status` and diagnostics."""
@@ -421,6 +450,8 @@ class Scratchpad:
 
     def save(self) -> None:
         """Write the index atomically."""
+        if self._load_error:
+            raise OSError(self._load_error)
         path = self.index_path
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         payload = {
@@ -429,9 +460,12 @@ class Scratchpad:
             "counters": self._counters,
             "observations": [o.to_json() for o in self._observations.values()],
         }
+        encoded = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        if len(encoded) > MAX_INDEX_BYTES:
+            raise OSError("Scratchpad index exceeds 16 MiB; start a new session")
         tmp = path.with_suffix(".json.tmp")
         try:
-            tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            tmp.write_bytes(encoded)
             # Atomic rename, so a crash mid-write leaves the previous index intact
             # rather than a half-written one.
             tmp.replace(path)
@@ -445,15 +479,25 @@ class Scratchpad:
         self._observations = {}
         self._by_digest = {}
         self._counters = {}
+        self._load_error = ""
 
         path = self.index_path
         if not path.exists():
             return
         try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            with path.open("rb") as stream:
+                raw = stream.read(MAX_INDEX_BYTES + 1)
+            if len(raw) > MAX_INDEX_BYTES:
+                raise OSError(
+                    "Scratchpad index exceeds 16 MiB; preserve it and start a new session"
+                )
+            payload = json.loads(raw)
+        except (OSError, json.JSONDecodeError) as error:
             # A corrupt index must not take the session down; the bodies are
             # still in the blob store and a fresh index is a safe fallback.
+            self._load_error = (
+                f"Scratchpad index is unreadable; preserved without replacement: {error}"
+            )
             return
 
         self._counters = {str(k): int(v) for k, v in (payload.get("counters") or {}).items()}
@@ -471,6 +515,7 @@ class Scratchpad:
         self._by_digest = {}
         self._counters = {}
         self._loaded = True
+        self._load_error = ""
         self.index_path.unlink(missing_ok=True)
 
     # -- internals -----------------------------------------------------------
@@ -496,6 +541,25 @@ def _one_line(text: str) -> str:
     return " ".join(text.split()).strip()
 
 
+def _bounded_rows(rows: list[str], max_bytes: int) -> str:
+    selected = []
+    used = 0
+    omitted = len(rows)
+    for row in reversed(rows):
+        raw = row.encode("utf-8")
+        if len(raw) > max_bytes:
+            raw = raw[: max(0, max_bytes - 100)]
+            row = raw.decode("utf-8", errors="ignore") + " [body omitted; expand(ref) to retrieve]"
+        size = len(row.encode("utf-8")) + 1
+        if used + size > max_bytes:
+            break
+        selected.append(row)
+        used += size
+        omitted -= 1
+    hint = f"[{omitted} older entries omitted; expand(ref) to retrieve]\n" if omitted else ""
+    return hint + "\n".join(reversed(selected))
+
+
 def _normalize_ref(ref: str) -> str:
     """Accept ``#f1``, ``f1``, and stray whitespace as the same reference."""
     candidate = ref.strip()
@@ -514,13 +578,9 @@ def _size_hint(observation: Observation) -> str:
 
 
 def _grep_lines(lines: list[str], pattern: str) -> list[tuple[int, str]]:
-    """Return 1-indexed matching lines with surrounding context, merged."""
-    try:
-        matcher = re.compile(pattern, re.IGNORECASE)
-        matches = [i for i, line in enumerate(lines) if matcher.search(line)]
-    except re.error:
-        needle = pattern.lower()
-        matches = [i for i, line in enumerate(lines) if needle in line.lower()]
+    """Literal, case-insensitive selection cannot trigger regex backtracking."""
+    needle = pattern.lower()
+    matches = [i for i, line in enumerate(lines) if needle in line.lower()]
 
     if not matches:
         return []

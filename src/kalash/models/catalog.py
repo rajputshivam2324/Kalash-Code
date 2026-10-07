@@ -32,7 +32,7 @@ PROVIDERS: list[ProviderInfo] = [
         env_key="ANTHROPIC_API_KEY",
         base_url="https://api.anthropic.com",
         models_url="https://api.anthropic.com/v1/models",
-        # Source: platform.claude.com/docs/en/about-claude/models
+        # Model catalog reference: https://platform.claude.com/docs/en/about-claude/models
         models=[
             "claude-fable-5",
             "claude-mythos-5",
@@ -48,7 +48,7 @@ PROVIDERS: list[ProviderInfo] = [
         env_key="OPENAI_API_KEY",
         base_url="https://api.openai.com/v1",
         models_url="https://api.openai.com/v1/models",
-        # Source: developers.openai.com/api/docs/models
+        # Model catalog reference: https://developers.openai.com/api/docs/models
         models=[
             "gpt-5.6-sol",
             "gpt-5.6-terra",

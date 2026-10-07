@@ -10,11 +10,13 @@ import random
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.core.errors import StateError
 from kalash.core.ids import generate_id
-from kalash.storage.engine import StorageEngine
+
+if TYPE_CHECKING:
+    from kalash.storage.engine import StorageEngine
 
 
 class RunState(StrEnum):
@@ -54,7 +56,7 @@ class RetryConfig:
         delay = self.base_delay_s * (self.multiplier**attempt)
         delay = min(delay, self.max_delay_s)
         if self.jitter:
-            delay *= 0.5 + random.random()
+            delay *= 0.5 + random.random()  # noqa: S311 - Scheduling jitter, not security randomness.
         return delay
 
 
@@ -108,7 +110,10 @@ class ScheduleRun:
     def schedule_retry(self) -> None:
         if not self.should_retry():
             raise StateError(
-                f"Cannot retry: status={self.status}, attempt={self.attempt}/{self.retry_config.max_retries}",
+                (
+                    f"Cannot retry: status={self.status}, "
+                    f"attempt={self.attempt}/{self.retry_config.max_retries}"
+                ),
                 recoverable=True,
             )
         delay = self.retry_config.compute_delay(self.attempt)

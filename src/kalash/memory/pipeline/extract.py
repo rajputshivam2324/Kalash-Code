@@ -10,7 +10,7 @@ from kalash.core.redact import redact
 from kalash.memory.protocol import MemoryKind, MemoryWrite, Provenance, Scope, Source, Trust
 
 _PREFERENCE = re.compile(
-    r"\b(?:I prefer|I always use|remember that|remember to)\s+[^\n.!?]+[.!?]?",
+    r"^(?:I prefer|I always use|remember that|remember to)\s+[^\n.!?]+[.!?]?",
     re.IGNORECASE,
 )
 
@@ -34,6 +34,25 @@ async def run_extraction(
     """
     if context.source != Source.USER_STATED:
         return []
+    # Only standalone statements outside Markdown quotations/code fences are
+    # candidates. This conservative heuristic is not user confirmation.
+    candidates = []
+    fence = ""
+    for line in content[:16_000].splitlines():
+        text = line.strip()
+        if text.startswith(("```", "~~~")):
+            marker = text[:3]
+            if not fence:
+                fence = marker
+            elif marker == fence:
+                fence = ""
+            continue
+        if fence or line.startswith(("    ", "\t")):
+            continue
+        if match := _PREFERENCE.match(text):
+            candidates.append(match)
+        if len(candidates) == 8:
+            break
     return [
         MemoryWrite(
             kind=MemoryKind.SEMANTIC,
@@ -45,8 +64,8 @@ async def run_extraction(
                 session_id=context.session_id,
                 turn_seq=context.turn_seq,
             ),
-            confidence=Decimal("0.9"),
+            confidence=Decimal("0.6"),
             salience=Decimal("0.8"),
         )
-        for match in list(_PREFERENCE.finditer(content[:16_000]))[:8]
+        for match in candidates
     ]

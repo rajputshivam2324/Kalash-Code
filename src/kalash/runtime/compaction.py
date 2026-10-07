@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from kalash.core.budget import BudgetState
 from kalash.core.events import Event, EventBus, EventType
 from kalash.core.privacy import scrub_text
-from kalash.models.gateway import ModelGateway
 from kalash.models.normalize import Message, Role, TextBlock
 from kalash.runtime.evidence import receipt_tail, split_receipts
-from kalash.runtime.history import extractive_summary
+from kalash.runtime.history import estimate_request_tokens, extractive_summary
 from kalash.runtime.request import request
-from kalash.storage.repositories.sessions import SessionRepository
+
+if TYPE_CHECKING:
+    import asyncio
+
+    from kalash.core.budget import BudgetState
+    from kalash.models.gateway import ModelGateway
+    from kalash.runtime.journal import RuntimeJournal
+    from kalash.storage.repositories.sessions import SessionRepository
 
 COMPACTION_THRESHOLD = 0.82
 SUMMARY_PROMPT = """Summarize coding work so another turn can continue accurately.
@@ -33,6 +38,7 @@ class Compactor:
     budget: BudgetState | None = None
     cancel_event: asyncio.Event | None = None
     context_window: int = 32_768
+    journal: RuntimeJournal | None = None
 
     async def compact(self, session_id: str, messages: list[Message], previous: str = "") -> str:
         await self.event_bus.emit(
@@ -51,29 +57,40 @@ class Compactor:
         fallback = (previous + "\n\n" + extractive_summary(messages)).strip()
         summary = "[Extractive fallback; intermediate observations may be omitted]\n" + fallback
         method = "extractive"
-        if self.gateway is not None and self.budget is not None and self.cancel_event is not None:
+        summary_input = [
+            Message(
+                Role.USER,
+                [
+                    TextBlock(
+                        text="Previous summary:\n" + previous + "\n\nNew transcript:\n" + transcript
+                    )
+                ],
+            )
+        ]
+        output = min(8_192, max(256, self.context_window // 4))
+        fits = (
+            estimate_request_tokens(SUMMARY_PROMPT, summary_input, []) + output + 256
+            <= self.context_window
+        )
+        if (
+            fits
+            and self.gateway is not None
+            and self.budget is not None
+            and self.cancel_event is not None
+        ):
             result = await request(
                 self.gateway,
                 self.budget,
                 self.cancel_event,
-                [
-                    Message(
-                        Role.USER,
-                        [
-                            TextBlock(
-                                text="Previous summary:\n"
-                                + previous
-                                + "\n\nNew transcript:\n"
-                                + transcript
-                            )
-                        ],
-                    )
-                ],
+                summary_input,
                 system=SUMMARY_PROMPT,
                 tools=None,
-                max_output_tokens=min(8_192, max(256, self.context_window // 4)),
+                max_output_tokens=output,
                 temperature=0,
                 on_text_delta=None,
+                journal=self.journal,
+                event_bus=self.event_bus,
+                recoverable_response=False,
             )
             if (
                 result.error is None

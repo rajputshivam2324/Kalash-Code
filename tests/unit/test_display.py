@@ -89,7 +89,7 @@ class TestDiffGeneration:
 
 class TestToolsReportDiffs:
     @pytest.mark.asyncio
-    async def test_write_returns_a_diff(self, ctx, workspace):
+    async def test_write_returns_a_diff(self, ctx, workspace):  # noqa: ARG002 - Preserve provider/tool callback signature.
         env = await WriteTool().execute(WriteParams(path="new.py", content="print('hi')\n"), ctx)
         assert env.ok
         assert env.metadata["diff"]
@@ -137,7 +137,7 @@ class TestToolsReportDiffs:
         """The write is the contract; the diff is a display nicety."""
         monkeypatch.setattr(
             "kalash.tools.fs.write.make_diff",
-            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("diff exploded")),
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("diff exploded")),  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
         )
         with pytest.raises(RuntimeError):
             await WriteTool().execute(WriteParams(path="z.py", content="content\n"), ctx)

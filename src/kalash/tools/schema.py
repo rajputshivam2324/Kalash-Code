@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from kalash.tools.base import Tool
+if TYPE_CHECKING:
+    from kalash.tools.base import Tool
 
 # Auto-derived titles repeat field names; preserve all semantic schema fields.
 _DROP_KEYS: frozenset[str] = frozenset({"title"})
@@ -32,10 +33,7 @@ def tool_schema(tool: Tool, *, terse: bool = True) -> dict[str, Any]:
     too, so one shape serves both.
     """
     external = getattr(tool, "external_input_schema", None)
-    if external is not None:
-        raw = dict(external)
-    else:
-        raw = tool.params.model_json_schema()
+    raw = dict(external) if external is not None else tool.params.model_json_schema()
     if terse:
         raw = minify_schema(raw)
         # The tool's own description already says what it does, so a

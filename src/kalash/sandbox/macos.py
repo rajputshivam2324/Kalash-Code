@@ -6,6 +6,7 @@ Falls closed (I-011) if sandbox-exec is not available.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import shutil
@@ -14,7 +15,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .policy import SandboxMode, SandboxPolicy
+from .policy import NetworkPolicy, SandboxMode, SandboxPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ def _generate_seatbelt_profile(
     writable_roots: list[Path],
     allow_network: bool = False,
     allowed_hosts: list[str] | None = None,
+    protected_paths: list[Path] | None = None,
 ) -> str:
     """Generate a macOS sandbox-exec (Seatbelt) profile.
 
@@ -68,12 +70,33 @@ def _generate_seatbelt_profile(
     for root in writable_roots:
         root_str = str(root.resolve())
         # Allow all file write operations under this tree
-        lines.append(f'(allow file-write* (subpath "{root_str}"))')
+        lines.append(f"(allow file-write* (subpath {json.dumps(root_str)}))")
 
     # Allow writing to temp
     lines.append('(allow file-write* (subpath "/private/tmp"))')
     lines.append('(allow file-write* (subpath "/tmp"))')
     lines.append("")
+    for path in protected_paths or []:
+        literal = json.dumps(str(path))
+        matcher = "subpath" if path.is_dir() else "literal"
+        lines.append(f"(deny file-write* ({matcher} {literal}))")
+        if ".git" not in path.parts:
+            lines.append(f"(deny file-read-data (literal {literal}))")
+    from kalash.core.paths import kalash_home
+
+    for secret_dir in (
+        Path.home() / ".ssh",
+        Path.home() / ".aws",
+        Path.home() / ".gnupg",
+        Path.home() / ".config/gcloud",
+    ):
+        literal = json.dumps(str(secret_dir))
+        lines.append(f"(deny file-read* (subpath {literal}))")
+        lines.append(f"(deny file-write* (subpath {literal}))")
+    for secret_file in (kalash_home() / "auth.json", kalash_home() / "auth.key"):
+        literal = json.dumps(str(secret_file))
+        lines.append(f"(deny file-read* (literal {literal}))")
+        lines.append(f"(deny file-write* (literal {literal}))")
 
     # System library access (read-only is covered above)
     lines.append(";; System access")
@@ -82,16 +105,12 @@ def _generate_seatbelt_profile(
 
     # Network policy
     lines.append(";; Network policy")
-    if allow_network:
+    if allow_network and not allowed_hosts:
         lines.append("(allow network*)")
     elif allowed_hosts:
-        # Allow network to specific hosts
-        lines.append("(allow network-outbound (remote tcp))")
-        for host in allowed_hosts:
-            lines.append(f"  ;; allowed: {host}")
-        # Note: sandbox-exec doesn't support host-level filtering directly,
-        # so we allow outbound and rely on application-level enforcement
-        lines.append("(allow network-outbound)")
+        # Generic subprocess confinement has no enforcing hostname proxy.
+        # Preserve the allow-list boundary by denying subprocess networking.
+        lines.append("(deny network*)")
     else:
         # Deny all network
         lines.append("(deny network*)")
@@ -162,12 +181,18 @@ class MacOSSandbox:
 
     def generate_profile(self) -> str:
         """Generate the Seatbelt profile for current policy."""
-        allow_network = self.policy.network_allowed()
+        allow_network = self.policy.network_policy == NetworkPolicy.ALLOW_ALL
+
+        from .policy import protected_existing_paths
 
         return _generate_seatbelt_profile(
             writable_roots=self.policy.writable_roots,
             allow_network=allow_network,
             allowed_hosts=self.policy.allowed_hosts if not allow_network else None,
+            protected_paths=protected_existing_paths(
+                [self.policy.workspace_root, *self.policy.writable_roots],
+                self.policy.extra_protected,
+            ),
         )
 
     async def prepare_profile(self) -> Path:
@@ -181,9 +206,12 @@ class MacOSSandbox:
         profile_dir = Path(tempfile.gettempdir()) / "kalash-sandbox"
         profile_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
 
-        profile_path = profile_dir / f"profile-{self.policy.session_id}.sb"
-        profile_path.write_text(profile_content)
-        profile_path.chmod(0o600)
+        descriptor, name = tempfile.mkstemp(prefix="profile-", suffix=".sb", dir=profile_dir)
+        os.close(descriptor)
+        profile_path = Path(name)
+        from kalash.core.secure_io import atomic_private_write
+
+        atomic_private_write(profile_path, profile_content.encode())
 
         self._profile_path = profile_path
         logger.info("Seatbelt profile written to %s", profile_path)
@@ -225,7 +253,7 @@ class MacOSSandbox:
             len(self.policy.writable_roots),
         )
 
-    def wrap_command(self, cmd: list[str]) -> list[str]:
+    def wrap_command(self, cmd: list[str], *, cwd: str | None = None) -> list[str]:  # noqa: ARG002 - Preserve provider/tool callback signature.
         """Wrap a command with sandbox-exec isolation.
 
         Args:
@@ -244,7 +272,12 @@ class MacOSSandbox:
             raise RuntimeError("sandbox-exec not available (I-011)")
 
         if self._profile_path is None or not self._profile_path.exists():
-            raise RuntimeError("Sandbox profile not prepared — call enforce() first")
+            from kalash.core.secure_io import atomic_private_write
+
+            descriptor, name = tempfile.mkstemp(prefix="kalash-seatbelt-", suffix=".sb")
+            os.close(descriptor)
+            self._profile_path = Path(name)
+            atomic_private_write(self._profile_path, self.generate_profile().encode())
 
         return [
             self._sandbox_exec_path,

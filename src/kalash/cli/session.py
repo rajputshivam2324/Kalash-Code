@@ -100,7 +100,7 @@ def export(
         str | None,
         typer.Option("--output", "-o", help="Output file path (defaults to stdout)"),
     ] = None,
-    format: Annotated[
+    format: Annotated[  # noqa: A002 - Keep the established public keyword/CLI spelling.
         str,
         typer.Option("--format", "-f", help="Export format: json, markdown"),
     ] = "json",
@@ -135,7 +135,7 @@ def rm(
     if not force:
         confirm = typer.confirm(f"Delete session {session_id!r}? This cannot be undone.")
         if not confirm:
-            raise typer.Abort()
+            raise typer.Abort
 
     manager = SessionManager()
     deleted = manager.delete_session(session_id)

@@ -5,11 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 try:
     import structlog
@@ -38,6 +37,9 @@ from kalash.storage.engine import StorageEngine
 from .queries import recall_sql, scope_filter
 from .records import row_to_hit, row_to_record
 from .schema import SCHEMA_DDL
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Sequence
 
 
 class LocalProvider:
@@ -282,7 +284,10 @@ class LocalProvider:
             if edit.metadata is not None:
                 updates["metadata"] = json.dumps(edit.metadata)
             conn.execute(
-                f"UPDATE memory_records SET {', '.join(f'{name} = ?' for name in updates)} WHERE id = ?",
+                (
+                    f"UPDATE memory_records SET {', '.join(f'{name} = ?' for name in updates)} "  # noqa: S608 - Fixed SQL grammar; all external values use bound parameters.
+                    f"WHERE id = ?"
+                ),
                 (*updates.values(), edit.id),
             )
             current.update(updates)
@@ -352,11 +357,11 @@ class LocalProvider:
 
         async with self._engine.write() as conn:
             conn.execute(
-                f"DELETE FROM memory_fts WHERE id IN (SELECT id FROM memory_records WHERE {where})",
+                f"DELETE FROM memory_fts WHERE id IN (SELECT id FROM memory_records WHERE {where})",  # noqa: S608 - Only fixed SQL identifiers/predicates; values are bound parameters.
                 tuple(params),
             )
             count = conn.execute(
-                f"UPDATE memory_records SET tombstoned = 1, tombstoned_at = ? WHERE {where}",
+                f"UPDATE memory_records SET tombstoned = 1, tombstoned_at = ? WHERE {where}",  # noqa: S608 - Only fixed SQL identifiers/predicates; values are bound parameters.
                 (now, *params),
             ).rowcount
 
@@ -414,7 +419,11 @@ class LocalProvider:
 
         while True:
             rows = await self._engine.execute_read_async(
-                f"SELECT * FROM memory_records WHERE {where} ORDER BY created_at ASC LIMIT ? OFFSET ?",
+                (
+                    f"SELECT * FROM memory_records WHERE "  # noqa: S608 - Fixed SQL grammar; all external values use bound parameters.
+                    f"{where} ORDER BY created_at ASC LIMIT "
+                    f"? OFFSET ?"
+                ),
                 tuple(params) + (batch_size, offset),
             )
 

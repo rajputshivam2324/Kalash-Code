@@ -6,7 +6,7 @@ import pytest
 from evals.judge import evaluate_content_deterministic, run_binary_search_notes_judge
 
 
-def test_deterministic_judge_scoring(tmp_path: Path):
+def test_deterministic_judge_scoring(tmp_path: Path):  # noqa: ARG001 - Preserve callback/keyword compatibility.
     sample_doc = """# Binary Search Fundamentals
 
 ## Invariants

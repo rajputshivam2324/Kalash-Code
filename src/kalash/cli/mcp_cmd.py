@@ -99,7 +99,7 @@ def ls(
 @mcp_app.command("test")
 def test(
     name: Annotated[str, typer.Argument(help="Server name to test")],
-    timeout: Annotated[int, typer.Option("--timeout", help="Connection timeout in seconds")] = 10,
+    timeout: Annotated[int, typer.Option("--timeout", help="Connection timeout in seconds")] = 10,  # noqa: PT028 - CLI command named test, not a pytest fixture.
 ) -> None:
     """Test connectivity to an MCP server."""
     from kalash.mcp.registry import MCPRegistry

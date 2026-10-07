@@ -59,7 +59,7 @@ def test(
     provider_id: Annotated[
         str | None,
         typer.Argument(help="Provider to test (defaults to active)"),
-    ] = None,
+    ] = None,  # noqa: PT028 - CLI command named test, not a pytest fixture.
 ) -> None:
     """Verify provider credentials and model resolution."""
     from kalash.models.resolve import active_selection, build_provider

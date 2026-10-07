@@ -11,9 +11,8 @@ import contextlib
 import shutil
 import sys
 import tempfile
-from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from evals.project_build import run_project_build_suite
 from evals.suites import (
@@ -22,6 +21,9 @@ from evals.suites import (
     run_safety_suite,
     run_token_suite,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 # A suite below its threshold fails the run. Safety is absolute: a gate that
 # lets one dangerous command through is not "97% safe", it is broken.
@@ -56,7 +58,7 @@ async def main() -> int:
     notes: list[str] = []
 
     try:
-        print("Kalash evals — deterministic, offline")
+        print("Kalash evals — deterministic, offline")  # noqa: T201 - Evaluation CLI progress output.
 
         capability = await run_capability_suite(root, _monkeypatch)
         reports.append(capability)
@@ -80,29 +82,29 @@ async def main() -> int:
         # -- report ------------------------------------------------------
         failed = False
         for report in reports:
-            print(_rule(report.name))
+            print(_rule(report.name))  # noqa: T201 - Evaluation CLI progress output.
             failures = [r for r in report.results if not r.passed]
-            print(f"  {report.passed}/{report.total} passed ({report.rate:.0%})")
+            print(f"  {report.passed}/{report.total} passed ({report.rate:.0%})")  # noqa: T201 - Evaluation CLI progress output.
             for result in report.results:
                 if result.passed and result.detail:
-                    print(f"    · {result.name}: {result.detail}")
+                    print(f"    · {result.name}: {result.detail}")  # noqa: T201 - Evaluation CLI progress output.
             for result in failures:
-                print(f"    FAIL {result.name}: {result.detail}")
+                print(f"    FAIL {result.name}: {result.detail}")  # noqa: T201 - Evaluation CLI progress output.
 
             threshold = THRESHOLDS.get(report.name, 1.0)
             if report.rate < threshold:
                 failed = True
-                print(f"  below threshold {threshold:.0%}")
+                print(f"  below threshold {threshold:.0%}")  # noqa: T201 - Evaluation CLI progress output.
 
         if notes:
-            print(_rule("token economics (input-equivalent units)"))
+            print(_rule("token economics (input-equivalent units)"))  # noqa: T201 - Evaluation CLI progress output.
             for line in notes:
-                print(f"  {line}")
+                print(f"  {line}")  # noqa: T201 - Evaluation CLI progress output.
 
-        print(_rule("summary"))
+        print(_rule("summary"))  # noqa: T201 - Evaluation CLI progress output.
         for report in reports:
             state = "ok" if report.rate >= THRESHOLDS.get(report.name, 1.0) else "REGRESSED"
-            print(f"  {report.name:<18} {report.passed:>3}/{report.total:<3} {state}")
+            print(f"  {report.name:<18} {report.passed:>3}/{report.total:<3} {state}")  # noqa: T201 - Evaluation CLI progress output.
 
         return 1 if failed else 0
     finally:

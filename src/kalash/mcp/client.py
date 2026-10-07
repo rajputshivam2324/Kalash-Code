@@ -7,6 +7,7 @@ Lazy connect on first use. Schema discovery and tool namespacing.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -152,35 +153,28 @@ class MCPClient:
             )
 
         # Send JSON-RPC request
-        result = await self._send_request(
+        return await self._send_request(
             "tools/call",
             {"name": tool_name, "arguments": arguments},
         )
-        return result
 
     async def disconnect(self) -> None:
         """Close the connection to the MCP server."""
         if self._reader_task:
             self._reader_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._reader_task
-            except asyncio.CancelledError:
-                pass
         if self._process and self._process.returncode is None:
             import os
             import signal
 
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 os.killpg(self._process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
             try:
                 await asyncio.wait_for(self._process.wait(), timeout=5.0)
             except TimeoutError:
-                try:
+                with contextlib.suppress(ProcessLookupError):
                     os.killpg(self._process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
                 await self._process.wait()
         if self._http is not None:
             headers = {**self._config.headers, **await self._auth.get_headers(self._config.name)}
@@ -248,7 +242,7 @@ class MCPClient:
             raise MCPConnectionError(
                 f"Failed to start MCP server '{self._config.name}': {e}",
                 recoverable=True,
-            )
+            ) from e
 
     async def _connect_http(self) -> None:
         """Connect via streamable HTTP transport."""
@@ -394,17 +388,16 @@ class MCPClient:
             )
             response.raise_for_status()
 
-            result = await asyncio.wait_for(future, timeout=self._config.timeout_s)
-            return result
+            return await asyncio.wait_for(future, timeout=self._config.timeout_s)
         except TimeoutError:
             self._pending.pop(req_id, None)
             raise ToolTimeoutError(
                 f"MCP request to '{self._config.name}' timed out after {self._config.timeout_s}s",
                 recoverable=True,
-            )
+            ) from None
         except Exception as e:
             self._pending.pop(req_id, None)
-            raise MCPConnectionError(f"Failed to send SSE POST: {e}", recoverable=True)
+            raise MCPConnectionError(f"Failed to send SSE POST: {e}", recoverable=True) from e
         finally:
             self._pending.pop(req_id, None)
 
@@ -475,14 +468,13 @@ class MCPClient:
         await self._stdin.drain()
 
         try:
-            result = await asyncio.wait_for(future, timeout=self._config.timeout_s)
-            return result
+            return await asyncio.wait_for(future, timeout=self._config.timeout_s)
         except TimeoutError:
             self._pending.pop(req_id, None)
             raise ToolTimeoutError(
                 f"MCP request to '{self._config.name}' timed out after {self._config.timeout_s}s",
                 recoverable=True,
-            )
+            ) from None
         finally:
             self._pending.pop(req_id, None)
 

@@ -27,7 +27,7 @@ def test_invalid_task_id_is_rejected(tmp_path, identifier):
             [{"id": identifier, "prompt": "fix", "files": {"src/a.py": ""}, "hidden_test": ""}]
         )
     )
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="Invalid or duplicate task ID"):
         load_tasks(fixture)
 
 
@@ -40,7 +40,7 @@ def test_candidate_symlink_is_rejected(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "source, expected",
+    ("source", "expected"),
     [
         ("def answer(): return 0\n", "failed"),
         ("def answer(): return 42\n", "resolved"),
@@ -66,7 +66,8 @@ async def test_grader_file_tampering_is_rejected(tmp_path):
 
 async def test_shell_refuses_missing_sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(
-        "kalash.tools.shell._wrap_sandboxed", lambda argv, ctx, cwd: (argv, False, "unavailable")
+        "kalash.tools.shell._wrap_sandboxed",
+        lambda argv, ctx, cwd: (argv, False, "unavailable"),  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
     )
     result = await ShellTool().execute(
         ShellParams(command="touch escaped"),

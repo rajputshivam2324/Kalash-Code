@@ -37,10 +37,7 @@ def logs_dir() -> Path:
 
 def cache_dir(project_dir: Path | None = None) -> Path:
     """Path to cache directory (project-local or global)."""
-    if project_dir:
-        d = project_dir / ".kalash" / "cache"
-    else:
-        d = kalash_home() / "cache"
+    d = project_dir / ".kalash" / "cache" if project_dir else kalash_home() / "cache"
     d.mkdir(parents=True, exist_ok=True)
     return d
 

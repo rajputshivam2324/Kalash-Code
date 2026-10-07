@@ -7,14 +7,15 @@ import logging
 import random
 import re
 import time
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from kalash.core.budget import Pricing, Usage
 from kalash.core.errors import (
+    BudgetError,
     ModelAllFailedError,
     ModelContextExceededError,
+    ModelError,
 )
 
 from .normalize import (
@@ -23,7 +24,11 @@ from .normalize import (
     ModelResponse,
     StreamError,
     StreamEvent,
+    UsageUpdate,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +92,10 @@ class ErrorKind:
     UNKNOWN = "unknown"  # retry once, then give up
 
 
-def classify_error(exc: Exception, model_id: str = "") -> str:
+def classify_error(exc: Exception, model_id: str = "") -> str:  # noqa: ARG001 - Preserve callback/keyword compatibility.
     """Classify provider failures without changing request content."""
+    if isinstance(exc, BudgetError):
+        return ErrorKind.PERMANENT
     msg = str(exc).lower()
 
     # Context window exceeded
@@ -198,7 +205,7 @@ class RetryConfig:
     def delay_for_attempt(self, attempt: int) -> float:
         """Compute delay with exponential backoff and jitter."""
         base = min(self.initial_delay_s * (2**attempt), self.max_delay_s)
-        jitter = base * self.jitter_factor * random.random()
+        jitter = base * self.jitter_factor * random.random()  # noqa: S311 - Scheduling jitter, not security randomness.
         return float(base + jitter)
 
 
@@ -234,6 +241,10 @@ class ModelGateway:
         return self._primary
 
     @property
+    def providers(self) -> tuple[ProviderProtocol, ...]:
+        return (self._primary, *self._fallbacks)
+
+    @property
     def capabilities(self) -> ModelCapabilities:
         return self._primary.capabilities
 
@@ -245,7 +256,7 @@ class ModelGateway:
     def call_count(self) -> int:
         return self._call_count
 
-    def _accumulate_usage(self, usage: Usage, model_id: str = "") -> None:
+    def _accumulate_usage(self, usage: Usage, model_id: str = "") -> None:  # noqa: ARG002 - Preserve provider/tool callback signature.
         """Accumulate usage from a call into the gateway total and rate pacer."""
         self._total_usage = Usage(
             input_tokens=self._total_usage.input_tokens + usage.input_tokens,
@@ -268,6 +279,8 @@ class ModelGateway:
         start = time.monotonic()
         last_exc: Exception | None = None
         yielded_any = False
+        before_attempt = kwargs.pop("_before_attempt", None)
+        unobserved_failure = kwargs.pop("_unobserved_failure", None)
 
         for attempt in range(self._retry.max_attempts):
             elapsed = time.monotonic() - start
@@ -279,10 +292,16 @@ class ModelGateway:
                 )
                 break
 
+            if before_attempt is not None:
+                await before_attempt(provider)
             try:
                 stream = provider.stream(messages, **kwargs)
                 try:
                     async for event in stream:
+                        if isinstance(event, StreamError) and not yielded_any:
+                            raise ModelError(
+                                event.error, code=event.code, recoverable=event.recoverable
+                            )
                         yielded_any = True
                         yield event
                 finally:
@@ -291,6 +310,12 @@ class ModelGateway:
                         await close()
                 return
             except Exception as exc:
+                if isinstance(exc, BudgetError):
+                    raise
+                if not yielded_any and unobserved_failure is not None:
+                    await unobserved_failure(provider, exc)
+                if isinstance(exc, ModelError) and not exc.recoverable:
+                    raise
                 last_exc = exc
                 last_kind = classify_error(exc, model_id=provider.name)
 
@@ -472,7 +497,9 @@ class ModelGateway:
         stop_sequences: list[str] | None = None,
         **kwargs: Any,
     ) -> AsyncIterator[StreamEvent]:
-        """Stream responses from the model without changing the requested prompt or output budget."""
+        """
+        Stream responses from the model without changing the requested prompt or output budget.
+        """
 
         call_kwargs: dict[str, Any] = {
             "system": system,
@@ -490,25 +517,26 @@ class ModelGateway:
             if max_tokens is not None:
                 provider_kwargs["max_tokens"] = max_tokens
 
-            result = await self._attempt_with_retry(
-                provider, messages, mode="stream", **provider_kwargs
+            yielded = False
+            tracked = self._track_stream_usage(
+                self._stream_with_retry(provider, messages, **provider_kwargs),
+                model_id=provider.name,
             )
-
-            if result.success and result.stream is not None:
-                tracked = self._track_stream_usage(result.stream, model_id=provider.name)
-                try:
-                    async for event in tracked:
-                        yield event
-                finally:
-                    close = getattr(tracked, "aclose", None)
-                    if close is not None:
-                        await close()
+            try:
+                async for event in tracked:
+                    yielded = True
+                    yield event
                 return
-
-            if result.error:
-                errors.append((provider.name, result.error, result.error_kind))
-                if result.error_kind in (ErrorKind.AUTH, ErrorKind.PERMANENT):
-                    continue
+            except BudgetError:
+                raise  # Controller refusal must not trigger another provider attempt.
+            except Exception as error:
+                if yielded:
+                    raise  # Never replay an observable stream on another provider.
+                errors.append((provider.name, error, classify_error(error, provider.name)))
+            finally:
+                close = getattr(tracked, "aclose", None)
+                if close is not None:
+                    await close()
 
         error_summary = "; ".join(f"{name}: {exc}" for name, exc, _ in errors)
         yield StreamError(
@@ -520,25 +548,30 @@ class ModelGateway:
     async def _track_stream_usage(
         self, stream: AsyncIterator[StreamEvent], model_id: str = ""
     ) -> AsyncIterator[StreamEvent]:
-        """Wrap a stream to accumulate usage from UsageUpdate events."""
-        from .normalize import UsageUpdate as _UsageUpdate
-
+        """Charge cumulative stream usage once, including failure and cancellation."""
+        observed: UsageUpdate | None = None
         try:
             async for event in stream:
-                if isinstance(event, _UsageUpdate):
-                    usage = Usage(
-                        input_tokens=event.input_tokens,
-                        output_tokens=event.output_tokens,
-                        cache_read_tokens=event.cache_read_tokens,
-                        cache_write_tokens=event.cache_write_tokens,
-                        reasoning_tokens=event.reasoning_tokens,
-                    )
-                    self._accumulate_usage(usage, model_id=model_id)
+                if isinstance(event, UsageUpdate):
+                    observed = (observed or UsageUpdate()).merge(event)
                 yield event
         finally:
-            close = getattr(stream, "aclose", None)
-            if close is not None:
-                await close()
+            try:
+                close = getattr(stream, "aclose", None)
+                if close is not None:
+                    await close()
+            finally:
+                if observed is not None:
+                    self._accumulate_usage(
+                        Usage(
+                            input_tokens=observed.input_tokens,
+                            output_tokens=observed.output_tokens,
+                            cache_read_tokens=observed.cache_read_tokens,
+                            cache_write_tokens=observed.cache_write_tokens,
+                            reasoning_tokens=observed.reasoning_tokens,
+                        ),
+                        model_id=model_id,
+                    )
 
     async def close(self) -> None:
         """Close all provider connections."""

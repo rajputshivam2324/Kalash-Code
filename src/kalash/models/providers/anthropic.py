@@ -7,14 +7,14 @@ Uses lazy import of the anthropic package to avoid import-time cost.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.core.budget import Pricing, Usage
 
 from ..normalize import (
     BlockDelta,
+    BlockMetadata,
     BlockStart,
     BlockStop,
     ContentBlock,
@@ -35,6 +35,9 @@ from ..normalize import (
     ToolUseBlock,
     UsageUpdate,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 
@@ -162,15 +165,15 @@ def _deserialize_content_block(block: dict[str, Any]) -> ContentBlock:
 def _normalize_usage(raw_usage: dict[str, Any]) -> Usage:
     """Normalize Anthropic usage.
 
-    Anthropic reports input_tokens which includes cache reads.
-    We normalize so input_tokens excludes cache reads.
+    Anthropic reports disjoint uncached/read/write input partitions. Normalized
+    input includes cache reads; cache writes remain a separate partition.
     """
     input_tokens = raw_usage.get("input_tokens", 0)
     cache_read = raw_usage.get("cache_read_input_tokens", 0)
     cache_write = raw_usage.get("cache_creation_input_tokens", 0)
 
     return Usage(
-        input_tokens=input_tokens - cache_read,
+        input_tokens=input_tokens + cache_read,
         output_tokens=raw_usage.get("output_tokens", 0),
         cache_read_tokens=cache_read,
         cache_write_tokens=cache_write,
@@ -402,7 +405,8 @@ class AnthropicProvider:
                                 )
                                 if raw:
                                     yield UsageUpdate(
-                                        input_tokens=raw.get("input_tokens", 0),
+                                        input_tokens=raw.get("input_tokens", 0)
+                                        + raw.get("cache_read_input_tokens", 0),
                                         cache_read_tokens=raw.get("cache_read_input_tokens", 0),
                                         cache_write_tokens=raw.get(
                                             "cache_creation_input_tokens", 0
@@ -438,6 +442,8 @@ class AnthropicProvider:
                                 )
                             elif delta_type == "thinking_delta":
                                 yield BlockDelta(index=block_index, delta=delta.thinking)
+                            elif delta_type == "signature_delta":
+                                yield BlockMetadata(index=block_index, signature=delta.signature)
 
                         case "content_block_stop":
                             yield BlockStop(index=block_index)

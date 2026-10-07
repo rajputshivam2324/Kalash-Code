@@ -25,9 +25,11 @@ None of these are lossy. They are cheaper spellings of identical content.
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
 
 # A folded prefix only pays for itself once the declaration is shorter than the
 # repetition it removes. Below this length the indirection costs more than it

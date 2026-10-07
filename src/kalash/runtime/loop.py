@@ -10,13 +10,14 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass, field
+from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.core.budget import BudgetState, Usage
 from kalash.core.events import Event, EventBus, EventType
+from kalash.core.privacy import scrub_blocks
 from kalash.models.diagnose import diagnose, explain
-from kalash.models.gateway import ModelGateway
 from kalash.models.normalize import (
     ContentBlock,
     Message,
@@ -27,19 +28,31 @@ from kalash.models.normalize import (
     ToolResultBlock,
     ToolUseBlock,
 )
-from kalash.storage.repositories.sessions import SessionRepository
 from kalash.tools.schema import schema_tokens
 
 from .compaction import COMPACTION_THRESHOLD, Compactor
-from .context import ContextAssembler
+from .completion import CompletionContract, CompletionStatus, verify_contract
 from .execution import ToolExecutor
 from .history import estimate_request_tokens as _estimate_request_tokens
-from .history import extractive_summary, split_history, trim_oversized_results
+from .history import (
+    extractive_summary,
+    reference_completed_exchanges,
+    split_history,
+    trim_oversized_results,
+)
 from .request import request, usage_from_result
+from .serialize import serialize_blocks
 from .serialize import split_system as _split_system
 from .stream import StreamResult
 from .toolhost import ToolCategory, ToolHostProtocol
 from .transcript import Transcript
+
+if TYPE_CHECKING:
+    from kalash.models.gateway import ModelGateway
+    from kalash.storage.repositories.sessions import SessionRepository
+
+    from .context import ContextAssembler
+    from .journal import RuntimeJournal
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +86,13 @@ class LoopResult:
     final_response: str = ""
     error: str | None = None
     synthesized: bool = False
+    completion_status: CompletionStatus = CompletionStatus.STOPPED
+    verification: list[dict[str, Any]] = field(default_factory=list)
+    usage_unknown: bool = False
+    model: str = ""
+    call_tokens: int = 0
+    run_id: str = ""
+    call_cost_usd: Decimal = field(default_factory=lambda: Decimal(0))
     """True when the final reply came from a dedicated synthesis pass."""
 
 
@@ -117,8 +137,11 @@ class AgentLoop:
     _retried_output_cap: bool = field(init=False, default=False)
     _compacted_summary: str | None = field(init=False, default=None)
     _response_parts: list[str] = field(init=False, default_factory=list)
+    _used_model: str = field(init=False, default="")
     _cancel_event: asyncio.Event = field(init=False)
     _task_message: Message | None = field(init=False, default=None)
+    journal: RuntimeJournal | None = None
+    context_data_provider: Any | None = None
 
     def __post_init__(self) -> None:
         self._cancel_event = asyncio.Event()
@@ -175,7 +198,9 @@ class AgentLoop:
                 content=[
                     ToolResultBlock(
                         tool_use_id=call.id,
-                        content="Run interrupted. Outcome unknown; inspect workspace before retrying.",
+                        content=(
+                            "Run interrupted. Outcome unknown; inspect workspace before retrying."
+                        ),
                         is_error=True,
                     )
                     for call in pending.values()
@@ -196,6 +221,7 @@ class AgentLoop:
         recent_turns: list[Message] | None = None,
         environment: dict[str, str] | None = None,
         on_text_delta: Any | None = None,
+        completion_contract: CompletionContract | None = None,
     ) -> LoopResult:
         """Run the agent loop until termination.
 
@@ -217,6 +243,7 @@ class AgentLoop:
         self._cancel_event.clear()
         self._iteration = 0
         self._response_parts = []
+        self._used_model = self.gateway.primary.name
         self._retried_output_cap = False
         self._task_message = user_message
         if compacted_summary is not None:
@@ -230,6 +257,7 @@ class AgentLoop:
             restore_tools(self._conversation)
 
         if self.hooks:
+            from kalash.core.errors import HookDeniedError
             from kalash.hooks.events import HookEvent, SessionStartPayload
 
             try:
@@ -243,6 +271,8 @@ class AgentLoop:
                         project_dir=project_dir,
                     )
                 )
+            except HookDeniedError as error:
+                return await self._finish(TerminationReason.ERROR, error=str(error))
             except Exception as e:
                 logger.error("Failed to dispatch SESSION_START hook", exc_info=e)
 
@@ -269,9 +299,24 @@ class AgentLoop:
                     on_text_delta=on_text_delta,
                 )
 
+                if stream_result is not None:
+                    self._used_model = stream_result.model or self.gateway.primary.name
                 if stream_result is None or stream_result.error is not None:
+                    if stream_result and stream_result.text_content:
+                        partial = Message(Role.ASSISTANT, [TextBlock(stream_result.text_content)])
+                        self._response_parts.append(stream_result.text_content)
+                        self._conversation.append(partial)
+                        await self._persist_turn(
+                            partial,
+                            usage_from_result(stream_result),
+                            source_id=stream_result.attempt_id,
+                        )
                     err = (
-                        explain(stream_result.error.error, self.model_id)
+                        (
+                            stream_result.error.error
+                            if stream_result.error.code in {"context_exceeded", "budget_exhausted"}
+                            else explain(stream_result.error.error, self.model_id)
+                        )
                         if stream_result and stream_result.error
                         else "The model request failed without a response."
                     )
@@ -282,6 +327,12 @@ class AgentLoop:
                         and stream_result.error.code == "budget_exhausted"
                         else TerminationReason.ERROR
                     )
+                    if (
+                        stream_result
+                        and stream_result.error
+                        and stream_result.error.code == "cancelled"
+                    ):
+                        reason = TerminationReason.USER_INTERRUPT
                     return await self._finish(reason, error=err)
 
                 usage = usage_from_result(stream_result)
@@ -294,7 +345,7 @@ class AgentLoop:
                     content=stream_result.content,
                 )
                 self._conversation.append(assistant_msg)
-                await self._persist_turn(assistant_msg, usage)
+                await self._persist_turn(assistant_msg, usage, source_id=stream_result.attempt_id)
 
                 if not stream_result.has_tool_calls:
                     if stream_result.stop_reason == StopReason.MAX_TOKENS:
@@ -324,16 +375,10 @@ class AgentLoop:
                             if stream_result.text_content:
                                 self._response_parts.pop()
                             continue
-                    await self.event_bus.emit(
-                        Event(
-                            type=EventType.TURN_COMPLETE,
-                            session_id=self.session_id,
-                            data={"iteration": self._iteration},
-                        )
-                    )
                     return await self._finish(
                         TerminationReason.NO_TOOL_CALLS,
                         final=stream_result.text_content,
+                        contract=completion_contract,
                     )
 
                 await self._tools_until_cancelled(stream_result.tool_calls)
@@ -361,6 +406,7 @@ class AgentLoop:
         final: str = "",
         error: str | None = None,
         synthesized: bool = False,
+        contract: CompletionContract | None = None,
     ) -> LoopResult:
         if self.hooks:
             from kalash.hooks.events import HookEvent, SessionEndPayload
@@ -380,6 +426,37 @@ class AgentLoop:
         combined = "\n\n".join(part for part in self._response_parts if part)
         if final and final not in combined:
             combined = f"{combined}\n\n{final}".strip() if combined else final
+        status = CompletionStatus.STOPPED
+        verification: list[dict[str, Any]] = []
+        if reason == TerminationReason.USER_INTERRUPT:
+            status = CompletionStatus.CANCELLED
+        elif reason != TerminationReason.NO_TOOL_CALLS:
+            status = CompletionStatus.PARTIAL if combined else CompletionStatus.FAILED
+        elif contract is not None:
+            verified, verification, error = await verify_contract(
+                contract, self.tool_registry, self._executor
+            )
+            status = CompletionStatus.VERIFIED if verified else CompletionStatus.PARTIAL
+        if self.budget.unknown_usage_attempts and status == CompletionStatus.STOPPED:
+            status = CompletionStatus.UNCERTAIN
+        if self.journal is not None:
+            await self.journal.append(
+                "completion",
+                {"status": status.value, "verification": verification, "error": error},
+                budget=self.budget,
+            )
+        await self.event_bus.emit(
+            Event(
+                type=EventType.TURN_COMPLETE,
+                session_id=self.session_id,
+                data={
+                    "iteration": self._iteration,
+                    "completion_status": status.value,
+                    "termination_reason": reason.value,
+                    "error": error,
+                },
+            )
+        )
         return LoopResult(
             termination_reason=reason,
             iterations=self._iteration,
@@ -387,6 +464,10 @@ class AgentLoop:
             final_response=combined or final,
             error=error,
             synthesized=synthesized,
+            completion_status=status,
+            verification=verification,
+            usage_unknown=bool(self.budget.unknown_usage_attempts),
+            model=self._used_model,
         )
 
     async def _emit_context_usage(self, prompt_tokens: int) -> None:
@@ -421,6 +502,11 @@ class AgentLoop:
     ) -> StreamResult:
         """Assemble the full request; compact only for the actual context window."""
         tools = self.tool_registry.schemas()
+        if any(tool.get("name") == "expand" for tool in tools):
+            referenced = reference_completed_exchanges(self._conversation, self.session_id)
+            if referenced != self._conversation:
+                self._conversation = referenced
+                await self._persist_projection()
         capabilities = getattr(self.gateway.primary, "capabilities", None)
         if capabilities is not None and not capabilities.tool_use:
             tools = []
@@ -447,7 +533,8 @@ class AgentLoop:
                 tool_schemas=tools,
                 skills_catalog=skills_catalog or [],
                 kalash_md_chain=kalash_md_chain or [],
-                memory_blocks=memory_blocks or [],
+                memory_blocks=(self.context_data_provider() if self.context_data_provider else [])
+                + (memory_blocks or []),
                 nested_instructions=nested,
                 active_skills=retained_skills,
                 compacted_summary=self._compacted_summary,
@@ -462,15 +549,19 @@ class AgentLoop:
         if prompt_tokens + output_cap > self.assembler.context_window * COMPACTION_THRESHOLD:
             await self._ensure_context_fits(system, tools, prompt_tokens=prompt_tokens + output_cap)
             system, messages, prompt_tokens = await assemble()
-        output_cap = min(output_cap, self.assembler.context_window - prompt_tokens - 256)
-        if output_cap < 1:
+        if prompt_tokens + output_cap + 256 > self.assembler.context_window:
             return StreamResult(
                 message_id="",
                 model=self.model_id,
                 content=[],
                 stop_reason=StopReason.END_TURN,
                 error=StreamError(
-                    error="Instructions and active exchange exceed the model context window. Narrow the request or use a larger context model.",
+                    error=(
+                        f"Context window cannot fit estimated input {prompt_tokens:,} + "
+                        f"output allowance {output_cap:,} + 256 framing tokens in "
+                        f"{self.assembler.context_window:,} tokens. Narrow the request, "
+                        "explicitly lower model.max_output_tokens, or use a larger context model."
+                    ),
                     code="context_exceeded",
                     recoverable=False,
                 ),
@@ -485,6 +576,7 @@ class AgentLoop:
                     "react_step": self._iteration,
                     "tool_schema_count": len(tools),
                     "tool_schema_tokens_estimate": schema_tokens(tools),
+                    "context_sections": dict(self.assembler.section_tokens),
                     "prompt_tokens": prompt_tokens,
                     "context_window": self.assembler.context_window,
                     "fill_ratio": round(prompt_tokens / max(self.assembler.context_window, 1), 3),
@@ -532,6 +624,21 @@ class AgentLoop:
         if ratio < COMPACTION_THRESHOLD:
             return self._compacted_summary
 
+        # Reduce verbose observations by reference before buying a summary.
+        # Keep user messages, tool identities and evidence unchanged.
+        old_estimate = _estimate_request_tokens("", self._conversation, [])
+        head, tail = split_history(self._conversation)
+        reduced = [
+            *trim_oversized_results(head, max_chars=1024, session_id=self.session_id),
+            *trim_oversized_results(tail, session_id=self.session_id),
+        ]
+        if reduced != self._conversation:
+            self._conversation = reduced
+            total -= old_estimate - _estimate_request_tokens("", reduced, [])
+            await self._persist_projection()
+            if total < self.assembler.context_window * COMPACTION_THRESHOLD:
+                return self._compacted_summary
+
         if len(self._conversation) <= 3:
             if ratio >= COMPACTION_THRESHOLD:
                 self._conversation = trim_oversized_results(
@@ -547,6 +654,14 @@ class AgentLoop:
                 self._conversation, session_id=self.session_id
             )
             return self._compacted_summary
+        if self._compacted_summary and all(
+            message.role == Role.USER
+            and all(isinstance(block, TextBlock) for block in message.content)
+            for message in head
+        ):
+            # These verbatim constraints survived the last reduction. Summarizing
+            # them again cannot free space without losing user authority.
+            return self._compacted_summary
 
         compactor = Compactor(
             self.session_repo,
@@ -555,6 +670,7 @@ class AgentLoop:
             self.budget,
             self._cancel_event,
             self.assembler.context_window,
+            journal=self.journal,
         )
         self._compacted_summary = await compactor.compact(
             self.session_id, head, self._compacted_summary or ""
@@ -568,12 +684,31 @@ class AgentLoop:
             and not any(isinstance(block, ToolResultBlock) for block in message.content)
         ]
         self._conversation = [*anchors, *tail]
+        await self._persist_projection()
         logger.info(
             "compacted %d messages (fill was %.0f%%)",
             len(head),
             ratio * 100,
         )
         return self._compacted_summary
+
+    async def _persist_projection(self) -> None:
+        if self.journal is not None:
+            await self.journal.append(
+                "compaction",
+                {
+                    "retained": len(self._conversation),
+                    "conversation": [
+                        {
+                            "role": message.role.value,
+                            "content": serialize_blocks(scrub_blocks(message.content)),
+                        }
+                        for message in self._conversation
+                    ],
+                },
+                budget=self.budget,
+                summary=self._compacted_summary,
+            )
 
     _extractive_summary = staticmethod(extractive_summary)
     _trim_oversized_results = staticmethod(trim_oversized_results)
@@ -616,6 +751,8 @@ class AgentLoop:
             max_output_tokens=max_output_tokens or self.max_output_tokens,
             temperature=self.temperature,
             on_text_delta=on_text_delta,
+            journal=self.journal,
+            event_bus=self.event_bus,
         )
 
     async def _tools_until_cancelled(self, calls: list[ToolUseBlock]) -> list[ContentBlock]:
@@ -634,8 +771,16 @@ class AgentLoop:
     async def _execute_tools(self, calls: list[ToolUseBlock]) -> list[ContentBlock]:
         return await self._executor.execute(calls)
 
-    async def _persist_turn(self, message: Message, usage: Usage) -> None:
-        await self._transcript.append(message, model=self.gateway.primary.name, usage=usage)
+    async def _persist_turn(
+        self, message: Message, usage: Usage, *, source_id: str | None = None
+    ) -> None:
+        await self._transcript.append(
+            message,
+            model=self.gateway.primary.name,
+            usage=usage,
+            source_id=source_id or None,
+            run_id=self.journal.run_id if self.journal else "",
+        )
 
     async def persist_user_message(self, message: Message) -> None:
         await self._transcript.append(message)
@@ -655,4 +800,11 @@ class AgentLoop:
             self._conversation.append(message)
 
     async def _persist_tool_results(self, message: Message) -> None:
-        await self._transcript.append(message)
+        for block in message.content:
+            await self._transcript.append(
+                Message(message.role, [block]),
+                source_id=block.evidence.get("effect_id")
+                if isinstance(block, ToolResultBlock)
+                else None,
+                run_id=self.journal.run_id if self.journal else "",
+            )

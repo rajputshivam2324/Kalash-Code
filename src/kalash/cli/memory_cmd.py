@@ -112,7 +112,7 @@ def forget(
     if not force:
         confirm = typer.confirm(f"Delete memory {memory_id!r}?")
         if not confirm:
-            raise typer.Abort()
+            raise typer.Abort
 
     manager = MemoryManager()
     deleted = manager.delete(memory_id)
@@ -130,7 +130,7 @@ def export(
         str | None,
         typer.Option("--output", "-o", help="Output file path (defaults to stdout)"),
     ] = None,
-    format: Annotated[
+    format: Annotated[  # noqa: A002 - Keep the established public keyword/CLI spelling.
         str,
         typer.Option("--format", "-f", help="Export format: json, jsonl"),
     ] = "json",
@@ -153,7 +153,7 @@ def export(
 @memory_app.command("import")
 def import_(
     input_file: Annotated[str, typer.Argument(help="File to import memories from")],
-    format: Annotated[
+    format: Annotated[  # noqa: A002 - Keep the established public keyword/CLI spelling.
         str,
         typer.Option("--format", "-f", help="Import format: json, jsonl"),
     ] = "json",

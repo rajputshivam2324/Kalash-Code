@@ -3,55 +3,35 @@
 from __future__ import annotations
 
 import json
-import re
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel, ConfigDict, create_model, model_validator
 
-from kalash.mcp.client import MCPToolSchema
-from kalash.mcp.manager import MCPManager
+from kalash.mcp.schema import validate_arguments, validator_for
 from kalash.tools.base import SideEffect, ToolContext, ToolEnvelope
 
-_WRITE_HINTS = re.compile(
-    r"\b(create|delete|update|write|post|put|patch|send|remove|insert|set|save|publish|upload|commit|push|deploy)\b",
-    re.I,
-)
-_READ_HINTS = re.compile(
-    r"\b(read|get|list|search|fetch|query|find|describe|show|lookup|download|pull|inspect)\b",
-    re.I,
-)
+if TYPE_CHECKING:
+    from kalash.mcp.client import MCPToolSchema
+    from kalash.mcp.manager import MCPManager
 
 
 def _params_model(schema: dict[str, Any]) -> type[BaseModel]:
-    """Build a Pydantic params model from an MCP inputSchema."""
-    if not schema or schema.get("type") not in (None, "object"):
-        return create_model("MCPParams", __base__=BaseModel)
+    """Validate complete arguments before Pydantic can discard or coerce fields."""
+    validator = validator_for(schema or {"type": "object"})
 
-    properties = schema.get("properties", {})
-    if not isinstance(properties, dict) or not properties:
-        return create_model("MCPParams", __base__=BaseModel)
+    def validate(value: Any) -> Any:
+        return validate_arguments(validator, value)
 
-    required = set(schema.get("required", []))
-    fields: dict[str, Any] = {}
-    for name, prop in properties.items():
-        default = ... if name in required else None
-        fields[name] = (Any, default)
-    return create_model("MCPParams", **fields)
+    return create_model(
+        "MCPParams",
+        __config__=ConfigDict(extra="allow"),
+        __validators__={"external_schema": cast("Any", model_validator(mode="before")(validate))},
+    )
 
 
-def _infer_side_effect(schema: MCPToolSchema) -> SideEffect:
+def _infer_side_effect(_schema: MCPToolSchema) -> SideEffect:
     """Guess side-effect class from tool name and description."""
-    blob = f"{schema.name} {schema.description}"
-    if _WRITE_HINTS.search(blob):
-        return SideEffect.WRITE
-    if _READ_HINTS.search(blob):
-        return SideEffect.READ
-    annotations = schema.input_schema.get("x-kalash-side-effect")
-    if isinstance(annotations, str):
-        try:
-            return SideEffect(annotations.lower())
-        except ValueError:
-            pass
+    # Names/descriptions are untrusted observations, not authority metadata.
     return SideEffect.EXEC
 
 
@@ -129,7 +109,7 @@ class MCPToolAdapter:
     def cancellable(self) -> bool:
         return True
 
-    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:
+    def dynamic_capabilities(self, _args: BaseModel) -> frozenset[str]:
         return self.capabilities
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:

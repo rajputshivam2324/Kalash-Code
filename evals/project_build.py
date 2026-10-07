@@ -15,8 +15,7 @@ from __future__ import annotations
 
 import difflib
 import textwrap
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from evals.harness import (
     ScriptedTurn,
@@ -25,6 +24,9 @@ from evals.harness import (
     install_provider,
 )
 from kalash.runtime.scratchpad import reset_cache
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Golden reference: the project the agent is supposed to build
@@ -313,7 +315,10 @@ def _build_project_turns() -> list[ScriptedTurn]:
         ScriptedTurn(
             tool="remember",
             args={
-                "content": "TaskFlow project uses hatchling build backend, typer for CLI, rich for output, pytest for tests. Source layout: src/taskflow/",
+                "content": (
+                    "TaskFlow project uses hatchling build backend, typer for CLI, "
+                    "rich for output, pytest for tests. Source layout: src/taskflow/"
+                ),
                 "scope": "project",
             },
             call_id="mem_store_1",
@@ -566,8 +571,11 @@ async def run_project_build_suite(
     skills_dir = workspace / ".kalash" / "skills" / "code-refactoring-ast"
     skills_dir.mkdir(parents=True, exist_ok=True)
     (skills_dir / "SKILL.md").write_text(
-        "---\nname: code-refactoring-ast\ndescription: AST-aware code refactoring\nversion: 1.0.0\n---\n\n"
-        "# Code Refactoring Skill\nUse atomic edits. Prefer `edit` over full-file overwrites.\n",
+        (
+            "---\nname: code-refactoring-ast\ndescription: AST-aware code "
+            "refactoring\nversion: 1.0.0\n---\n\n"
+        )
+        + "# Code Refactoring Skill\nUse atomic edits. Prefer `edit` over full-file overwrites.\n",
         encoding="utf-8",
     )
 
@@ -741,7 +749,9 @@ async def run_project_build_suite(
         TaskResult(
             name=f"harness vs golden coverage ({coverage:.0%})",
             passed=coverage >= 0.80,
-            detail=f"harness produced {len(harness_files)} files, golden has {len(golden_file_set)}",
+            detail=(
+                f"harness produced {len(harness_files)} files, golden has {len(golden_file_set)}"
+            ),
         )
     )
 

@@ -7,15 +7,19 @@ health monitoring, reconnection, and config precedence.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import logging
 from dataclasses import dataclass
 from datetime import UTC
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.core.errors import KalashError
 from kalash.core.events import Event, EventType, get_event_bus
 from kalash.mcp.client import MCPClient, MCPServerConfig, MCPToolSchema
-from kalash.storage.engine import StorageEngine
+
+if TYPE_CHECKING:
+    from kalash.storage.engine import StorageEngine
 
 
 class ServerState(StrEnum):
@@ -128,10 +132,8 @@ class MCPManager:
         """Disconnect all servers and stop health monitoring."""
         if self._health_task:
             self._health_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._health_task
-            except asyncio.CancelledError:
-                pass
 
         for name in list(self._clients.keys()):
             await self.disconnect_server(name)
@@ -219,7 +221,8 @@ class MCPManager:
                 await self._check_health()
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except Exception as error:
+                logging.getLogger(__name__).warning("MCP health failure: %s", type(error).__name__)
                 continue
 
     async def _check_health(self) -> None:
@@ -238,20 +241,19 @@ class MCPManager:
                     status.state = ServerState.FAILED
                     status.error = "Connection lost"
 
-            if status.state == ServerState.FAILED:
-                # Attempt reconnection
-                if status.reconnect_attempts < status.max_reconnect_attempts:
-                    status.reconnect_attempts += 1
-                    await self._connect_server(name)
-
-                    if self._clients[name].is_connected:
-                        bus = get_event_bus()
-                        await bus.emit(
-                            Event(
-                                type=EventType.NOTIFICATION,
-                                data={
-                                    "level": "info",
-                                    "message": f"MCP server '{name}' reconnected",
-                                },
-                            )
+            if status.state == ServerState.FAILED and (
+                status.reconnect_attempts < status.max_reconnect_attempts
+            ):
+                status.reconnect_attempts += 1
+                await self._connect_server(name)
+                if self._clients[name].is_connected:
+                    bus = get_event_bus()
+                    await bus.emit(
+                        Event(
+                            type=EventType.NOTIFICATION,
+                            data={
+                                "level": "info",
+                                "message": f"MCP server '{name}' reconnected",
+                            },
                         )
+                    )

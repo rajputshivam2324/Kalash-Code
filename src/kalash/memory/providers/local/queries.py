@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import re
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from kalash.memory.protocol import RecallQuery, Scope
+if TYPE_CHECKING:
+    from kalash.memory.protocol import RecallQuery, Scope
 
 
 def scope_filter(scope: Scope, prefix: str = "r.", *, exact: bool = False) -> tuple[str, list[Any]]:
@@ -82,10 +83,21 @@ def recall_sql(query: RecallQuery) -> tuple[str | None, tuple[Any, ...]]:
             return None, ()
         match = " OR ".join(f'"{token}"' for token in tokens)
         return (
-            f"SELECT r.*, fts.rank AS fts_rank FROM memory_fts fts JOIN memory_records r ON r.id = fts.id WHERE memory_fts MATCH ? AND {where} ORDER BY fts.rank LIMIT ?",
+            (
+                f"SELECT r.*, fts.rank AS fts_rank FROM "  # noqa: S608 - Fixed SQL grammar; all external values use bound parameters.
+                f"memory_fts fts JOIN memory_records "
+                f"r ON r.id = fts.id WHERE memory_fts "
+                f"MATCH ? AND {where} ORDER BY fts.rank "
+                f"LIMIT ?"
+            ),
             (match, *params, query.limit),
         )
     return (
-        f"SELECT r.*, 0 AS fts_rank FROM memory_records r WHERE {where} ORDER BY CAST(r.salience AS REAL) DESC, r.created_at DESC LIMIT ?",
+        (
+            f"SELECT r.*, 0 AS fts_rank FROM memory_records "  # noqa: S608 - Fixed SQL grammar; all external values use bound parameters.
+            f"r WHERE {where} ORDER BY CAST(r.salience "
+            f"AS REAL) DESC, r.created_at DESC LIMIT "
+            f"?"
+        ),
         (*params, query.limit),
     )

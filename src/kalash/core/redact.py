@@ -37,18 +37,18 @@ class SecretKind(StrEnum):
     """Detected secret type."""
 
     AWS_ACCESS_KEY = "aws_access_key_id"
-    AWS_SECRET_KEY = "aws_secret_access_key"
+    AWS_SECRET_KEY = "aws_secret_access_key"  # noqa: S105 - Protocol label or synthetic fixture, never a credential.
     GITHUB_PAT = "github_pat"
-    GITHUB_TOKEN = "github_token"
+    GITHUB_TOKEN = "github_token"  # noqa: S105 - Protocol label or synthetic fixture, never a credential.
     OPENAI_KEY = "openai_api_key"
     ANTHROPIC_KEY = "anthropic_api_key"
-    SLACK_TOKEN = "slack_token"
+    SLACK_TOKEN = "slack_token"  # noqa: S105 - Protocol label or synthetic fixture, never a credential.
     STRIPE_KEY = "stripe_key"
     JWT = "jwt"
     PEM_PRIVATE_KEY = "private_key"
     DB_CONNECTION_STRING = "db_connection_string"
-    GENERIC_SECRET = "generic_secret"
-    GENERIC_TOKEN = "generic_token"
+    GENERIC_SECRET = "generic_secret"  # noqa: S105 - Protocol label or synthetic fixture, never a credential.
+    GENERIC_TOKEN = "generic_token"  # noqa: S105 - Protocol label or synthetic fixture, never a credential.
 
 
 @dataclass(frozen=True, slots=True)

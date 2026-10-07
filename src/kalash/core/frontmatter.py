@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 MAX_HEADER_CHARS = 16_000
 MAX_BODY_CHARS = 100_000

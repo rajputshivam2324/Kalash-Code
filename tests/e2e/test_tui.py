@@ -8,9 +8,21 @@ keystroke), and the picker only supporting type-to-filter for slash commands.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from textual.widgets import Input
 
+from kalash.models.normalize import (
+    BlockDelta,
+    BlockStart,
+    BlockStop,
+    MessageStart,
+    MessageStop,
+    StopReason,
+    UsageUpdate,
+)
+from kalash.runtime.scratchpad import reset_cache
 from kalash.tui.app import KalashApp
 from kalash.tui.messages import (
     AssistantMessage,
@@ -153,7 +165,7 @@ class TestProviderPicker:
             await submit(pilot, app, "/connect")
             picker = app.query_one(Picker)
             assert picker.mode is PickerMode.PROVIDER
-            assert len(picker._shown) > 5
+            assert len(picker._shown) > 5  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
     async def test_type_to_filter_providers(self):
         """Regression: only slash commands supported type-to-filter."""
@@ -161,13 +173,13 @@ class TestProviderPicker:
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
             await submit(pilot, app, "/connect")
-            before = len(app.query_one(Picker)._shown)
+            before = len(app.query_one(Picker)._shown)  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
             await pilot.press("o", "l", "l")
             await pilot.pause()
 
             picker = app.query_one(Picker)
-            assert len(picker._shown) < before
+            assert len(picker._shown) < before  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
             selected = picker.selected()
             assert selected is not None
             assert selected.value == "ollama"
@@ -191,7 +203,7 @@ class TestSending:
             assert app.is_running
 
     async def test_missing_provider_is_reported(self, monkeypatch):
-        monkeypatch.setattr(KalashApp, "_restore_session", lambda self: None)
+        monkeypatch.setattr(KalashApp, "_restore_session", lambda self: None)  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
         app = KalashApp()
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
@@ -245,7 +257,7 @@ class TestPickerUnit:
             ],
         )
         picker.filter("son")
-        assert [i.value for i in picker._shown] == ["claude-sonnet"]
+        assert [i.value for i in picker._shown] == ["claude-sonnet"]  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
     def test_move_clamps_at_bounds(self):
         from kalash.tui.picker import PickerItem
@@ -281,19 +293,6 @@ class TestPickerUnit:
 # crashed on session resume, because `_current_mode` was shadowed by a Textual
 # instance attribute. These cover both.
 
-import json
-
-from kalash.models.normalize import (
-    BlockDelta,
-    BlockStart,
-    BlockStop,
-    MessageStart,
-    MessageStop,
-    StopReason,
-    UsageUpdate,
-)
-from kalash.runtime.scratchpad import reset_cache
-
 
 class _FakeProvider:
     name = "fake/model-1"
@@ -303,7 +302,7 @@ class _FakeProvider:
         self.turns = list(turns)
         self.requests = []
 
-    async def stream(self, messages, *, system=None, tools=None, **kwargs):
+    async def stream(self, messages, *, system=None, tools=None, **kwargs):  # noqa: ARG002 - Preserve provider/tool callback signature.
         self.requests.append({"system": system, "tools": tools, "messages": messages})
         events = self.turns.pop(0) if self.turns else [MessageStop(StopReason.END_TURN)]
         for event in events:
@@ -355,7 +354,7 @@ def _connect(monkeypatch, app, turns):
     provider = _FakeProvider(turns)
     monkeypatch.setattr(
         "kalash.models.resolve.build_provider",
-        lambda *a, **k: _FakeResolution(provider),
+        lambda *a, **k: _FakeResolution(provider),  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
     )
     app.provider_id = "anthropic"
     app.model_id = "fake/model-1"
@@ -363,6 +362,55 @@ def _connect(monkeypatch, app, turns):
 
 
 class TestAgentIntegration:
+    @pytest.mark.parametrize(("key", "allowed"), [("a", True), ("escape", False)])
+    async def test_real_write_waits_for_modal_and_turn_continues(
+        self, tui_env, monkeypatch, key, allowed
+    ):
+        from kalash.models.normalize import ToolResultBlock
+        from kalash.tui.approval import ApprovalScreen
+
+        app = KalashApp()
+        provider = _connect(
+            monkeypatch,
+            app,
+            [
+                _tool_turn("write", {"path": "approved.txt", "content": "hello\n"}),
+                _text_turn("Tool result received."),
+            ],
+        )
+        async with app.run_test(size=(100, 30)) as pilot:
+            agent = await app._ensure_agent()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+            assert agent is not None
+            agent.host.policy.approval_mode = "untrusted"
+            await submit(pilot, app, "create approved.txt")
+            for _ in range(40):
+                if isinstance(app.screen, ApprovalScreen):
+                    break
+                await pilot.pause(0.02)
+            assert isinstance(app.screen, ApprovalScreen)
+            assert not (tui_env / "approved.txt").exists()
+            # Exercise the callback from the reported traceback while paused.
+            app._queue_follow()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+            await pilot.pause(0.08)
+            assert len(provider.requests) == 1
+            await pilot.press(key)
+            for _ in range(80):
+                if not app.busy:
+                    break
+                await pilot.pause(0.02)
+            assert not app.busy
+            assert (tui_env / "approved.txt").exists() is allowed
+            assert len(provider.requests) == 2
+            results = [
+                block
+                for message in provider.requests[1]["messages"]
+                for block in message.content
+                if isinstance(block, ToolResultBlock)
+            ]
+            assert len(results) == 1
+            assert results[0].is_error is not allowed
+            assert "Tool result received." in app._last_reply_text()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+
     async def test_send_writes_a_real_file(self, tui_env, monkeypatch):
         app = KalashApp()
         provider = _connect(
@@ -383,7 +431,7 @@ class TestAgentIntegration:
         assert (tui_env / "made.txt").exists()
         assert provider.requests[0]["tools"], "the TUI must attach tools"
 
-    async def test_history_persists_between_sends(self, tui_env, monkeypatch):
+    async def test_history_persists_between_sends(self, tui_env, monkeypatch):  # noqa: ARG002 - Preserve provider/tool callback signature.
         app = KalashApp()
         provider = _connect(monkeypatch, app, [_text_turn("first"), _text_turn("second")])
         async with app.run_test(size=(100, 30)) as pilot:
@@ -405,24 +453,24 @@ class TestAgentIntegration:
     async def test_agent_mode_helper_is_callable(self):
         """Regression: shadowed by Textual's App._current_mode instance attr."""
         app = KalashApp()
-        assert callable(app._agent_mode)
-        assert app._agent_mode() == "build"
+        assert callable(app._agent_mode)  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+        assert app._agent_mode() == "build"  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
-    async def test_plan_mode_toggle_reaches_the_agent(self, tui_env, monkeypatch):
+    async def test_plan_mode_toggle_reaches_the_agent(self, tui_env, monkeypatch):  # noqa: ARG002 - Preserve provider/tool callback signature.
         app = KalashApp()
         _connect(monkeypatch, app, [_text_turn("plan only")])
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.press("tab")
             await pilot.pause()
-            assert app._agent_mode() == "plan"
-            agent = await app._ensure_agent()
+            assert app._agent_mode() == "plan"  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+            agent = await app._ensure_agent()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
             assert agent is not None
             names = {s["name"] for s in agent.host.schemas()}
             assert "write" not in names
 
 
 class TestSessionResume:
-    async def test_sessions_command_does_not_crash(self, tui_env, monkeypatch):
+    async def test_sessions_command_does_not_crash(self, tui_env, monkeypatch):  # noqa: ARG002 - Preserve provider/tool callback signature.
         """`/sessions` then picking one raised TypeError before the rename."""
         app = KalashApp()
         _connect(monkeypatch, app, [_text_turn("hi"), _text_turn("resumed")])
@@ -431,26 +479,26 @@ class TestSessionResume:
             await submit(pilot, app, "hello")
             for _ in range(20):
                 await pilot.pause()
-                if app._agent is not None:
+                if app._agent is not None:  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
                     break
-            session_id = app._agent.session_id
+            session_id = app._agent.session_id  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
-            await app._session_chosen(session_id)
+            await app._session_chosen(session_id)  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
             await pilot.pause()
 
-        assert app._agent is not None
-        assert app._agent.session_id == session_id
+        assert app._agent is not None  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+        assert app._agent.session_id == session_id  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
-    async def test_status_reports_agent_state(self, tui_env, monkeypatch):
+    async def test_status_reports_agent_state(self, tui_env, monkeypatch):  # noqa: ARG002 - Preserve provider/tool callback signature.
         app = KalashApp()
         _connect(monkeypatch, app, [_text_turn("hi")])
         async with app.run_test(size=(100, 30)) as pilot:
             await submit(pilot, app, "hello")
             for _ in range(20):
                 await pilot.pause()
-                if app._agent is not None:
+                if app._agent is not None:  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
                     break
-            lines = app._status_lines()
+            lines = app._status_lines()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
         joined = "\n".join(lines)
         assert "session" in joined
@@ -472,7 +520,7 @@ class TestNewSlashCommands:
             "/skills",
         ],
     )
-    async def test_command_runs_without_error(self, tui_env, monkeypatch, command):
+    async def test_command_runs_without_error(self, tui_env, monkeypatch, command):  # noqa: ARG002 - Preserve provider/tool callback signature.
         app = KalashApp()
         _connect(monkeypatch, app, [_text_turn("hi")])
         async with app.run_test(size=(100, 30)) as pilot:
@@ -502,24 +550,24 @@ class TestNewSlashCommands:
 
 
 class TestCopyAndExport:
-    async def test_copy_reports_when_there_is_nothing_yet(self, tui_env, monkeypatch):
+    async def test_copy_reports_when_there_is_nothing_yet(self, tui_env, monkeypatch):  # noqa: ARG002 - Preserve provider/tool callback signature.
         app = KalashApp()
         _connect(monkeypatch, app, [_text_turn("hi")])
         async with app.run_test(size=(100, 30)) as pilot:
             await submit(pilot, app, "/copy")
             await pilot.pause()
-            assert "nothing to copy" in app._copy_last_reply()
+            assert "nothing to copy" in app._copy_last_reply()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
-    async def test_copy_captures_the_last_reply(self, tui_env, monkeypatch):
+    async def test_copy_captures_the_last_reply(self, tui_env, monkeypatch):  # noqa: ARG002 - Preserve provider/tool callback signature.
         app = KalashApp()
         _connect(monkeypatch, app, [_text_turn("the answer is 42")])
         async with app.run_test(size=(100, 30)) as pilot:
             await submit(pilot, app, "question")
             for _ in range(30):
                 await pilot.pause()
-                if app._last_reply_text():
+                if app._last_reply_text():  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
                     break
-            assert "42" in app._last_reply_text()
+            assert "42" in app._last_reply_text()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
     async def test_export_writes_a_readable_file(self, tui_env, monkeypatch):
         app = KalashApp()
@@ -528,9 +576,9 @@ class TestCopyAndExport:
             await submit(pilot, app, "hello")
             for _ in range(30):
                 await pilot.pause()
-                if app._last_reply_text():
+                if app._last_reply_text():  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
                     break
-            message = app._export_transcript()
+            message = app._export_transcript()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
         assert "wrote" in message
         written = list(tui_env.glob("kalash-transcript-*.txt"))
@@ -539,12 +587,12 @@ class TestCopyAndExport:
         assert "hello" in body
         assert "exported content here" in body
 
-    async def test_export_declines_when_empty(self, tui_env, monkeypatch):
+    async def test_export_declines_when_empty(self, tui_env, monkeypatch):  # noqa: ARG002 - Preserve provider/tool callback signature.
         app = KalashApp()
         _connect(monkeypatch, app, [_text_turn("x")])
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            assert "nothing to export" in app._export_transcript()
+            assert "nothing to export" in app._export_transcript()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
     async def test_copy_binding_exists(self):
         app = KalashApp()
@@ -562,7 +610,7 @@ class TestWebSearchIsAvailable:
     throughput-limited model receives.
     """
 
-    async def test_small_model_still_gets_web_search(self, tui_env, monkeypatch):
+    async def test_small_model_still_gets_web_search(self, tui_env, monkeypatch):  # noqa: ARG002 - Preserve provider/tool callback signature.
         from kalash.core.paths import kalash_home
 
         kalash_home().mkdir(parents=True, exist_ok=True)
@@ -573,14 +621,14 @@ class TestWebSearchIsAvailable:
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            agent = await app._ensure_agent()
+            agent = await app._ensure_agent()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
             assert agent is not None
             names = {schema["name"] for schema in agent.host.schemas()}
 
         assert "web_search" in names
         assert "fetch" in names
 
-    async def test_tools_command_lists_web_search(self, tui_env, monkeypatch):
+    async def test_tools_command_lists_web_search(self, tui_env, monkeypatch):  # noqa: ARG002 - Preserve provider/tool callback signature.
         from kalash.core.paths import kalash_home
 
         kalash_home().mkdir(parents=True, exist_ok=True)
@@ -591,8 +639,8 @@ class TestWebSearchIsAvailable:
 
         async with app.run_test(size=(100, 30)) as pilot:
             await pilot.pause()
-            await app._ensure_agent()
-            lines = "\n".join(app._tool_lines())
+            await app._ensure_agent()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+            lines = "\n".join(app._tool_lines())  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
         assert "web_search" in lines
 
@@ -609,7 +657,7 @@ class TestWebSearchIsAvailable:
 
 
 class TestDiffsAppearInTheTranscript:
-    async def test_a_write_renders_a_diff(self, tui_env, monkeypatch):
+    async def test_a_write_renders_a_diff(self, tui_env, monkeypatch):  # noqa: ARG002 - Preserve provider/tool callback signature.
         from kalash.tui.messages import ToolCallLine
 
         app = KalashApp()

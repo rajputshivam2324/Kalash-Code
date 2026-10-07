@@ -66,7 +66,7 @@ async def test_mcp_tool_execute_delegates_to_manager() -> None:
     manager.call_tool.assert_awaited_once_with("mcp__srv__ping", {})
 
 
-def test_mcp_side_effect_inferred_from_name() -> None:
+def test_mcp_names_cannot_declare_safe_side_effects() -> None:
     from kalash.tools.base import SideEffect
 
     read_tool = MCPToolAdapter(
@@ -87,8 +87,8 @@ def test_mcp_side_effect_inferred_from_name() -> None:
         ),
         MagicMock(),
     )
-    assert read_tool.side_effect is SideEffect.READ
-    assert write_tool.side_effect is SideEffect.WRITE
+    assert read_tool.side_effect is SideEffect.EXEC
+    assert write_tool.side_effect is SideEffect.EXEC
 
 
 @pytest.mark.asyncio
@@ -117,11 +117,11 @@ async def test_wire_mcp_tools_registers_connected_tools(monkeypatch) -> None:
     fake_entry = MagicMock()
     monkeypatch.setattr(
         "kalash.mcp.load.MCPRegistry.list_servers",
-        lambda self: [fake_entry],
+        lambda self: [fake_entry],  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
     )
     monkeypatch.setattr(
         "kalash.mcp.load.MCPRegistry._to_config",
-        lambda self, entry: MagicMock(name="cfg"),
+        lambda self, entry: MagicMock(name="cfg"),  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
     )
     monkeypatch.setattr(mcp_load, "MCPManager", FakeManager)
 
@@ -183,7 +183,7 @@ async def test_http_initialization_session_headers_and_sse_result(monkeypatch):
         "tools/list",
     ]
     # Skip the optional DELETE handler, whose request has no JSON body.
-    client._http.session = None
+    client._http.session = None  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     await client.disconnect()
 
 
@@ -204,7 +204,7 @@ def test_mcp_command_args_and_secret_environment_references(tmp_path, monkeypatc
 
     monkeypatch.setenv("TEST_MCP_TOKEN", "test-only-value")
     registry = MCPRegistry(tmp_path)
-    config = registry._to_config(
+    config = registry._to_config(  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         MCPServerEntry(
             name="test",
             transport="stdio",

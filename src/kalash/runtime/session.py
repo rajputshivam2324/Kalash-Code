@@ -158,25 +158,55 @@ class SessionManager:
         if self.get_session(session_id) is None:
             return False
 
-        # Ordered child-first because the schema declares foreign keys and
-        # SQLite enforces them when foreign_keys=ON.  All three DELETEs go
-        # through the engine's serialized write path (A-1).
-        engine.execute_write_sync(
-            """DELETE FROM messages WHERE turn_id IN
-               (SELECT id FROM turns WHERE session_id = ?)""",
-            (session_id,),
-        )
-        engine.execute_write_sync(
-            "DELETE FROM turns WHERE session_id = ?",
-            (session_id,),
-        )
-        engine.execute_write_sync(
-            "DELETE FROM sessions WHERE id = ?",
-            (session_id,),
-        )
+        with engine.write_sync() as conn:
+            turn_ids = "SELECT id FROM turns WHERE session_id = ?"
+            message_ids = f"SELECT id FROM messages WHERE turn_id IN ({turn_ids})"  # noqa: S608 - Only fixed SQL identifiers/predicates; values are bound parameters.
+            for table in ("content_blocks", "tool_calls"):
+                conn.execute(
+                    f"DELETE FROM {table} WHERE message_id IN ({message_ids})",  # noqa: S608 - Fixed SQL grammar; all external values use bound parameters.
+                    (session_id,),
+                )
+            conn.execute(
+                "DELETE FROM usage_events WHERE session_id=? OR turn_id IN (" + turn_ids + ")",  # noqa: S608 - Only fixed SQL identifiers/predicates; values are bound parameters.
+                (session_id, session_id),
+            )
+            conn.execute(
+                (
+                    "DELETE FROM file_snapshots WHERE checkpoint_id IN (SELECT id "
+                    "FROM checkpoints WHERE session_id=?)"
+                ),
+                (session_id,),
+            )
+            for table in ("checkpoints", "runtime_checkpoints", "runtime_journal"):
+                conn.execute(f"DELETE FROM {table} WHERE session_id=?", (session_id,))  # noqa: S608 - Only fixed SQL identifiers/predicates; values are bound parameters.
+            conn.execute(
+                (
+                    "DELETE FROM blackboard WHERE run_id IN (SELECT id FROM "
+                    "agent_runs WHERE session_id=?)"
+                ),
+                (session_id,),
+            )
+            conn.execute(
+                (
+                    "UPDATE schedule_runs SET agent_run_id=NULL WHERE agent_run_id IN "
+                    "(SELECT id FROM agent_runs WHERE session_id=?)"
+                ),
+                (session_id,),
+            )
+            conn.execute(
+                (
+                    "UPDATE agent_runs SET parent_run_id=NULL WHERE parent_run_id IN "
+                    "(SELECT id FROM agent_runs WHERE session_id=?)"
+                ),
+                (session_id,),
+            )
+            conn.execute("DELETE FROM agent_runs WHERE session_id=?", (session_id,))
+            conn.execute(f"DELETE FROM messages WHERE turn_id IN ({turn_ids})", (session_id,))  # noqa: S608 - Only fixed SQL identifiers/predicates; values are bound parameters.
+            conn.execute("DELETE FROM turns WHERE session_id=?", (session_id,))
+            conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
         return True
 
-    def export_session(self, session_id: str, format: str = "json") -> str | None:
+    def export_session(self, session_id: str, format: str = "json") -> str | None:  # noqa: A002 - Keep the established public keyword/CLI spelling.
         """Serialize a session as JSON or Markdown, or None if unknown."""
         session = self.get_session(session_id)
         if session is None:

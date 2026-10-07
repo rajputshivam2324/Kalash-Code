@@ -54,7 +54,43 @@ Configure a provider with `kalash provider add` or through its environment varia
 
 **Run limits**
 
-Ceilings bound tokens, cost (where prices are supplied), model requests, attempted tools and elapsed time. They also cover summary calls and child usage.
+Token and cost ceilings are **opt-in**. Usage is still recorded, including summary
+calls and child agents. Kalash keeps the selected model and output allowance; an
+explicit spending cap that cannot fit the next request produces an actionable
+stop instead of silently shrinking the response. Cost estimates require provider
+prices and are not a billing guarantee.
+
+Set your own session ceilings in user settings (omit these keys or use `null` for
+no spending cap):
+
+```bash
+kalash config set budget.max_tokens 500000 --scope global
+kalash config set budget.max_cost_usd 2.00 --scope global
+# Remove a previously configured ceiling:
+kalash config set budget.max_tokens null --scope global
+kalash config set budget.max_cost_usd null --scope global
+```
+
+Project overrides still take precedence over user defaults; existing configured
+limits are preserved. Restart the session after changing settings. Operational
+limits remain: 50 iterations per send, 100 model requests, 500 attempted tools,
+3600 seconds of session execution, and spawn depth 3. Explicit evaluation budgets
+remain mandatory for the evaluation runners.
+
+Efficiency comes from bounded tool observations, lazy extension schemas, context
+compaction when needed, and a stable prompt prefix. Changing workspace facts now
+follow conversation history so they do not invalidate cached instructions. Savings
+depend on provider caching and task behavior; cheapest successful completion has
+not been established by the current live evaluations.
+
+**Streaming transcript**
+
+Responses appear in order with their tool calls. Incoming text is coalesced into
+50 ms updates, including the last chunk before a pause. Text stays literal while
+arriving and becomes Markdown when the response ends, preventing unfinished
+formatting from repeatedly changing the transcript height. Tool progress keeps its
+output visible, and errors retain partial responses. Scroll up to read history;
+press End to follow live output again. Ctrl+O expands the most recent tool details.
 
 **Safety**
 
@@ -66,6 +102,7 @@ Ceilings bound tokens, cost (where prices are supplied), model requests, attempt
 - Each settled tool result is saved before the next dependent write starts.
 - SQLite operations own their transaction connections.
 - Interrupted tool calls retain their intent and receive an unknown-outcome result on resume. **Inspect the workspace before retrying a mutation.**
+- Journal admission stops at 8 MiB per record, 128 MiB or 100,000 records per session. Existing evidence is preserved; start a new session when a limit is reached.
 
 ## Instructions, Skills and Context
 
@@ -90,11 +127,13 @@ Extension tools are discovered with `tool_search`; only selected MCP/plugin sche
 
 - Identity, catalog and root guidance stay stable.
 - Environment and bounded memory are labeled separately from conversation.
-- Near the actual model window, the runtime summarizes complete older exchanges using a charged model request, with a labeled extractive fallback.
+- Near the actual model window, the runtime first shortens older observations by reference. If necessary, it summarizes complete older exchanges using a charged model request, with a labeled extractive fallback.
 - User instructions remain verbatim; recent tool exchanges stay paired.
 - Oversized observations can be retrieved through `expand`.
 - Runtime command/file receipts survive summaries as bounded structured facts.
 - Ordinary observations are scrubbed before retention and before outgoing requests.
+- Notes and observation indexes have bounded prompt projections; `expand` retrieves omitted originals. Its `grep` parameter now matches literal text, case-insensitively. Use `search` for regular expressions.
+- A request that cannot fit its output allowance after reduction is refused with a context breakdown. It does not silently lower the chosen allowance.
 
 See [the design and acceptance gates](docs/HARNESS_DESIGN.md) for remaining security, context and evaluation work.
 
@@ -105,8 +144,19 @@ The default backend is SQLite with FTS keyword retrieval.
 - Records carry scope, provenance and confidence; scope filtering happens before retrieval limits.
 - Exact deduplication, updates, history and FTS changes are transactional.
 - Turn capture saves bounded explicit preferences.
+- Agent-written memories carry low-trust inferred provenance. Recall includes source, scope and time; saved data cannot grant permissions. Automatic preference extraction excludes common quotation, code-fence and negation cases and is still a heuristic.
 - Recall has a rendered token limit and is labeled as data.
 - Existing database records are kept.
+
+The `task` tool delegates read-only analysis with separate conversation context.
+Children share the workspace and skip hooks and extensions; they cannot apply edits.
+Writing agents need a caller-owned separate workspace and a reviewed integration step.
+Durable parent sessions retain child IDs, partial outcomes and charged usage.
+
+Filesystem reads acquire at most 16 MiB and return at most 1 MiB. Search bounds
+aggregate output and reaps its process group on cancellation. Fetch accepts bounded,
+uncompressed HTTPS text and same-origin redirects; a destination change requires an
+explicit fetch. These limits do not establish DNS/private-address isolation.
 - Custom providers can implement the memory protocol and register an entry point.
 
 > **Not included:** vector search, graph retrieval, a mem0 adapter and a background extraction queue.
@@ -167,6 +217,8 @@ uv build
 
 Regression tests validate runtime contracts. Scripted evaluations validate runner mechanics. **Neither establishes a public coding benchmark score.**
 
+The [fresh compact suite](docs/EVALS.md) uses independent hidden checks and one shared token allowance. The [2026-10-03 live results](docs/COMPACT_EVAL_RESULTS.md) record failed repairs and the fixes they exposed, within 205,069 conservatively charged tokens.
+
 The performance reference is the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness). Public comparison requires matched trials and an independent official grader.
 
 ## Documentation
@@ -177,3 +229,6 @@ The performance reference is the [DeepSeek Harness](https://github.com/deepseek-
 | [Capabilities](docs/CAPABILITIES.md) | Execution paths, installation commands, format limits |
 | [Harness design](docs/HARNESS_DESIGN.md) | Design and acceptance gates |
 | [Harness review](docs/HARNESS_REVIEW.md) | Findings, fixes and remaining gates |
+| [Evaluations](docs/EVALS.md) | Fresh tasks, grading and shared token accounting |
+| [Live results](docs/COMPACT_EVAL_RESULTS.md) | Measured outcomes, costs and failure analysis |
+| [Codex build judge](docs/BUILD_JUDGE.md) | Build task, independent checks and actual Codex scorecards |

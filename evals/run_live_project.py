@@ -29,7 +29,9 @@ class LiveAllowingUI:
 
     async def show_approval_prompt(self, context: PromptContext) -> PromptResult:
         console.print(
-            f"[bold cyan]● [gate][/bold cyan] Approved action: [bold]{context.action}[/bold] ({context.tool_name})"
+            f"[bold cyan]● [gate][/bold cyan] Approved "
+            f"action: [bold]{context.action}[/bold] "
+            f"({context.tool_name})"
         )
         return PromptResult(response=ApprovalResponse.ALLOW_ONCE)
 
@@ -44,8 +46,11 @@ async def main() -> int:
 
     console.print(
         Panel.fit(
-            "[bold cyan]Kalash Code — Live Project Build & Golden Reference Comparison[/bold cyan]\n"
-            "Testing live model agent loop, tool execution, streaming, and output fidelity.",
+            (
+                "[bold cyan]Kalash Code — Live Project Build & Golden Reference "
+                "Comparison[/bold cyan]\n"
+            )
+            + "Testing live model agent loop, tool execution, streaming, and output fidelity.",
             border_style="cyan",
         )
     )
@@ -64,15 +69,24 @@ async def main() -> int:
         agent.host.approval.non_interactive = False
 
     prompt = (
-        "Build a complete Python embedded Key-Value store package named 'kvstore' in this workspace.\n"
-        "Requirements:\n"
+        (
+            "Build a complete Python embedded Key-Value store package named "
+            "'kvstore' in this workspace.\n"
+        )
+        + "Requirements:\n"
         "1. pyproject.toml with hatchling backend, typer, and rich dependencies.\n"
         "2. src/kvstore/__init__.py and src/kvstore/store.py with KVStore class supporting:\n"
-        "   - get(key, default=None), set(key, value, ttl_seconds=None), delete(key), list_keys(), clear(), stats()\n"
-        "   - JSON disk persistence and TTL expiry purging\n"
+        + (
+            "   - get(key, default=None), set(key, value, ttl_seconds=None), "
+            "delete(key), list_keys(), clear(), stats()\n"
+        )
+        + "   - JSON disk persistence and TTL expiry purging\n"
         "3. src/kvstore/cli.py with Typer commands (set, get, delete, ls, stats).\n"
-        "4. tests/test_store.py with comprehensive Pytest tests for get/set, TTL expiry, delete, and persistence.\n"
-        "5. README.md with installation and usage instructions.\n"
+        + (
+            "4. tests/test_store.py with comprehensive Pytest tests for "
+            "get/set, TTL expiry, delete, and persistence.\n"
+        )
+        + "5. README.md with installation and usage instructions.\n"
         "6. Run pytest via shell to verify that your tests pass."
     )
 
@@ -87,7 +101,10 @@ async def main() -> int:
         outcome = await agent.send(prompt, on_text_delta=on_text)
         duration = time.monotonic() - start_time
         console.print(
-            f"\n\n[bold green]✓ Live Agent Run Complete[/bold green] in {duration:.1f}s ({outcome.iterations} iterations, {agent.budget.tool_calls_used} tool calls)"
+            f"\n\n[bold green]✓ Live Agent Run Complete[/bold "
+            f"green] in {duration:.1f}s ({outcome.iterations} "
+            f"iterations, {agent.budget.tool_calls_used} "
+            f"tool calls)"
         )
     except Exception as exc:
         console.print(f"\n[bold red]Agent run encountered exception:[/bold red] {exc}")

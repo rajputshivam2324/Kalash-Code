@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
+import contextlib
 import json
 import logging
 import re
-import shlex
 import time
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
-from kalash.core.config import KalashConfig
 from kalash.core.events import Event, EventBus, EventType
 from kalash.core.privacy import scrub_metadata, scrub_text
 from kalash.models.limits import supports_tools
@@ -27,11 +24,17 @@ from kalash.permissions.policy import (
     RiskClass,
 )
 from kalash.permissions.prompt import ApprovalPrompt, ApprovalResponse, PromptContext
-from kalash.runtime.instructions import InstructionLoader
 from kalash.runtime.scratchpad import get_scratchpad
 from kalash.tools.base import SideEffect, Tool, ToolContext, ToolEnvelope
-from kalash.tools.registry import ToolRegistry
 from kalash.tools.schema import tool_schema
+
+if TYPE_CHECKING:
+    import asyncio
+    from collections.abc import Awaitable, Callable
+
+    from kalash.core.config import KalashConfig
+    from kalash.runtime.instructions import InstructionLoader
+    from kalash.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -196,10 +199,8 @@ def resolve_writable_roots(cwd: Path, mode: str, session_id: str) -> tuple[Path,
     from kalash.core.paths import temp_dir_for_session
 
     roots = [cwd.resolve()]
-    try:
+    with contextlib.suppress(OSError):
         roots.append(temp_dir_for_session(session_id).resolve())
-    except OSError:
-        pass
     return tuple(roots)
 
 
@@ -242,6 +243,7 @@ class ToolHost:
     loaded_skills: dict[str, str] = field(default_factory=dict, init=False)
     loaded_tools: list[str] = field(default_factory=list, init=False)
     config: KalashConfig | None = None
+    journal: Any = None
 
     # Session grants earned from "allow session"/"allow always" answers. Also
     # persisted in kalash_grants when storage is available.
@@ -516,6 +518,20 @@ class ToolHost:
         )
 
         start_time = time.monotonic()
+        from kalash.core.ids import generate_id
+
+        effect_id = generate_id("eff_")
+        if self.journal is not None:
+            await self.journal.append(
+                "effect_started",
+                {
+                    "effect_id": effect_id,
+                    "call_id": tool_use_id,
+                    "tool": name,
+                    "arguments": scrub_metadata(arguments),
+                    "risk": risk.risk_class.value,
+                },
+            )
         envelope = await self.registry.dispatch(name, arguments, context)
         envelope = replace(
             envelope,
@@ -534,6 +550,18 @@ class ToolHost:
         # Apply the tool contract even to third-party tools and error bodies.
         limit = min(max(tool.max_output_bytes, 1024), 65536) if tool else 65536
         rendered = self._bound_observation(name, rendered, limit)
+        if self.journal is not None:
+            await self.journal.append(
+                "effect_settled",
+                {
+                    "effect_id": effect_id,
+                    "call_id": tool_use_id,
+                    "tool": name,
+                    "ok": envelope.ok,
+                    "content": rendered,
+                    "metadata": envelope.metadata,
+                },
+            )
         if (
             name == "skill"
             and envelope.ok
@@ -544,6 +572,8 @@ class ToolHost:
         await self._publish_result(name, tool_use_id, envelope, duration_ms=duration_ms)
         await self._run_post_hooks(name, arguments, envelope)
         evidence: dict[str, Any] = {}
+        if self.journal is not None:
+            evidence["effect_id"] = effect_id
         if (
             tool is not None
             and self.registry.source(name) == "builtin"
@@ -555,7 +585,7 @@ class ToolHost:
                 "multi_edit",
             }
         ):
-            evidence = {"tool": name, "ok": envelope.ok}
+            evidence.update({"tool": name, "ok": envelope.ok})
             for key in ("command", "cwd", "exit_code", "path", "content_digest", "operation"):
                 if key in envelope.metadata:
                     value = envelope.metadata[key]
@@ -591,8 +621,13 @@ class ToolHost:
             "sandbox_warning",
         ):
             value = envelope.metadata.get(key)
-            if value not in (None, "", 0):
+            if value not in (None, ""):
                 payload[key] = value
+
+        if envelope.error is not None:
+            payload["error_code"] = envelope.error.code
+            payload["error"] = envelope.error.message
+            payload["remediation"] = envelope.error.remediation
 
         if name == "task":
             await self.event_bus.emit(
@@ -664,7 +699,7 @@ class ToolHost:
         from kalash.hooks.events import HookEvent, ToolUsePayload
 
         try:
-            await self.hooks.dispatch(
+            results = await self.hooks.dispatch(
                 ToolUsePayload(
                     event=HookEvent.POST_TOOL_USE,
                     session_id=self.session_id,
@@ -673,8 +708,28 @@ class ToolHost:
                     result=envelope.ok,
                 )
             )
+            warnings = [
+                f"PostToolUse hook {result.hook_id} failed ({result.exit_code})"
+                for result in results
+                if result.exit_code != 0 or result.error
+            ]
         except Exception as e:
-            logger.error("PostToolUse hook failed for %s", name, exc_info=e)
+            warnings = [f"PostToolUse hook failed: {type(e).__name__}"]
+        if warnings:
+            logger.warning("%s: %s", name, "; ".join(warnings))
+            await self.event_bus.emit(
+                Event(
+                    EventType.HOOK_RUN,
+                    {
+                        "phase": "PostToolUse",
+                        "tool_name": name,
+                        "status": "failed",
+                        "tool_ok": envelope.ok,
+                        "warnings": warnings,
+                    },
+                    session_id=self.session_id,
+                )
+            )
 
     # -- the gate ------------------------------------------------------------
 
@@ -700,9 +755,6 @@ class ToolHost:
             return None
 
         signature = self._signature(risk, arguments)
-        if signature in self._grants:
-            return None
-
         request = PolicyRequest(
             tool_name=risk.tool_name,
             risk_class=risk.risk_class,
@@ -712,6 +764,7 @@ class ToolHost:
             arguments=arguments,
             confirmation_classes=risk.confirmation_classes,
             grant_signature=signature,
+            remembered_grant=signature in self._grants and self.policy._grant_store is None,  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         )
         result = await self.policy.evaluate(request)
 
@@ -764,22 +817,20 @@ class ToolHost:
                 detail = f": {outcome.reason}" if outcome.reason else ""
                 return f"REFUSED by the user{detail}. Do not retry; choose another approach."
 
-    @staticmethod
-    def _signature(risk: ToolRisk, arguments: dict[str, Any]) -> str:
-        """Grant key.
+    def _signature(self, risk: ToolRisk, arguments: dict[str, Any]) -> str:
+        """Exact approval scope. Persist only a digest, never sensitive arguments."""
+        import hashlib
 
-        Shell grants are scoped to the program being run, so approving
-        ``npm install`` once does not also approve ``rm -rf`` for the session.
-        """
-        if risk.tool_name == "shell":
-            command = str(arguments.get("command", ""))
-            try:
-                tokens = shlex.split(command)
-            except ValueError:
-                tokens = command.split()
-            program = Path(tokens[0]).name if tokens else ""
-            return f"shell:{program}:{risk.risk_class.value}"
-        return f"{risk.tool_name}:{risk.risk_class.value}"
+        scope = {
+            "workspace": str(self.cwd.resolve()),
+            "tool": risk.tool_name,
+            "risk": risk.risk_class.value,
+            "paths": sorted(str((self.cwd / p).resolve()) for p in risk.paths),
+            "hosts": sorted(risk.hosts),
+            "confirmations": sorted(c.value for c in risk.confirmation_classes),
+            "arguments": arguments,
+        }
+        return "v2:" + hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()
 
     async def _persist_grant(self, risk: ToolRisk, signature: str, *, lifetime: str) -> None:
         """Record a session or always grant in durable storage."""
@@ -833,6 +884,11 @@ class ToolHost:
             return "\n".join(parts)
 
         content = envelope.content or "(no output)"
+        if name == "read" and envelope.metadata.get("content_digest"):
+            content = (
+                f"[Source: {envelope.metadata.get('path', '')}; "
+                f"SHA-256: {envelope.metadata['content_digest']}]\n" + content
+            )
 
         if envelope.truncated and envelope.truncation is not None:
             hint = envelope.truncation.retrieval_hint

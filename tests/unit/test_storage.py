@@ -78,10 +78,13 @@ class TestStorageEngine:
 
         # Write should work
         await engine.execute_write(
-            "INSERT INTO sessions (id, project_dir, agent, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "INSERT INTO sessions (id, project_dir, agent, state, created_at, "
+                "updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+            ),
             (
                 "ses_test",
-                "/tmp",
+                "/tmp",  # noqa: S108 - Virtual sandbox path or synthetic path; no host temporary file creation.
                 "default",
                 "CREATED",
                 "2024-01-01T00:00:00Z",
@@ -92,7 +95,7 @@ class TestStorageEngine:
         # Read it back
         rows = engine.execute_read("SELECT * FROM sessions WHERE id = ?", ("ses_test",))
         assert len(rows) == 1
-        assert rows[0]["project_dir"] == "/tmp"
+        assert rows[0]["project_dir"] == "/tmp"  # noqa: S108 - Virtual sandbox path or synthetic path; no host temporary file creation.
 
         engine.close()
 
@@ -125,7 +128,7 @@ class TestSessionRepository:
         await engine.initialize()
         repo = SessionRepository(engine)
 
-        session_id = await repo.create_session(project_dir="/tmp")
+        session_id = await repo.create_session(project_dir="/tmp")  # noqa: S108 - Virtual sandbox path or synthetic path; no host temporary file creation.
         turn_id = await repo.create_turn(session_id, seq=1, role="user")
         await repo.add_message(turn_id, seq=1, role="user", content="Hello")
 

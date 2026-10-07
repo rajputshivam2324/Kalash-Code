@@ -12,14 +12,14 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.core.ids import generate_id
-from kalash.storage.engine import StorageEngine
+
+if TYPE_CHECKING:
+    from kalash.storage.engine import StorageEngine
 
 logger = logging.getLogger(__name__)
-
-_GRANTS_TABLE = "kalash_grants"
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +111,7 @@ class GrantStore:
             path_pattern=path_pattern,
             host_pattern=host_pattern,
             lifetime=lifetime,
-            session_id=self.session_id if lifetime == GrantLifetime.SESSION else None,
+            session_id=self.session_id if lifetime != GrantLifetime.ALWAYS else None,
             decision=decision,
             reason=reason,
             created_at=now,
@@ -119,7 +119,7 @@ class GrantStore:
         )
 
         await self.engine.execute_write(
-            f"""INSERT INTO {_GRANTS_TABLE}
+            """INSERT INTO kalash_grants
                (id, tool_pattern, path_pattern, host_pattern, lifetime,
                 session_id, decision, reason, created_at, consumed, metadata)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
@@ -167,21 +167,24 @@ class GrantStore:
 
             # Match path pattern if specified
             if grant["path_pattern"] and paths:
-                if not any(fnmatch.fnmatch(p, grant["path_pattern"]) for p in paths):
+                if not all(fnmatch.fnmatch(p, grant["path_pattern"]) for p in paths):
                     continue
             elif grant["path_pattern"] and not paths:
                 continue
 
             # Match host pattern if specified
             if grant["host_pattern"] and hosts:
-                if not any(fnmatch.fnmatch(h, grant["host_pattern"]) for h in hosts):
+                if not all(fnmatch.fnmatch(h, grant["host_pattern"]) for h in hosts):
                     continue
             elif grant["host_pattern"] and not hosts:
                 continue
 
             meta = _json_loads(grant.get("metadata"))
             stored_sig = meta.get("signature")
-            if stored_sig and grant_signature and stored_sig != grant_signature:
+            if stored_sig and stored_sig != grant_signature:
+                continue
+            # Legacy program/risk approvals cannot authorize a new exact effect.
+            if grant_signature and grant["decision"] == "allow" and not stored_sig:
                 continue
 
             return grant
@@ -191,7 +194,7 @@ class GrantStore:
     async def get(self, grant_id: str) -> dict[str, Any] | None:
         """Get a grant by ID."""
         rows = await self.engine.execute_read_async(
-            f"SELECT * FROM {_GRANTS_TABLE} WHERE id = ?", (grant_id,)
+            "SELECT * FROM kalash_grants WHERE id = ?", (grant_id,)
         )
         return dict(rows[0]) if rows else None
 
@@ -217,7 +220,7 @@ class GrantStore:
         if not include_consumed:
             conditions.append("consumed = 0")
 
-        sql = f"SELECT * FROM {_GRANTS_TABLE}"
+        sql = "SELECT * FROM kalash_grants"
         if conditions:
             sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY created_at DESC"
@@ -229,13 +232,16 @@ class GrantStore:
     # Consume (for 'once' grants)
     # ------------------------------------------------------------------
 
-    async def consume(self, grant_id: str) -> None:
+    async def consume(self, grant_id: str) -> bool:
         """Mark a 'once' grant as consumed (used up)."""
-        await self.engine.execute_write(
-            f"UPDATE {_GRANTS_TABLE} SET consumed = 1 WHERE id = ? AND lifetime = 'once'",
-            (grant_id,),
-        )
+        async with self.engine.write() as connection:
+            claimed = connection.execute(
+                "UPDATE kalash_grants SET consumed = 1 "
+                "WHERE id = ? AND lifetime = 'once' AND consumed=0",
+                (grant_id,),
+            ).rowcount
         logger.debug("Grant consumed: %s", grant_id)
+        return bool(claimed)
 
     # ------------------------------------------------------------------
     # Revoke
@@ -244,12 +250,12 @@ class GrantStore:
     async def revoke(self, grant_id: str) -> bool:
         """Revoke (delete) a grant. Returns True if it existed."""
         rows = await self.engine.execute_read_async(
-            f"SELECT id FROM {_GRANTS_TABLE} WHERE id = ?", (grant_id,)
+            "SELECT id FROM kalash_grants WHERE id = ?", (grant_id,)
         )
         if not rows:
             return False
 
-        await self.engine.execute_write(f"DELETE FROM {_GRANTS_TABLE} WHERE id = ?", (grant_id,))
+        await self.engine.execute_write("DELETE FROM kalash_grants WHERE id = ?", (grant_id,))
         logger.info("Grant revoked: %s", grant_id)
         return True
 
@@ -260,12 +266,12 @@ class GrantStore:
         """
         sid = session_id or self.session_id
         rows = await self.engine.execute_read_async(
-            f"SELECT COUNT(*) as cnt FROM {_GRANTS_TABLE} WHERE session_id = ?",
+            "SELECT COUNT(*) as cnt FROM kalash_grants WHERE session_id = ?",
             (sid,),
         )
         count = rows[0]["cnt"] if rows else 0
 
-        await self.engine.execute_write(f"DELETE FROM {_GRANTS_TABLE} WHERE session_id = ?", (sid,))
+        await self.engine.execute_write("DELETE FROM kalash_grants WHERE session_id = ?", (sid,))
         logger.info("Revoked %d session grants for %s", count, sid)
         return count
 
@@ -275,12 +281,12 @@ class GrantStore:
         Returns number of grants removed.
         """
         rows = await self.engine.execute_read_async(
-            f"SELECT COUNT(*) as cnt FROM {_GRANTS_TABLE} WHERE consumed = 1",
+            "SELECT COUNT(*) as cnt FROM kalash_grants WHERE consumed = 1",
             (),
         )
         count = rows[0]["cnt"] if rows else 0
 
-        await self.engine.execute_write(f"DELETE FROM {_GRANTS_TABLE} WHERE consumed = 1", ())
+        await self.engine.execute_write("DELETE FROM kalash_grants WHERE consumed = 1", ())
         return count
 
     # ------------------------------------------------------------------
@@ -290,13 +296,13 @@ class GrantStore:
     async def _get_active_grants(self) -> list[dict[str, Any]]:
         """Get all active (non-consumed) grants for the current context."""
         rows = await self.engine.execute_read_async(
-            f"""SELECT * FROM {_GRANTS_TABLE}
+            """SELECT * FROM kalash_grants
                WHERE consumed = 0
                AND (lifetime = 'always'
                     OR (lifetime = 'session' AND session_id = ?)
-                    OR (lifetime = 'once'))
-               ORDER BY created_at DESC""",
-            (self.session_id,),
+                    OR (lifetime = 'once' AND session_id = ?))
+               ORDER BY CASE WHEN decision = 'deny' THEN 0 ELSE 1 END, created_at DESC""",
+            (self.session_id, self.session_id),
         )
         return [dict(r) for r in rows]
 

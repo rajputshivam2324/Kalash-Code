@@ -7,14 +7,16 @@ Side effects are declared statically and recorded at runtime.
 from __future__ import annotations
 
 import enum
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
-from pydantic import BaseModel
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+    from pathlib import Path
 
-from kalash.core.config import KalashConfig
+    from pydantic import BaseModel
+
+    from kalash.core.config import KalashConfig
 
 # ---------------------------------------------------------------------------
 # Enums

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from typing import TYPE_CHECKING
 
 from kalash.cli.output import (
     EXIT_APPROVAL_REQUIRED,
@@ -15,8 +16,10 @@ from kalash.cli.output import (
     OutputSink,
     RunMetrics,
 )
-from kalash.runtime.agent import Agent
 from kalash.runtime.loop import TerminationReason
+
+if TYPE_CHECKING:
+    from kalash.runtime.agent import Agent
 
 # Legacy aliases for tests and scripts
 EXIT_ERROR = EXIT_FAILURE
@@ -38,7 +41,7 @@ def run_pipe_mode(
     """Entry point for headless mode. Raises SystemExit with the status code."""
     text = prompt or _read_prompt()
     if not text:
-        print("kalash: no prompt supplied", file=sys.stderr)
+        sys.stderr.write("kalash: no prompt supplied\n")
         raise SystemExit(EXIT_NO_PROMPT)
 
     fmt = OutputFormat(output_format.replace("_", "-"))
@@ -109,7 +112,7 @@ async def _run(
         config=config,
     )
     if agent is None:
-        print(f"kalash: {reason}", file=sys.stderr)
+        sys.stderr.write(f"kalash: {reason}\n")
         if output_format is not OutputFormat.TEXT:
             sink = OutputSink(output_format)
             return sink.finish_error(
@@ -132,41 +135,72 @@ async def _execute(agent: Agent, prompt: str, output_format: OutputFormat, sandb
         session_id=agent.session_id,
         model_id=agent.loop.model_id,
         sandbox=sandbox,
+        max_tokens=agent.budget.max_tokens,
+        max_turns=agent.budget.max_turns,
     )
+    initial_usage = agent.loop.gateway.total_usage
+    initial_cost = agent.budget.cost_used
     sink = OutputSink(output_format, metrics=metrics)
     sink.emit_session_started()
 
     from kalash.core.events import Event, EventType
 
-    async def on_tool_complete(event: Event) -> None:
-        ok = event.data.get("ok")
-        if ok is None:
-            ok = not event.data.get("error")
-        sink.emit_tool_event(
-            str(event.data.get("tool_name", "?")),
-            ok=bool(ok),
-            detail="",
-        )
+    async def on_runtime(event: Event) -> None:
+        if event.session_id not in (None, agent.session_id):
+            return
+        metrics.run_id = event.run_id or metrics.run_id
+        if event.type == EventType.MODEL_REQUEST:
+            used = str(event.data.get("model", ""))
+            if used and used != metrics.model_id and used not in metrics.fallback_chain:
+                metrics.fallback_chain.append(used)
+        if (
+            event.type == EventType.TOOL_COMPLETE
+            and event.data.get("ok") is True
+            and event.data.get("operation") in ("created", "modified")
+            and event.data.get("path")
+        ):
+            change = {
+                key: event.data[key]
+                for key in ("path", "operation", "content_digest")
+                if key in event.data
+            }
+            metrics.files_changed = [
+                row for row in metrics.files_changed if row["path"] != change["path"]
+            ]
+            metrics.files_changed.append(change)
+        sink.emit_runtime_event(event)
 
-    async def on_tool_output(event: Event) -> None:
-        if output_format is OutputFormat.STREAM_JSON:
-            sink._emit(
-                "tool.output",
-                {
-                    "tool_use_id": event.data.get("tool_use_id"),
-                    "stream": event.data.get("stream"),
-                    "chunk": str(event.data.get("chunk", ""))[:500],
-                },
-            )
+    def collect_metrics() -> None:
+        usage = agent.loop.gateway.total_usage
+        for counter in (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "reasoning_tokens",
+        ):
+            setattr(metrics, counter, getattr(usage, counter) - getattr(initial_usage, counter))
+        metrics.usage_unknown = bool(agent.budget.unknown_usage_attempts)
+        metrics.usage_source = "observed_partial" if metrics.usage_unknown else "provider_reported"
+        metrics.budget_tokens_used = agent.budget.tokens_used
+        metrics.turns_used = agent.budget.turns_used
+        pricing = getattr(agent.loop.gateway.primary, "pricing", None)
+        if (
+            pricing is not None
+            and pricing.currency == "USD"
+            and (pricing.input_per_mtok or pricing.output_per_mtok)
+            and not metrics.usage_unknown
+        ):
+            metrics.cost_usd = str(agent.budget.cost_used - initial_cost)
 
     bus = agent.loop.event_bus
-    bus.on(EventType.TOOL_COMPLETE, on_tool_complete)
-    bus.on(EventType.TOOL_OUTPUT, on_tool_output)
+    bus.on_all(on_runtime)
 
     try:
         result = await agent.send(prompt, on_text_delta=sink.on_text_delta)
     except KeyboardInterrupt:
-        print("kalash: interrupted", file=sys.stderr)
+        collect_metrics()
+        sys.stderr.write("kalash: interrupted\n")
         return sink.finish_error(
             code="KALASH_CANCELLED",
             message="interrupted",
@@ -174,10 +208,11 @@ async def _execute(agent: Agent, prompt: str, output_format: OutputFormat, sandb
             exit_code=EXIT_CANCELLED,
         )
     except Exception as exc:
+        collect_metrics()
         from kalash.models.diagnose import explain
 
         msg = explain(str(exc))
-        print(f"kalash: {msg}", file=sys.stderr)
+        sys.stderr.write(f"kalash: {msg}\n")
         return sink.finish_error(
             code="KALASH_INTERNAL",
             message=msg,
@@ -185,15 +220,24 @@ async def _execute(agent: Agent, prompt: str, output_format: OutputFormat, sandb
         )
 
     finally:
-        bus.off(EventType.TOOL_COMPLETE, on_tool_complete)
-        bus.off(EventType.TOOL_OUTPUT, on_tool_output)
+        bus.off_all(on_runtime)
 
-    metrics.input_tokens = agent.budget.tokens_used
+    collect_metrics()
+    metrics.run_id = result.run_id
+    metrics.verification = result.verification
+    metrics.used_model = result.model
+    metrics.completion_status = result.completion_status.value
     stop = result.termination_reason.value
 
-    if result.termination_reason is TerminationReason.ERROR:
+    if (
+        result.termination_reason is TerminationReason.ERROR or result.error
+    ) and result.termination_reason not in (
+        TerminationReason.BUDGET_EXHAUSTED,
+        TerminationReason.MAX_ITERATIONS,
+        TerminationReason.USER_INTERRUPT,
+    ):
         err = result.error or "run failed"
-        print(f"kalash: {err}", file=sys.stderr)
+        sys.stderr.write(f"kalash: {err}\n")
         if "REFUSED" in (err or "") or "approval" in (err or "").lower():
             return sink.finish_error(
                 code="KALASH_APPROVAL_REQUIRED",
@@ -213,20 +257,17 @@ async def _execute(agent: Agent, prompt: str, output_format: OutputFormat, sandb
         TerminationReason.BUDGET_EXHAUSTED,
         TerminationReason.MAX_ITERATIONS,
     ):
-        print(
-            f"kalash: stopped ({stop}) after {result.iterations} turns",
-            file=sys.stderr,
-        )
+        sys.stderr.write(f"kalash: stopped ({stop}) after {result.iterations} turns\n")
         return sink.finish_error(
             code="KALASH_BUDGET_EXCEEDED",
-            message=f"stopped: {stop}",
+            message=result.error or f"stopped: {stop}",
             error_class="budget",
             exit_code=EXIT_BUDGET_EXCEEDED,
             partial=result.final_response,
         )
 
     if result.termination_reason is TerminationReason.USER_INTERRUPT:
-        print("kalash: interrupted", file=sys.stderr)
+        sys.stderr.write("kalash: interrupted\n")
         return sink.finish_error(
             code="KALASH_CANCELLED",
             message="interrupted",
@@ -241,8 +282,10 @@ async def _execute(agent: Agent, prompt: str, output_format: OutputFormat, sandb
                 stop_reason=stop,
                 iterations=result.iterations,
                 total_tokens=result.total_tokens,
+                completion_status=result.completion_status.value,
+                usage_unknown=result.usage_unknown,
             )
-        print("kalash: model returned no output", file=sys.stderr)
+        sys.stderr.write("kalash: model returned no output\n")
         return EXIT_FAILURE
 
     return sink.finish_success(
@@ -250,4 +293,6 @@ async def _execute(agent: Agent, prompt: str, output_format: OutputFormat, sandb
         stop_reason=stop,
         iterations=result.iterations,
         total_tokens=result.total_tokens,
+        completion_status=result.completion_status.value,
+        usage_unknown=result.usage_unknown,
     )

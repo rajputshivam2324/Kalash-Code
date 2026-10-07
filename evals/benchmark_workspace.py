@@ -4,11 +4,15 @@ from __future__ import annotations
 
 import secrets
 import shlex
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from evals.benchmark_tasks import CodingTask
 from kalash.tools.base import ToolContext
 from kalash.tools.shell import ShellParams, ShellTool
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from evals.benchmark_tasks import CodingTask
 
 
 def materialize(task: CodingTask, root: Path) -> None:

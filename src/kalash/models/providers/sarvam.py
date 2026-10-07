@@ -7,11 +7,13 @@ V2 access is granted per API key; selecting a model does not grant beta access.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from kalash.core.budget import Pricing
 from kalash.models.normalize import Message, ModelCapabilities, Role, TextBlock, ThinkingBlock
 from kalash.models.providers.openai_compatible import OpenAICompatibleProvider
+
+if TYPE_CHECKING:
+    from kalash.core.budget import Pricing
 
 
 @dataclass(frozen=True)
@@ -56,7 +58,8 @@ class SarvamProvider(OpenAICompatibleProvider):
         )
         if reasoning_effort not in allowed_efforts:
             raise ValueError(
-                f"Sarvam {profile.version.upper()} does not support reasoning_effort={reasoning_effort!r}; "
+                f"Sarvam {profile.version.upper()} does not support "
+                f"reasoning_effort={reasoning_effort!r}; "
                 + (
                     "use low, medium, high or None"
                     if profile.version == "v1"

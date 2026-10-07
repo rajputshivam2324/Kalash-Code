@@ -1,0 +1,11 @@
+{
+  "kind": "offline scripted context diagnostic",
+  "fixture": "test_context_pressure_uses_free_observation_reduction_first",
+  "live_model_calls": 0,
+  "input_tokens_estimated_before_reduction": 62500,
+  "input_tokens_estimated_after_reduction": 11661,
+  "scripted_dispatches": 1,
+  "semantic_summary_dispatches": 0,
+  "completion_status": "stopped_unverified",
+  "limits": "Estimates and scripted dispatches do not measure real-model quality, billing or cost per verified result."
+}

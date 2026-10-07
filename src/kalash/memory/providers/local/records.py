@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import datetime
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from kalash.memory.protocol import (
     MemoryHit,
@@ -17,6 +17,9 @@ from kalash.memory.protocol import (
     Trust,
     Visibility,
 )
+
+if TYPE_CHECKING:
+    import sqlite3
 
 
 def row_to_record(row: sqlite3.Row) -> MemoryRecord:
@@ -68,13 +71,10 @@ def row_to_hit(row: sqlite3.Row) -> MemoryHit:
     record = row_to_record(row)
 
     # Compute score from FTS rank (negative; more negative is more relevant)
-    fts_rank = row["fts_rank"] if "fts_rank" in row.keys() else 0
-    if fts_rank < 0:
-        # FTS5 rank is negative; normalize to [0, 1]
-        score = Decimal(str(abs(fts_rank) / (1.0 + abs(fts_rank))))
-    else:
-        # No FTS rank — use salience as score
-        score = record.salience
+    # sqlite3.Row exposes keys/indexing, but no dict.get or mapping containment.
+    fts_rank = row["fts_rank"] if "fts_rank" in row.keys() else 0  # noqa: SIM118
+    # FTS5 rank is negative; absent rank uses salience.
+    score = Decimal(str(abs(fts_rank) / (1.0 + abs(fts_rank)))) if fts_rank < 0 else record.salience
 
     return MemoryHit(
         record=record,

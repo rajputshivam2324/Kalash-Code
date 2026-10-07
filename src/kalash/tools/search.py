@@ -10,17 +10,21 @@ Uses subprocess to run `rg` (ripgrep) with:
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
+import signal
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from kalash.sandbox.policy import DEFAULT_PROTECTED_PATHS
 from kalash.tools.base import (
     SideEffect,
     ToolContext,
     ToolEnvelope,
     TruncationInfo,
 )
+from kalash.tools.fs.common import _is_protected
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -30,6 +34,41 @@ _MAX_MATCHES = 100
 _MAX_LINE_LENGTH = 4000
 _DEFAULT_CONTEXT_LINES = 2
 _SEARCH_TIMEOUT_S = 30.0
+
+
+async def _bounded_output(stream: asyncio.StreamReader, limit: int) -> tuple[bytes, bool]:
+    chunks = bytearray()
+    while True:
+        chunk = await stream.read(min(8192, limit + 1 - len(chunks)))
+        if not chunk:
+            return bytes(chunks), False
+        chunks.extend(chunk)
+        if len(chunks) > limit:
+            return bytes(chunks[:limit]), True
+
+
+def _kill(process: asyncio.subprocess.Process) -> None:
+    try:
+        if os.name == "posix":
+            os.killpg(process.pid, signal.SIGKILL)
+        elif process.returncode is None:
+            process.kill()
+    except ProcessLookupError:
+        pass
+
+
+async def _discard(stream: asyncio.StreamReader | None) -> None:
+    if stream is not None:
+        while await stream.read(8192):
+            pass
+
+
+async def _reap(process: asyncio.subprocess.Process) -> None:
+    _kill(process)
+    # asyncio's process.wait can wait on paused full pipes even after SIGKILL.
+    # Drain without retaining data once the collectors have joined/cancelled.
+    await asyncio.gather(_discard(process.stdout), _discard(process.stderr))
+    await process.wait()
 
 
 # ---------------------------------------------------------------------------
@@ -97,7 +136,7 @@ class SearchTool:
     def cancellable(self) -> bool:
         return True
 
-    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:
+    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:  # noqa: ARG002 - Preserve provider/tool callback signature.
         return frozenset()
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:
@@ -118,6 +157,16 @@ class SearchTool:
         if not search_path.is_absolute():
             search_path = ctx.cwd / search_path
         search_path = search_path.resolve()
+
+        protected = _is_protected(search_path)
+        if search_path.is_dir():
+            protected = protected or _is_protected(search_path / "__kalash_probe__")
+        if protected:
+            return ToolEnvelope.fail(
+                "KALASH_SANDBOX_PATH_PROTECTED",
+                "Refusing to search protected content",
+                recoverable=False,
+            )
 
         if not search_path.exists():
             return ToolEnvelope.fail(
@@ -149,25 +198,53 @@ class SearchTool:
 
         if args.exclude:
             cmd.extend(["--glob", f"!{args.exclude}"])
+        for pattern in DEFAULT_PROTECTED_PATHS:
+            if not pattern.startswith("~/"):
+                cmd.extend(["--glob", f"!{pattern}"])
+        from kalash.core.paths import kalash_home
+
+        for secret_path in (kalash_home() / "auth.json", kalash_home() / "auth.key"):
+            if secret_path.is_relative_to(search_path):
+                cmd.extend(["--glob", "!" + str(secret_path.relative_to(search_path))])
 
         cmd.append("--")
         cmd.append(args.query)
         cmd.append(str(search_path))
 
+        process = None
         try:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(ctx.cwd),
+                start_new_session=os.name == "posix",
             )
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=_SEARCH_TIMEOUT_S,
-            )
+            assert process.stdout is not None
+            assert process.stderr is not None
+            async with asyncio.timeout(_SEARCH_TIMEOUT_S):
+                async with asyncio.TaskGroup() as group:
+                    out_task = group.create_task(
+                        _bounded_output(process.stdout, self.max_output_bytes)
+                    )
+                    err_task = group.create_task(_bounded_output(process.stderr, 8192))
+                    # Finish/stop the process as soon as either stream hits its
+                    # bound. Otherwise a full pipe can deadlock the other drain.
+                    pending = {out_task, err_task}
+                    while pending:
+                        done, pending = await asyncio.wait(
+                            pending, return_when=asyncio.FIRST_COMPLETED
+                        )
+                        if any(task.result()[1] for task in done):
+                            _kill(process)
+                            break
+                stdout, output_limited = out_task.result()
+                stderr, error_limited = err_task.result()
+                if output_limited or error_limited:
+                    await _reap(process)
+                else:
+                    await process.wait()
         except TimeoutError:
-            process.kill()
-            await process.wait()
             return ToolEnvelope.fail(
                 code="KALASH_TOOL_TIMEOUT",
                 message=f"Search timed out after {_SEARCH_TIMEOUT_S}s",
@@ -180,9 +257,12 @@ class SearchTool:
                 message=f"Failed to run ripgrep: {exc}",
                 recoverable=True,
             )
+        finally:
+            if process is not None:
+                await _reap(process)
 
         # rg exit codes: 0 = matches found, 1 = no matches, 2 = error
-        if process.returncode == 2:
+        if error_limited or (process.returncode not in {0, 1} and not output_limited):
             error_msg = stderr.decode("utf-8", errors="replace").strip()
             return ToolEnvelope.fail(
                 code="KALASH_TOOL_ERROR",
@@ -190,7 +270,7 @@ class SearchTool:
                 recoverable=True,
             )
 
-        output = stdout.decode("utf-8", errors="replace")
+        output = stdout.decode("utf-8", errors="ignore")
 
         if process.returncode == 1 or not output.strip():
             return ToolEnvelope.success(
@@ -200,16 +280,18 @@ class SearchTool:
 
         # Count matches and check truncation
         lines = output.splitlines()
-        match_lines = [l for l in lines if not l.startswith("--")]  # Exclude context separators
+        match_lines = [line for line in lines if not line.startswith("--")]
         match_count = len(match_lines)
-        truncated = match_count >= _MAX_MATCHES
+        truncated = output_limited or match_count >= _MAX_MATCHES
 
         truncation = (
             TruncationInfo(
                 total_lines=match_count,
                 shown_lines=match_count,
                 total_bytes=len(stdout),
-                retrieval_hint=f"Results capped at {_MAX_MATCHES} matches. Refine the pattern.",
+                retrieval_hint=(
+                    "Results bounded; total matches unknown. Refine the pattern or path."
+                ),
             )
             if truncated
             else None

@@ -78,7 +78,7 @@ def rm(
     if not force:
         confirm = typer.confirm(f"Delete schedule {job_id!r}?")
         if not confirm:
-            raise typer.Abort()
+            raise typer.Abort
 
     manager = SchedulerManager()
     deleted = manager.delete(job_id)
@@ -150,7 +150,10 @@ def run(
         console.print(f"[red]Schedule {job_id!r} not found.[/red]")
         raise typer.Exit(code=1)
 
-    console.print(f"[green]Triggered {job_id!r}[/green] — Session: {result.session_id[:12]}")
+    console.print(
+        f"[green]Queued {job_id!r}[/green] for "
+        f"the scheduler daemon — Session: {result.session_id[:12]}"
+    )
 
 
 @cron_app.command("logs")
@@ -175,7 +178,9 @@ def logs(
     table.add_column("Session", style="dim")
 
     for entry in entries:
-        status_display = "[green]✓ success[/green]" if entry.success else "[red]✗ failed[/red]"
+        status_display = (
+            "[green]✓ verified[/green]" if entry.status == "verified_complete" else entry.status
+        )
         table.add_row(
             entry.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
             entry.job_name,

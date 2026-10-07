@@ -153,7 +153,7 @@ def _render_project_instructions(
     parts = [_PROJECT_INSTRUCTIONS_HEADER]
 
     for index, (text, source) in enumerate(
-        zip(instructions.chain, instructions.sources),
+        zip(instructions.chain, instructions.sources, strict=False),
         start=1,
     ):
         parts.append(f"## Source {index}: {source}\nScope: {source.parent}\n\n{text}")

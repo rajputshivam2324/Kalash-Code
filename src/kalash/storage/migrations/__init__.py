@@ -407,6 +407,78 @@ CREATE INDEX IF NOT EXISTS idx_kalash_grants_session
     ON kalash_grants(session_id) WHERE session_id IS NOT NULL;
 """,
     ),
+    (
+        3,
+        "0003_runtime_journal",
+        """
+CREATE TABLE runtime_journal (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    run_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX idx_runtime_journal_session ON runtime_journal(session_id, created_at, id);
+CREATE TABLE runtime_checkpoints (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id),
+    budget TEXT NOT NULL,
+    summary TEXT,
+    updated_at TEXT NOT NULL
+);
+""",
+    ),
+    (
+        4,
+        "0004_scheduler_contract",
+        """
+ALTER TABLE schedules ADD COLUMN model TEXT;
+ALTER TABLE schedules ADD COLUMN max_turns INTEGER NOT NULL DEFAULT 10;
+ALTER TABLE schedules ADD COLUMN project_dir TEXT;
+ALTER TABLE schedules ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE schedule_runs ADD COLUMN session_id TEXT;
+CREATE TABLE scheduler_lock (
+    id TEXT PRIMARY KEY,
+    leader_id TEXT NOT NULL,
+    lease_expires_at TEXT NOT NULL,
+    heartbeat_at TEXT NOT NULL
+);
+""",
+    ),
+    (
+        5,
+        "0005_journal_resource_bounds",
+        """
+CREATE TABLE runtime_journal_usage (
+    session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    records INTEGER NOT NULL,
+    bytes INTEGER NOT NULL
+);
+INSERT INTO runtime_journal_usage
+SELECT session_id, COUNT(*), SUM(LENGTH(CAST(payload AS BLOB)))
+FROM runtime_journal GROUP BY session_id;
+CREATE TRIGGER journal_admission BEFORE INSERT ON runtime_journal BEGIN
+    SELECT CASE WHEN LENGTH(CAST(NEW.payload AS BLOB)) > 8388608
+        THEN RAISE(ABORT, 'Journal record exceeds 8 MiB resource limit') END;
+    SELECT CASE WHEN COALESCE((SELECT records FROM runtime_journal_usage
+        WHERE session_id=NEW.session_id), 0) >= 100000
+        OR COALESCE((SELECT bytes FROM runtime_journal_usage
+        WHERE session_id=NEW.session_id), 0) + LENGTH(CAST(NEW.payload AS BLOB)) > 134217728
+        THEN
+        RAISE(ABORT, 'Journal session resource limit reached; archive and start a new session') END;
+END;
+CREATE TRIGGER journal_insert_usage AFTER INSERT ON runtime_journal BEGIN
+    INSERT INTO runtime_journal_usage VALUES
+        (NEW.session_id, 1, LENGTH(CAST(NEW.payload AS BLOB)))
+    ON CONFLICT(session_id) DO UPDATE SET records=records+1,
+        bytes=bytes+LENGTH(CAST(NEW.payload AS BLOB));
+END;
+CREATE TRIGGER journal_delete_usage AFTER DELETE ON runtime_journal BEGIN
+    UPDATE runtime_journal_usage SET records=records-1,
+        bytes=bytes-LENGTH(CAST(OLD.payload AS BLOB)) WHERE session_id=OLD.session_id;
+END;
+""",
+    ),
 ]
 
 

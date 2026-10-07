@@ -49,7 +49,7 @@ class FakeGateway:
 
         self.primary = P()
 
-    async def stream(self, messages, *, system=None, tools=None, **kw):
+    async def stream(self, messages, *, system=None, tools=None, **kw):  # noqa: ARG002 - Preserve provider/tool callback signature.
         self.calls.append({"messages": messages, "system": system, "tools": tools})
         for e in self.turns.pop(0) if self.turns else [MessageStop(StopReason.END_TURN)]:
             yield e
@@ -207,7 +207,7 @@ class TestFullPipeline:
 class TestSessionPersistence:
     """Create → persist → resume → verify messages."""
 
-    def test_session_create_and_list(self, tmp_path, monkeypatch):
+    def test_session_create_and_list(self, tmp_path, monkeypatch):  # noqa: ARG002 - Preserve provider/tool callback signature.
         from kalash.runtime.session import SessionManager
 
         mgr = SessionManager()
@@ -242,7 +242,7 @@ class TestSessionPersistence:
         assert exported is not None
         assert s.id in exported
 
-    def test_nonexistent_session_returns_none(self, tmp_path):
+    def test_nonexistent_session_returns_none(self, tmp_path):  # noqa: ARG002 - Preserve provider/tool callback signature.
         from kalash.runtime.session import SessionManager
 
         mgr = SessionManager()
@@ -444,7 +444,8 @@ class TestMCPRegistryIntegration:
         servers = reg.list_servers()
         assert any(s.name == "test-server" for s in servers)
         got = reg.get_server("test-server")
-        assert got is not None and got.url == "http://localhost:8080"
+        assert got is not None
+        assert got.url == "http://localhost:8080"
 
     def test_to_config_stdio(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -453,7 +454,7 @@ class TestMCPRegistryIntegration:
 
         reg = MCPRegistry()
         entry = MCPServerEntry(name="s", transport="stdio", url="npx server")
-        cfg = reg._to_config(entry)
+        cfg = reg._to_config(entry)  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         assert cfg.transport is TransportType.STDIO
         assert cfg.command == "npx"
         assert cfg.args == ["server"]
@@ -465,7 +466,7 @@ class TestMCPRegistryIntegration:
 
         reg = MCPRegistry()
         entry = MCPServerEntry(name="s", transport="sse", url="http://localhost:3000")
-        cfg = reg._to_config(entry)
+        cfg = reg._to_config(entry)  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         assert cfg.transport is TransportType.SSE
 
 
@@ -481,7 +482,7 @@ class TestBuildAgentIntegration:
             name = "stub"
             context_window = 200_000
 
-            async def stream(self, messages, **kw):
+            async def stream(self, messages, **kw):  # noqa: ARG002 - Preserve provider/tool callback signature.
                 yield MessageStop(StopReason.END_TURN)
 
         class Res:
@@ -491,7 +492,7 @@ class TestBuildAgentIntegration:
             model_id = "stub"
             reason = ""
 
-        monkeypatch.setattr("kalash.models.resolve.build_provider", lambda *a, **k: Res())
+        monkeypatch.setattr("kalash.models.resolve.build_provider", lambda *a, **k: Res())  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
         from kalash.runtime.agent import build_agent
 
         agent, reason = build_agent(cwd=tmp_path, interactive=False)
@@ -510,7 +511,7 @@ class TestBuildAgentIntegration:
             name = "stub"
             context_window = 200_000
 
-            async def stream(self, messages, **kw):
+            async def stream(self, messages, **kw):  # noqa: ARG002 - Preserve provider/tool callback signature.
                 yield MessageStop(StopReason.END_TURN)
 
         class Res:
@@ -520,7 +521,7 @@ class TestBuildAgentIntegration:
             model_id = "stub"
             reason = ""
 
-        monkeypatch.setattr("kalash.models.resolve.build_provider", lambda *a, **k: Res())
+        monkeypatch.setattr("kalash.models.resolve.build_provider", lambda *a, **k: Res())  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
         from kalash.runtime.agent import build_agent
 
         agent, _ = build_agent(cwd=tmp_path, interactive=False, mode="plan")
@@ -645,7 +646,7 @@ class TestEventBusIntegration:
 
         bus = EventBus()
 
-        async def bad_handler(e):
+        async def bad_handler(e):  # noqa: ARG001 - Preserve callback/keyword compatibility.
             raise RuntimeError("boom")
 
         bus.on(EventType.TURN_START, bad_handler)
@@ -661,7 +662,8 @@ class TestPromptWiring:
         prompt = build_system_prompt(mode="build")
         assert "Kalash" in prompt
         assert "todo" in prompt.lower()
-        assert "Reason" in prompt and "Act" in prompt  # ReAct
+        assert "Reason" in prompt
+        assert "Act" in prompt
         assert "filesystem" in prompt.lower()
         assert "safety" in prompt.lower() or "Safety" in prompt
 

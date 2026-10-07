@@ -9,9 +9,8 @@ Uses conservative defaults since we can't know provider capabilities.
 from __future__ import annotations
 
 import logging
-from collections.abc import AsyncIterator
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.core.budget import Pricing
 
@@ -22,6 +21,9 @@ from ..normalize import (
     StreamEvent,
 )
 from .openai import OpenAIProvider
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +42,7 @@ class OpenAICompatibleProvider(OpenAIProvider):
         )
     """
 
-    token_parameter = "max_tokens"
+    token_parameter = "max_tokens"  # noqa: S105 - Protocol label or synthetic fixture, never a credential.
 
     def __init__(
         self,
@@ -121,7 +123,10 @@ class OpenAICompatibleProvider(OpenAIProvider):
         effective_tools = tools if self._tool_use else None
 
         if tools and not self._tool_use:
-            note = "\n\n[NOTE: Tool calling is not available for this model. You must respond with plain text only and cannot execute functions.]"
+            note = (
+                "\n\n[NOTE: Tool calling is not available for this model. You must "
+                "respond with plain text only and cannot execute functions.]"
+            )
             system = (system or "") + note
 
         return await super().complete(
@@ -200,7 +205,10 @@ class OpenAICompatibleProvider(OpenAIProvider):
         # Normal streaming
         effective_tools = tools if self._tool_use else None
         if tools and not self._tool_use:
-            note = "\n\n[NOTE: Tool calling is not available for this model. You must respond with plain text only and cannot execute functions.]"
+            note = (
+                "\n\n[NOTE: Tool calling is not available for this model. You must "
+                "respond with plain text only and cannot execute functions.]"
+            )
             system = (system or "") + note
 
         stream = super().stream(

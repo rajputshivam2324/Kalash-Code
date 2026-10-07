@@ -49,7 +49,7 @@ def test(
     tool: Annotated[
         str,
         typer.Option("--tool", "-t", help="Tool name for matcher tests"),
-    ] = "write",
+    ] = "write",  # noqa: PT028 - CLI command named test, not a pytest fixture.
 ) -> None:
     """Dry-run hooks for an event without starting the agent."""
     import asyncio
@@ -118,3 +118,16 @@ def trust(
         table.add_row(str(hook_file), digest)
 
     console.print(table)
+
+
+@hooks_app.command("untrust")
+def untrust(
+    path: Annotated[str, typer.Argument(help="Hook file to revoke, including a missing file")],
+) -> None:
+    """Explicitly revoke a hook file's authorization before removing its policy."""
+    from kalash.core.trust import untrust_file
+
+    if untrust_file(Path(path)):
+        console.print("Hook authorization revoked.")
+    else:
+        console.print("[dim]No authorization record for this file.[/dim]")

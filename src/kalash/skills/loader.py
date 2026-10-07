@@ -127,7 +127,7 @@ class SkillLoader:
             return entry.body
 
         body = read_body(entry.path)
-        entry._body = body
+        entry._body = body  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         return body
 
     async def load_references(self, skill_name: str) -> dict[str, str]:
@@ -158,7 +158,7 @@ class SkillLoader:
                 except (OSError, UnicodeDecodeError):
                     continue
 
-        entry._references = references
+        entry._references = references  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         return references
 
     def list_resources(self, skill_name: str) -> list[str]:

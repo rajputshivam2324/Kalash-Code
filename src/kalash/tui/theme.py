@@ -9,13 +9,16 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from textual.app import App
 from textual.theme import Theme
 
 from kalash.core.paths import kalash_home, settings_path
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from textual.app import App
 
 # Prefix so Ctrl+P search for "theme" lists these, matching the /theme labels.
 KALASH_THEME_PREFIX = "theme → "
@@ -72,7 +75,6 @@ AssistantMessage {
     padding: 0 0 0 1;
     margin: 1 0 1 0;
     color: $foreground;
-    transition: opacity 300ms in_out_cubic;
 }
 
 SystemMessage {
@@ -91,7 +93,7 @@ ToolCallLine {
     height: auto;
     width: 100%;
     padding: 0 0 0 1;
-    margin: 0 0 1 0;
+    margin: 0;
     color: $foreground;
 }
 
@@ -102,7 +104,6 @@ ToolCallLine {
     background: $surface;
     padding: 1 0;
     margin-top: 1;
-    transition: height 200ms in_out_cubic;
 }
 #input-wrap.busy {
     border-top: wide $warning;
@@ -112,6 +113,7 @@ ToolCallLine {
 }
 
 #prompt {
+    height: 1;
     width: 1fr;
     background: transparent;
     border: none;

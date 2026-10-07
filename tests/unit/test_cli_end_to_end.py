@@ -36,7 +36,7 @@ class FakeProvider:
         self.turns = list(turns)
         self.requests: list[dict] = []
 
-    async def stream(self, messages, *, system=None, tools=None, **kwargs):
+    async def stream(self, messages, *, system=None, tools=None, **kwargs):  # noqa: ARG002 - Preserve provider/tool callback signature.
         self.requests.append({"system": system, "tools": tools, "messages": messages})
         events = self.turns.pop(0) if self.turns else [MessageStop(StopReason.END_TURN)]
         for event in events:
@@ -89,7 +89,7 @@ def install_provider(monkeypatch, turns):
     provider = FakeProvider(turns)
     monkeypatch.setattr(
         "kalash.models.resolve.build_provider",
-        lambda *a, **k: FakeResolution(provider),
+        lambda *a, **k: FakeResolution(provider),  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
     )
     return provider
 
@@ -114,7 +114,7 @@ class TestBuildAgent:
             provider = None
             reason = "no API key configured"
 
-        monkeypatch.setattr("kalash.models.resolve.build_provider", lambda *a, **k: Bad())
+        monkeypatch.setattr("kalash.models.resolve.build_provider", lambda *a, **k: Bad())  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
         from kalash.runtime.agent import build_agent
 
         agent, reason = build_agent(cwd=workspace)
@@ -190,13 +190,13 @@ class TestHeadless:
         assert "require('http')" in (workspace / "server.js").read_text()
 
     @pytest.mark.asyncio
-    async def test_exit_code_when_no_provider(self, workspace, monkeypatch):
+    async def test_exit_code_when_no_provider(self, workspace, monkeypatch):  # noqa: ARG002 - Preserve provider/tool callback signature.
         class Bad:
             ok = False
             provider = None
             reason = "not configured"
 
-        monkeypatch.setattr("kalash.models.resolve.build_provider", lambda *a, **k: Bad())
+        monkeypatch.setattr("kalash.models.resolve.build_provider", lambda *a, **k: Bad())  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
         from kalash.cli._pipe import EXIT_PROVIDER_UNAVAILABLE, _run
 
         assert await _run("hello") == EXIT_PROVIDER_UNAVAILABLE
@@ -216,7 +216,7 @@ class TestHeadless:
         assert not (workspace / "nope.txt").exists()
 
     @pytest.mark.asyncio
-    async def test_tools_and_system_prompt_are_sent(self, workspace, monkeypatch):
+    async def test_tools_and_system_prompt_are_sent(self, workspace, monkeypatch):  # noqa: ARG002 - Preserve provider/tool callback signature.
         provider = install_provider(monkeypatch, [final("hi")])
         from kalash.cli._pipe import _run
 
@@ -317,7 +317,7 @@ class TestSessionPersistenceAndResume:
 
 
 class TestDoctor:
-    def test_every_check_runs_without_a_broken_import(self, workspace, monkeypatch):
+    def test_every_check_runs_without_a_broken_import(self, workspace, monkeypatch):  # noqa: ARG002 - Preserve provider/tool callback signature.
         """doctor imported seven modules that do not exist.
 
         `kalash.config.paths`, `kalash.models.registry`, `kalash.memory.manager`,
@@ -348,13 +348,14 @@ class TestDoctor:
         for check in checks:
             result = check()
             assert result.status in ("pass", "warn", "fail"), check.__name__
-            assert result.name and result.detail, check.__name__
+            assert result.name, check.__name__
+            assert result.detail, check.__name__
 
-    def test_tool_check_sees_a_populated_registry(self, workspace, monkeypatch):
+    def test_tool_check_sees_a_populated_registry(self, workspace, monkeypatch):  # noqa: ARG002 - Preserve provider/tool callback signature.
         install_provider(monkeypatch, [final("x")])
         from kalash.cli.doctor import _check_tools
 
-        result = _check_tools()  # noqa: SLF001
+        result = _check_tools()
         assert result.status == "pass"
         assert "registered" in result.detail
 

@@ -12,12 +12,14 @@ Design invariants:
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Sequence
 
 
 class MemoryKind(StrEnum):

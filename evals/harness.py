@@ -20,11 +20,10 @@ make that trade.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.models.normalize import (
     BlockDelta,
@@ -37,6 +36,9 @@ from kalash.models.normalize import (
     StreamEvent,
     UsageUpdate,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 # Anthropic-shaped price ratios, relative to one input token. Used to convert
 # mixed usage into a single comparable figure.
@@ -102,7 +104,7 @@ class ScriptedProvider:
         *,
         system: str | None = None,
         tools: list[dict[str, Any]] | None = None,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ARG002 - Preserve provider/tool callback signature.
     ) -> AsyncIterator[StreamEvent]:
         self.requests.append({"system": system or "", "tools": tools or [], "messages": messages})
         turn = self._turns.pop(0) if self._turns else ScriptedTurn(text="done")
@@ -121,7 +123,8 @@ def install_provider(monkeypatch: Any, turns: list[ScriptedTurn]) -> ScriptedPro
     """Point provider resolution at a scripted provider."""
     provider = ScriptedProvider(turns)
     monkeypatch.setattr(
-        "kalash.models.resolve.build_provider", lambda *a, **k: _Resolution(provider)
+        "kalash.models.resolve.build_provider",
+        lambda *a, **k: _Resolution(provider),  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
     )
     return provider
 

@@ -59,6 +59,11 @@ def _short_label(path: str) -> str:
 
 def summarize_tool_result(name: str, data: dict[str, Any]) -> str:
     """One-line result under a folded tool block."""
+    if data.get("error"):
+        detail = str(data["error"])
+        if data.get("remediation"):
+            detail += " " + str(data["remediation"])
+        return detail
     if name == "search":
         count = data.get("match_count")
         if count is not None:

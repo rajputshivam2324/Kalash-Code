@@ -101,7 +101,11 @@ def new(
     root.mkdir(parents=True)
     desc = description or f"Use when working on {name.replace('-', ' ')} tasks."
     (root / "SKILL.md").write_text(
-        f"---\nname: {name}\ndescription: {desc}\n---\n\n# {name}\n\nDescribe how to use this skill.\n",
+        (
+            f"---\nname: {name}\ndescription: {desc}\n---\n\n# "
+            f"{name}\n\nDescribe how to use this "
+            f"skill.\n"
+        ),
         encoding="utf-8",
     )
     console.print(f"[green]Created skill at[/green] {root / 'SKILL.md'}")

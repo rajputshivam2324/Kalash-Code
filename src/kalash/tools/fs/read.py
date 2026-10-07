@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
+import io
+from typing import TYPE_CHECKING
+
 from pydantic import BaseModel, Field
 
 from kalash.tools.base import (
@@ -20,6 +24,18 @@ from .common import (
     _detect_encoding,
     _is_binary,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+MAX_SOURCE_BYTES = 16 * 1024 * 1024
+
+
+def _read_bounded(path: Path) -> bytes:
+    # Bound acquisition even if the file grows after stat. Run file IO outside
+    # the event loop; an output limit alone cannot bound a minified input.
+    with path.open("rb") as stream:
+        return stream.read(MAX_SOURCE_BYTES + 1)
 
 
 class ReadParams(BaseModel):
@@ -73,7 +89,7 @@ class ReadTool:
     def cancellable(self) -> bool:
         return False
 
-    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:
+    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:  # noqa: ARG002 - Preserve provider/tool callback signature.
         return frozenset()
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:
@@ -84,8 +100,12 @@ class ReadTool:
         if err := _check_readable(path, ctx):
             return err
 
+        return await asyncio.to_thread(self._read, path, args)
+
+    @staticmethod
+    def _read(path: Path, args: ReadParams) -> ToolEnvelope:
         try:
-            raw = path.read_bytes()
+            raw = _read_bounded(path)
         except PermissionError:
             return ToolEnvelope.fail(
                 code="KALASH_TOOL_ERROR",
@@ -97,6 +117,14 @@ class ReadTool:
                 code="KALASH_TOOL_ERROR",
                 message=f"OS error reading {path}: {exc}",
                 recoverable=True,
+            )
+
+        if len(raw) > MAX_SOURCE_BYTES:
+            return ToolEnvelope.fail(
+                code="KALASH_TOOL_RESOURCE_LIMIT",
+                message=f"Source exceeds the {MAX_SOURCE_BYTES}-byte read limit: {path}",
+                recoverable=True,
+                remediation="Use search to select relevant content or split the source file.",
             )
 
         # Binary detection
@@ -111,21 +139,34 @@ class ReadTool:
         # Decode
         encoding = _detect_encoding(raw)
         text = raw.decode(encoding)
-        lines = text.splitlines(keepends=True)
-        total_lines = len(lines)
+        # Do not allocate a Python list for every line of a newline-heavy file.
+        total_lines = 0
+        shown_lines = 0
+        selected = bytearray()
+        bytes_truncated = False
+        for line in io.StringIO(text, newline=""):
+            if args.offset <= total_lines < args.offset + args.limit:
+                encoded = line.encode("utf-8")
+                room = _MAX_READ_BYTES - len(selected)
+                if len(encoded) > room:
+                    bytes_truncated = True
+                if room:
+                    selected.extend(encoded[:room])
+                    shown_lines += 1
+            total_lines += 1
+        content = selected.decode("utf-8", errors="ignore")
 
-        # Apply line range
-        selected = lines[args.offset : args.offset + args.limit]
-        shown_lines = len(selected)
-        content = "".join(selected)
-
-        truncated = shown_lines < total_lines
+        truncated = bytes_truncated or shown_lines < total_lines
         truncation = (
             TruncationInfo(
                 total_lines=total_lines,
                 shown_lines=shown_lines,
                 total_bytes=len(raw),
-                retrieval_hint=f"Use offset={args.offset + shown_lines} to continue.",
+                retrieval_hint=(
+                    "Output byte limit reached; use search for long lines or a narrower line range."
+                    if bytes_truncated
+                    else f"Use offset={args.offset + shown_lines} to continue."
+                ),
             )
             if truncated
             else None

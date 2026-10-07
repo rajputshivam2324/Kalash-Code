@@ -62,7 +62,10 @@ _TABLE: tuple[tuple[str, ModelLimits], ...] = (
 
 
 def normalize_model_id(model_id: str) -> str:
-    """Strip provider prefix so ``openai/gpt-oss-safeguard-20b`` resolves like ``gpt-oss-safeguard-20b``."""
+    """
+    Strip provider prefix so ``openai/gpt-oss-safeguard-20b`` resolves like ``gpt-oss-
+    safeguard-20b``.
+    """
     if not model_id:
         return ""
     needle = model_id.strip().lower()
@@ -98,7 +101,11 @@ def supports_tools(model_id: str) -> bool:
     return lookup(model_id).supports_tools
 
 
-def describe(model_id: str, *, provider_id: str | None = None) -> str:
+def describe(model_id: str, *, provider_id: str | None = None) -> str:  # noqa: ARG001 - Preserve callback/keyword compatibility.
     limits = lookup(model_id)
     suffix = ", no tool calling" if not limits.supports_tools else ""
-    return f"window {limits.context_window:,}, max output {limits.max_output_tokens:,}{suffix} [{limits.source}]"
+    return (
+        f"window {limits.context_window:,}, "
+        f"max output {limits.max_output_tokens:,}{suffix} "
+        f"[{limits.source}]"
+    )

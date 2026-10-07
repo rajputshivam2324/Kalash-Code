@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from kalash.tools.base import Tool
+from typing import TYPE_CHECKING
+
 from kalash.tools.discovery import ToolSearchTool
 from kalash.tools.fs import (
     EditTool,
@@ -19,6 +20,9 @@ from kalash.tools.shell import ShellTool
 from kalash.tools.skill import SkillTool
 from kalash.tools.todo import TodoTool
 from kalash.tools.web import FetchTool, WebSearchTool
+
+if TYPE_CHECKING:
+    from kalash.tools.base import Tool
 
 
 def core_tools() -> list[Tool]:

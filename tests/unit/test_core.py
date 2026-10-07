@@ -143,7 +143,7 @@ class TestEvents:
     async def test_event_handler_error_swallowed(self):
         bus = EventBus()
 
-        async def bad_handler(event: Event):
+        async def bad_handler(event: Event):  # noqa: ARG001 - Preserve callback/keyword compatibility.
             raise RuntimeError("oops")
 
         bus.on(EventType.TURN_START, bad_handler)

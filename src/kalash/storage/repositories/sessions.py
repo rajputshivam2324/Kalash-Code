@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.core.ids import generate_id
-from kalash.storage.engine import StorageEngine
+
+if TYPE_CHECKING:
+    from kalash.storage.engine import StorageEngine
 
 
 class SessionRepository:
@@ -14,6 +16,11 @@ class SessionRepository:
 
     def __init__(self, engine: StorageEngine) -> None:
         self._engine = engine
+
+    @property
+    def engine(self) -> StorageEngine:
+        """Owned transactions for related runtime facts on this repository's database."""
+        return self._engine
 
     async def create_session(
         self,
@@ -27,7 +34,8 @@ class SessionRepository:
         now = datetime.now(UTC).isoformat()
 
         await self._engine.execute_write(
-            """INSERT INTO sessions (id, title, project_dir, agent, state, created_at, updated_at, metadata)
+            """INSERT INTO sessions (id, title, project_dir, agent, state, created_at,
+            updated_at, metadata)
                VALUES (?, ?, ?, ?, 'CREATED', ?, ?, ?)""",
             (
                 session_id,
@@ -76,26 +84,58 @@ class SessionRepository:
         model: str | None = None,
         token_count: int | None = None,
         content_type: str = "blocks",
+        source_id: str | None = None,
+        run_id: str = "",
     ) -> str:
         """Allocate sequence and persist one complete turn in a single transaction."""
         turn_id = generate_id("trn_")
         message_id = generate_id("msg_")
         now = datetime.now(UTC).isoformat()
         async with self._engine.write() as connection:
+            if source_id is not None:
+                prior = connection.execute(
+                    """SELECT t.id FROM turns t JOIN messages m ON m.turn_id=t.id
+                    WHERE t.session_id=? AND json_extract(m.metadata, '$.source_id')=?""",
+                    (session_id, source_id),
+                ).fetchone()
+                if prior is not None:
+                    return str(prior[0])
             row = connection.execute(
                 "SELECT COALESCE(MAX(seq), -1) + 1 FROM turns WHERE session_id = ?",
                 (session_id,),
             ).fetchone()
             connection.execute(
-                """INSERT INTO turns (id, session_id, seq, role, state, started_at, finished_at, model, token_count)
+                """INSERT INTO turns (id, session_id, seq, role, state, started_at,
+                finished_at, model, token_count)
                    VALUES (?, ?, ?, ?, 'COMPLETED', ?, ?, ?, ?)""",
                 (turn_id, session_id, row[0], role, now, now, model, token_count),
             )
             connection.execute(
-                """INSERT INTO messages (id, turn_id, seq, role, content_type, content, created_at)
-                   VALUES (?, ?, 0, ?, ?, ?, ?)""",
-                (message_id, turn_id, role, content_type, content, now),
+                """INSERT INTO messages (id, turn_id, seq, role, content_type, content,
+                created_at, metadata)
+                   VALUES (?, ?, 0, ?, ?, ?, ?, ?)""",
+                (
+                    message_id,
+                    turn_id,
+                    role,
+                    content_type,
+                    content,
+                    now,
+                    _json_dumps({"source_id": source_id}),
+                ),
             )
+            if source_id is not None:
+                connection.execute(
+                    "INSERT INTO runtime_journal VALUES (?, ?, ?, 'message_persisted', ?, ?)",
+                    (
+                        generate_id("evt_"),
+                        session_id,
+                        run_id,
+                        _json_dumps({"source_id": source_id}),
+                        now,
+                    ),
+                )
+            connection.execute("UPDATE sessions SET updated_at=? WHERE id=?", (now, session_id))
         return turn_id
 
     async def create_turn(
@@ -146,7 +186,8 @@ class SessionRepository:
         now = datetime.now(UTC).isoformat()
 
         await self._engine.execute_write(
-            """INSERT INTO messages (id, turn_id, seq, role, content_type, content, blob_ref, metadata, created_at)
+            """INSERT INTO messages (id, turn_id, seq, role, content_type, content,
+            blob_ref, metadata, created_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 msg_id,
@@ -183,7 +224,7 @@ class SessionRepository:
         return [dict(r) for r in rows]
 
     async def get_session_messages(
-        self, session_id: str, limit: int | None = None
+        self, session_id: str, limit: int | None = None, *, after: str | None = None
     ) -> list[dict[str, Any]]:
         """Get all messages for a session, ordered by turn seq then message seq."""
         sql = """
@@ -191,12 +232,15 @@ class SessionRepository:
             FROM messages m
             JOIN turns t ON m.turn_id = t.id
             WHERE t.session_id = ?
-            ORDER BY t.seq, m.seq
         """
         params: tuple[Any, ...] = (session_id,)
+        if after is not None:
+            sql += " AND m.created_at > ?"
+            params = (*params, after)
+        sql += " ORDER BY t.seq, m.seq"
         if limit:
             sql += " LIMIT ?"
-            params = (session_id, limit)
+            params = (*params, limit)
         rows = await self._engine.execute_read_async(sql, params)
         return [dict(r) for r in rows]
 
@@ -212,7 +256,8 @@ class SessionRepository:
         now = datetime.now(UTC).isoformat()
 
         await self._engine.execute_write(
-            """INSERT INTO tool_calls (id, message_id, turn_id, tool_name, arguments, state, started_at)
+            """INSERT INTO tool_calls (id, message_id, turn_id, tool_name, arguments,
+            state, started_at)
                VALUES (?, ?, ?, ?, ?, 'RECEIVED', ?)""",
             (call_id, message_id, turn_id, tool_name, arguments, now),
         )

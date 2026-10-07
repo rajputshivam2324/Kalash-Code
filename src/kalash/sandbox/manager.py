@@ -7,8 +7,10 @@ import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from kalash.sandbox.policy import SandboxPolicy
+if TYPE_CHECKING:
+    from kalash.sandbox.policy import SandboxPolicy
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +80,7 @@ class SandboxManager:
             landlock = False
             try:
                 probe = getattr(self._backend, "landlock_supported", None)
-                landlock = bool(probe()) if callable(probe) else False
+                landlock = bool(probe()) if callable(probe) else bool(probe)
             except Exception as e:
                 logger.debug("landlock support probe failed", exc_info=e)
                 landlock = False

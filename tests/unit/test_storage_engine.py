@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 import threading
 
 import pytest
@@ -23,16 +24,16 @@ class TestStorageEngine:
         eng.close()
 
     def test_connection_created_on_first_access(self, engine):
-        conn = engine._get_connection()
+        conn = engine._get_connection()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         assert conn is not None
 
     def test_wal_mode_enabled(self, engine):
-        conn = engine._get_connection()
+        conn = engine._get_connection()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         result = conn.execute("PRAGMA journal_mode").fetchone()
         assert result[0] == "wal"
 
     def test_foreign_keys_enabled(self, engine):
-        conn = engine._get_connection()
+        conn = engine._get_connection()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         result = conn.execute("PRAGMA foreign_keys").fetchone()
         assert result[0] == 1
 
@@ -58,10 +59,13 @@ class TestStorageEngine:
             conn.execute("CREATE TABLE IF NOT EXISTS test_rollback (id INTEGER PRIMARY KEY)")
 
         # Fail mid-transaction
-        with pytest.raises(ValueError):
+        async def rejected_write():
             async with engine.write() as conn:
                 conn.execute("INSERT INTO test_rollback VALUES (42)")
                 raise ValueError("intentional")
+
+        with pytest.raises(ValueError, match="intentional"):
+            await rejected_write()
 
         # Row should NOT exist due to rollback
         with engine.read() as conn:
@@ -70,7 +74,7 @@ class TestStorageEngine:
 
     def test_execute_write_sync(self, engine):
         """Test the new synchronous write path (A-1 fix)."""
-        conn = engine._get_connection()
+        conn = engine._get_connection()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         conn.execute("CREATE TABLE IF NOT EXISTS test_sync (id INTEGER, val TEXT)")
 
         engine.execute_write_sync("INSERT INTO test_sync (id, val) VALUES (?, ?)", (1, "hello"))
@@ -81,12 +85,12 @@ class TestStorageEngine:
 
     def test_execute_write_sync_rollback(self, engine):
         """Sync write should rollback on error."""
-        conn = engine._get_connection()
+        conn = engine._get_connection()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         conn.execute("CREATE TABLE IF NOT EXISTS test_sync_rb (id INTEGER PRIMARY KEY)")
 
         engine.execute_write_sync("INSERT INTO test_sync_rb VALUES (?)", (1,))
 
-        with pytest.raises(Exception):
+        with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint"):
             # Duplicate primary key should fail
             engine.execute_write_sync("INSERT INTO test_sync_rb VALUES (?)", (1,))
 
@@ -95,7 +99,7 @@ class TestStorageEngine:
         assert len(rows) == 1
 
     def test_execute_read(self, engine):
-        conn = engine._get_connection()
+        conn = engine._get_connection()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         conn.execute("CREATE TABLE IF NOT EXISTS test_er (id INTEGER)")
         conn.execute("INSERT INTO test_er VALUES (99)")
         rows = engine.execute_read("SELECT id FROM test_er")
@@ -103,7 +107,7 @@ class TestStorageEngine:
 
     @pytest.mark.asyncio
     async def test_execute_read_async(self, engine):
-        conn = engine._get_connection()
+        conn = engine._get_connection()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         conn.execute("CREATE TABLE IF NOT EXISTS test_era (id INTEGER)")
         conn.execute("INSERT INTO test_era VALUES (77)")
         rows = await engine.execute_read_async("SELECT id FROM test_era")
@@ -111,7 +115,7 @@ class TestStorageEngine:
 
     @pytest.mark.asyncio
     async def test_execute_write(self, engine):
-        conn = engine._get_connection()
+        conn = engine._get_connection()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         conn.execute("CREATE TABLE IF NOT EXISTS test_ew (id INTEGER)")
         await engine.execute_write("INSERT INTO test_ew VALUES (?)", (42,))
         rows = engine.execute_read("SELECT id FROM test_ew")
@@ -119,19 +123,19 @@ class TestStorageEngine:
 
     @pytest.mark.asyncio
     async def test_execute_many(self, engine):
-        conn = engine._get_connection()
+        conn = engine._get_connection()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         conn.execute("CREATE TABLE IF NOT EXISTS test_em (id INTEGER)")
         await engine.execute_many("INSERT INTO test_em VALUES (?)", [(1,), (2,), (3,)])
         rows = engine.execute_read("SELECT id FROM test_em ORDER BY id")
         assert [r["id"] for r in rows] == [1, 2, 3]
 
     def test_close_and_reopen(self, engine):
-        conn = engine._get_connection()
+        conn = engine._get_connection()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         conn.execute("CREATE TABLE IF NOT EXISTS test_close (id INTEGER)")
         conn.execute("INSERT INTO test_close VALUES (1)")
 
         engine.close()
-        assert engine._conn is None
+        assert engine._conn is None  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
         # Reopen
         rows = engine.execute_read("SELECT id FROM test_close")
@@ -139,7 +143,7 @@ class TestStorageEngine:
 
     def test_concurrent_sync_writes(self, engine):
         """Multiple threads writing via execute_write_sync should not corrupt."""
-        conn = engine._get_connection()
+        conn = engine._get_connection()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         conn.execute("CREATE TABLE IF NOT EXISTS test_conc (id INTEGER)")
 
         errors = []
@@ -225,8 +229,8 @@ class TestAuthStoreCache:
 
         monkeypatch.setattr(auth_store, "_auth_path", lambda: tmp_path / "auth.json")
         # Reset cache
-        auth_store._auth_cache = None
-        auth_store._auth_cache_mtime = 0.0
+        auth_store._auth_cache = None  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+        auth_store._auth_cache_mtime = ()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
         result = auth_store.load_auth()
         assert result == {}
@@ -235,9 +239,9 @@ class TestAuthStoreCache:
         from kalash.models import auth_store
 
         monkeypatch.setattr(auth_store, "_auth_path", lambda: tmp_path / "auth.json")
-        auth_store._auth_cache = {"old": "data"}
-        auth_store._auth_cache_mtime = 12345.0
+        auth_store._auth_cache = {"old": "data"}  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+        auth_store._auth_cache_mtime = (12345,)  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
-        auth_store._invalidate_auth_cache()
-        assert auth_store._auth_cache is None
-        assert auth_store._auth_cache_mtime == 0.0
+        auth_store._invalidate_auth_cache()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+        assert auth_store._auth_cache is None  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+        assert auth_store._auth_cache_mtime == ()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.

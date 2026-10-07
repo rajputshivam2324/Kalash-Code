@@ -82,7 +82,9 @@ def test_discovery_filters_policy_and_resolved_source(tmp_path):
     add_extension(host)
     add_extension(host, "mcp__docs__create", "Create a remote page")
     host.mode = "plan"
-    assert json.loads(host.discover_tools().content)["catalog_size"] == 1
+    # Remote names/annotations cannot establish read-only authority.
+    assert json.loads(host.discover_tools().content)["catalog_size"] == 0
+    assert not host.discover_tools(names=["mcp__docs__search"]).ok
     assert not host.discover_tools(names=["mcp__docs__create"]).ok
     host.network_enabled = False
     assert json.loads(host.discover_tools(query="docs").content)["loaded"] == []

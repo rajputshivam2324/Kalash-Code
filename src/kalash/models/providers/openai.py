@@ -8,14 +8,14 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import AsyncIterator
 from decimal import Decimal
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.core.budget import Pricing, Usage
 
 from ..normalize import (
     BlockDelta,
+    BlockMetadata,
     BlockStart,
     BlockStop,
     ContentBlock,
@@ -27,6 +27,7 @@ from ..normalize import (
     ModelResponse,
     Role,
     StopReason,
+    StreamError,
     StreamEvent,
     TextBlock,
     ThinkingBlock,
@@ -34,6 +35,9 @@ from ..normalize import (
     ToolUseBlock,
     UsageUpdate,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 logger = logging.getLogger(__name__)
 
@@ -69,10 +73,7 @@ def _serialize_content_block(block: ContentBlock) -> dict[str, Any] | str:
             return {"type": "text", "text": text}
 
         case ImageBlock(source_type=src_type, media_type=media_type, data=data):
-            if src_type == "url":
-                url = data
-            else:
-                url = f"data:{media_type};base64,{data}"
+            url = data if src_type == "url" else f"data:{media_type};base64,{data}"
             return {"type": "image_url", "image_url": {"url": url}}
 
         case _:
@@ -317,7 +318,7 @@ class OpenAIProvider:
             output_per_mtok=Decimal("10.00"),
         )
 
-    token_parameter = "max_completion_tokens"
+    token_parameter = "max_completion_tokens"  # noqa: S105 - Protocol label or synthetic fixture, never a credential.
 
     def serialize_messages(
         self, messages: list[Message], system: str | None
@@ -356,7 +357,7 @@ class OpenAIProvider:
         max_tokens: int | None = None,
         temperature: float | None = None,
         stop_sequences: list[str] | None = None,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ARG002 - Preserve provider/tool callback signature.
     ) -> ModelResponse:
         """Send a completion request to OpenAI."""
         client = self._get_client()
@@ -390,7 +391,7 @@ class OpenAIProvider:
         max_tokens: int | None = None,
         temperature: float | None = None,
         stop_sequences: list[str] | None = None,
-        **kwargs: Any,
+        **kwargs: Any,  # noqa: ARG002 - Preserve provider/tool callback signature.
     ) -> AsyncIterator[StreamEvent]:
         """Stream a response from OpenAI."""
         client = self._get_client()
@@ -414,19 +415,21 @@ class OpenAIProvider:
         open_blocks: set[int] = set()
 
         finish_reason = StopReason.UNKNOWN
+        raw_finish_reason = None
         try:
             yield MessageStart(id="", model=self._model)
             async for chunk in stream:
+                # Compatible endpoints may attach usage to a choice chunk, not
+                # only to the empty tail. Retain it before processing content.
+                if getattr(chunk, "usage", None):
+                    usage = _usage(chunk.usage)
+                    yield UsageUpdate(
+                        input_tokens=usage.input_tokens,
+                        output_tokens=usage.output_tokens,
+                        cache_read_tokens=usage.cache_read_tokens,
+                        reasoning_tokens=usage.reasoning_tokens,
+                    )
                 if not chunk.choices:
-                    # Usage-only chunk at the end
-                    if chunk.usage:
-                        usage = _usage(chunk.usage)
-                        yield UsageUpdate(
-                            input_tokens=usage.input_tokens,
-                            output_tokens=usage.output_tokens,
-                            cache_read_tokens=usage.cache_read_tokens,
-                            reasoning_tokens=usage.reasoning_tokens,
-                        )
                     continue
 
                 choice = chunk.choices[0]
@@ -467,7 +470,8 @@ class OpenAIProvider:
                     for tc_delta in delta.tool_calls:
                         tc_idx = tc_delta.index
 
-                        if tc_idx not in tc_to_block_index:
+                        new_tool = tc_idx not in tc_to_block_index
+                        if new_tool:
                             # Close text block if open
                             if text_started:
                                 yield BlockStop(index=current_block_index)
@@ -490,6 +494,14 @@ class OpenAIProvider:
 
                         # Route delta to the correct block index
                         blk_idx = tc_to_block_index[tc_idx]
+                        if not new_tool and (
+                            tc_delta.id or (tc_delta.function and tc_delta.function.name)
+                        ):
+                            yield BlockMetadata(
+                                index=blk_idx,
+                                tool_use_id=tc_delta.id,
+                                tool_name=tc_delta.function.name if tc_delta.function else None,
+                            )
                         if tc_delta.function and tc_delta.function.arguments:
                             yield BlockDelta(
                                 index=blk_idx,
@@ -507,11 +519,22 @@ class OpenAIProvider:
                     open_blocks.clear()
 
                     finish_reason = _map_stop_reason(choice.finish_reason)
+                    raw_finish_reason = choice.finish_reason
 
         finally:
             await stream.close()
 
-        yield MessageStop(stop_reason=finish_reason)
+        if finish_reason == StopReason.UNKNOWN:
+            yield StreamError(
+                error=(
+                    "Provider stream ended without a recognized finish reason "
+                    f"(finish_reason={raw_finish_reason!r}); no tools were executed. "
+                    "Check the provider response before retrying."
+                ),
+                code="incomplete_stream",
+            )
+        else:
+            yield MessageStop(stop_reason=finish_reason)
 
     async def close(self) -> None:
         """Close the HTTP client."""

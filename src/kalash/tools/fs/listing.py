@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import os
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
@@ -20,6 +19,9 @@ from .common import (
     _human_size,
     _should_ignore,
 )
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 class GlobParams(BaseModel):
@@ -73,7 +75,7 @@ class GlobTool:
     def cancellable(self) -> bool:
         return False
 
-    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:
+    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:  # noqa: ARG002 - Preserve provider/tool callback signature.
         return frozenset()
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:
@@ -177,7 +179,7 @@ class ListTool:
     def cancellable(self) -> bool:
         return False
 
-    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:
+    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:  # noqa: ARG002 - Preserve provider/tool callback signature.
         return frozenset()
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:
@@ -217,7 +219,7 @@ class ListTool:
                     if current_depth < args.depth:
                         _list_recursive(item, current_depth + 1, prefix + "  ")
                 elif item.is_symlink():
-                    entries.append(f"{prefix}{item.name} -> {os.readlink(item)}")
+                    entries.append(f"{prefix}{item.name} -> {item.readlink()}")
                 else:
                     try:
                         size = item.stat().st_size

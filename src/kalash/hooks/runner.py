@@ -11,16 +11,19 @@ import asyncio
 import json
 import sys
 import time
-from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.core.errors import HookDeniedError
 from kalash.core.ids import generate_id
 from kalash.hooks.events import HookEvent, HookPayload
-from kalash.storage.engine import StorageEngine
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
+
+    from kalash.storage.engine import StorageEngine
 
 
 class HandlerType(StrEnum):
@@ -50,6 +53,7 @@ class HookConfig:
     matcher: str | None = None  # Regex for filtering (e.g. tool name)
     timeout_s: float = 30.0
     enabled: bool = True
+    required: bool = False
 
     # Handler-specific config
     command: str = ""  # For COMMAND type
@@ -58,6 +62,14 @@ class HookConfig:
     python_callable: str = ""  # For PYTHON type (dotted path)
 
     def __post_init__(self) -> None:
+        if not 0 < self.timeout_s <= 3600:
+            raise ValueError("Hook timeout must be positive and at most 3600 seconds")
+        if self.matcher:
+            import re
+
+            re.compile(self.matcher)
+        if self.required and self.event.value.startswith("Post"):
+            raise ValueError("Required hooks must run before effects, not after them")
         if not self.id:
             self.id = generate_id("hook_")
 
@@ -104,6 +116,8 @@ class HookRunner:
         handler: Callable[[HookPayload], Coroutine[Any, Any, Any]],
         *,
         matcher: str | None = None,
+        required: bool = False,
+        timeout_s: float = 30,
     ) -> None:
         """Register an in-process Python hook handler."""
         handler_id = generate_id("hook_")
@@ -115,6 +129,8 @@ class HookRunner:
             handler_type=HandlerType.PYTHON,
             matcher=matcher,
             python_callable=handler_id,
+            required=required,
+            timeout_s=timeout_s,
         )
         self.register(config)
 
@@ -158,16 +174,19 @@ class HookRunner:
                     continue
 
                 result = await self._execute_hook(hook_config, payload)
+                result.blocked = result.exit_code == 2 or (
+                    hook_config.required and result.exit_code != 0
+                )
                 results.append(result)
 
                 # Record in hook_runs table
                 await self._record_result(result, payload)
 
                 # Check for block
-                if result.exit_code == 2:
-                    result.blocked = True
+                if result.blocked:
                     raise HookDeniedError(
-                        f"Hook '{hook_config.name}' blocked {event}: {result.stderr or result.stdout}",
+                        f"Hook '{hook_config.name}' blocked {event}: "
+                        f"{result.error or result.stderr or result.stdout or result.exit_code}",
                         recoverable=True,
                     )
 
@@ -327,8 +346,12 @@ class HookRunner:
         start: float,
     ) -> HookResult:
         """Execute an HTTP hook: JSON POST to configured URL."""
-        import urllib.error
-        import urllib.request
+        from urllib.parse import urlsplit
+
+        import httpx
+
+        if urlsplit(config.url).scheme not in {"http", "https"}:
+            raise ValueError("HTTP hooks require http or https URLs")
 
         body = json.dumps(
             {
@@ -340,26 +363,24 @@ class HookRunner:
             }
         ).encode()
 
-        req = urllib.request.Request(
-            config.url,
-            data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-
         try:
-
-            def fetch() -> tuple[str, int]:
-                with urllib.request.urlopen(req, timeout=config.timeout_s) as response:
-                    return response.read(32_000).decode(
-                        errors="replace"
-                    ), 0 if response.status == 200 else 1
-
-            response_body, exit_code = await asyncio.to_thread(fetch)
-        except urllib.error.HTTPError as e:
-            response_body = e.read(32_000).decode(errors="replace") if e.fp else ""
-            exit_code = 2 if e.code == 403 else 1
-        except (TimeoutError, urllib.error.URLError, OSError) as e:
+            async with (
+                asyncio.timeout(config.timeout_s),
+                httpx.AsyncClient(timeout=config.timeout_s, follow_redirects=False) as client,
+                client.stream(
+                    "POST", config.url, content=body, headers={"Content-Type": "application/json"}
+                ) as response,
+            ):
+                retained = bytearray()
+                async for chunk in response.aiter_bytes():
+                    retained.extend(chunk[: max(0, 32_000 - len(retained))])
+                    if len(retained) >= 32_000:
+                        break
+                response_body = retained.decode(errors="replace")
+                exit_code = (
+                    0 if response.status_code == 200 else 2 if response.status_code == 403 else 1
+                )
+        except (httpx.HTTPError, OSError) as e:
             # R-1: DNS failure, connection refused, or timeout.
             response_body = ""
             exit_code = 1
@@ -396,7 +417,7 @@ class HookRunner:
                 duration_ms=int((time.time() - start) * 1000),
             )
 
-        result = await handler(payload)
+        result = await asyncio.wait_for(handler(payload), config.timeout_s)
 
         # Interpret result: if it returns an int, use as exit code
         exit_code = 0
@@ -442,22 +463,36 @@ class HookRunner:
     async def _record_result(self, result: HookResult, payload: HookPayload) -> None:
         """Record hook execution in hook_runs table."""
         now = datetime.now(UTC).isoformat()
+        from kalash.core.privacy import scrub_metadata
+
+        output = json.dumps(
+            scrub_metadata(
+                {
+                    "hook_id": result.hook_id,
+                    "session_id": payload.session_id,
+                    "run_id": payload.run_id,
+                    "exit_code": result.exit_code,
+                    "stdout": result.stdout[:4096],
+                    "stderr": result.stderr[:4096],
+                    "error": result.error,
+                    "blocked": result.blocked,
+                }
+            )
+        )
         await self._engine.execute_write(
             """INSERT INTO hook_runs
-               (id, hook_id, event, exit_code, stdout, stderr, error,
-                duration_ms, blocked, session_id, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, hook_name, trigger_event, status, started_at, finished_at,
+                duration_ms, error_code, output)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 generate_id("hr_"),
                 result.hook_id,
                 result.event.value,
-                result.exit_code,
-                result.stdout[:4096] if result.stdout else None,  # cap stored output
-                result.stderr[:4096] if result.stderr else None,
-                result.error,
-                result.duration_ms,
-                result.blocked,
-                payload.session_id,
+                "blocked" if result.blocked else "failed" if result.exit_code else "completed",
                 now,
+                now,
+                result.duration_ms,
+                "KALASH_HOOK_FAILED" if result.exit_code else None,
+                output,
             ),
         )

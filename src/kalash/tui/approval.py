@@ -17,8 +17,8 @@ actively approve.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical
 from textual.screen import ModalScreen
@@ -29,6 +29,9 @@ from kalash.permissions.prompt import (
     PromptContext,
     PromptResult,
 )
+
+if TYPE_CHECKING:
+    from textual.app import ComposeResult
 
 # Shown when a path list would otherwise dominate the dialog.
 MAX_PATHS_SHOWN = 6

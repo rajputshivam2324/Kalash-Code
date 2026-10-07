@@ -7,6 +7,7 @@ Protected path checks implement I-010 (security-sensitive file protection).
 from __future__ import annotations
 
 import fnmatch
+import os
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -66,6 +67,46 @@ DEFAULT_PROTECTED_PATHS: tuple[str, ...] = (
     "**/id_rsa",
     "**/id_ed25519",
 )
+
+
+def protected_existing_paths(
+    roots: list[Path], extra_patterns: list[str] | None = None
+) -> list[Path]:
+    """Bounded enumeration for OS read-only overlays. Fail closed on incomplete coverage.
+
+    Protects existing targets. Filename rules for files created later remain a
+    filesystem-tool policy; a generic process sandbox cannot promise glob-based CAS.
+    """
+    from kalash.tools.fs.common import _is_protected
+
+    protected: set[Path] = set()
+    count = 0
+
+    def denied(error: OSError) -> None:
+        raise error
+
+    for root in roots:
+        for directory, directories, files in os.walk(root, followlinks=False, onerror=denied):
+            hooks = Path(directory) / ".git" / "hooks"
+            if hooks.is_dir():
+                protected.add(hooks)
+            for name in files:
+                count += 1
+                if count > 100000:
+                    raise RuntimeError(
+                        "Workspace exceeds protected-path scan bounds; restricted shell unavailable"
+                    )
+                path = Path(directory) / name
+                if _is_protected(path.resolve()) or any(
+                    fnmatch.fnmatch(str(path.resolve()), pattern.replace("~", str(Path.home())))
+                    or fnmatch.fnmatch(str(path.relative_to(root)), pattern)
+                    for pattern in extra_patterns or []
+                ):
+                    protected.add(path)
+            directories[:] = [
+                name for name in directories if not (Path(directory) / name).is_symlink()
+            ]
+    return sorted(protected)
 
 
 # ---------------------------------------------------------------------------
@@ -230,7 +271,7 @@ class SandboxPolicy:
 
         return True, "Write permitted"
 
-    def validate_read(self, path: str | Path) -> tuple[bool, str]:
+    def validate_read(self, path: str | Path) -> tuple[bool, str]:  # noqa: ARG002 - Preserve provider/tool callback signature.
         """Validate a read operation. Reads are always allowed but logged."""
         # Reads are permitted in all modes
         # Protected paths can be read but not written

@@ -16,7 +16,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 try:
     import structlog
@@ -27,12 +27,14 @@ except ImportError:
 
     logger = logging.getLogger(__name__)
 
-from kalash.core.config import MemoryConfig
 from kalash.memory.protocol import (
     MemoryProvider,
     ProviderCapability,
     ProviderHealth,
 )
+
+if TYPE_CHECKING:
+    from kalash.core.config import MemoryConfig
 
 # Type for provider factory functions
 ProviderFactory = Callable[[dict[str, Any]], MemoryProvider]

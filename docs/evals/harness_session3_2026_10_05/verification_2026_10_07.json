@@ -1,0 +1,57 @@
+{
+  "verified_on": "2026-10-07",
+  "python": "3.12.12",
+  "pytest": {
+    "name": "pytest",
+    "errors": "0",
+    "failures": "0",
+    "skipped": "0",
+    "tests": "832",
+    "time": "51.593",
+    "timestamp": "2026-10-07T18:05:18.067305+05:30",
+    "hostname": "192.168.1.9"
+  },
+  "mypy": {
+    "source_files": 169,
+    "passed": true
+  },
+  "ruff": {
+    "all_configured_rules_passed": true,
+    "unused_noqa_check_added_for_verification": true,
+    "global_ignores": [
+      "S101",
+      "S603",
+      "S607"
+    ],
+    "frozen_reference_exclusion": "evals/golden_kvstore",
+    "embedded_historical_prompt_reference_exception": {
+      "path": "evals/project_build.py",
+      "codes": [
+        "E501"
+      ]
+    }
+  },
+  "build": {
+    "wheel_sha256": "dff9193ac8b7a18c9b7f28707f020bd7002c284a329e60ae0eb7226a8efbe0ee",
+    "sdist_sha256": "12e54b53c922b22858a7c4337534d8c15ca5eaa0590ea6e1d2fd7425abaa0c0c",
+    "all_packaged_source_files_match_current_workspace": true,
+    "base_installation": "wheel_2026_10_07.json"
+  },
+  "terminal": "terminal_2026_10_07/result.json",
+  "secret_check": [
+    "No exact configured Sarvam credential in session evidence files"
+  ],
+  "historical_python314": {
+    "tests_passed": 824,
+    "date": "2026-10-05",
+    "evidence": "recovered_tool_outputs/line-1493.txt",
+    "current_extra_regressions_not_rerun_on_python314": true
+  },
+  "remote_ci_run": false,
+  "python313_locally_tested": false,
+  "limits": [
+    "Unit/connected checks do not establish real-model completion reliability.",
+    "No physical macOS/Windows sandbox, SSH or terminal-emulator certification.",
+    "Known-credential scan is not comprehensive secret detection."
+  ]
+}

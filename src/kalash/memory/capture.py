@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
-from kalash.core.config import KalashConfig
 from kalash.memory.pipeline.extract import ExtractionContext, run_extraction
 from kalash.memory.protocol import Source
 from kalash.memory.service import get_memory_service
 from kalash.memory.session import project_scope
-from kalash.models.normalize import Message
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from kalash.core.config import KalashConfig
+    from kalash.models.normalize import Message
 
 
 async def capture_turn_memories(
@@ -17,7 +21,7 @@ async def capture_turn_memories(
     session_id: str,
     cwd: Path,
     user_prompt: str,
-    conversation: list[Message],
+    conversation: list[Message],  # noqa: ARG001 - Preserve callback/keyword compatibility.
     turn_seq: int = 0,
     config: KalashConfig | None = None,
 ) -> int:

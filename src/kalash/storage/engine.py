@@ -6,12 +6,14 @@ import asyncio
 import atexit
 import sqlite3
 import threading
-from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, contextmanager
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.core.paths import kalash_db_path
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator
+    from pathlib import Path
 
 
 class StorageEngine:
@@ -99,12 +101,13 @@ class StorageEngine:
         async with self.write() as conn:
             conn.execute(sql, params)
 
-    def execute_write_sync(self, sql: str, params: tuple[Any, ...] = ()) -> None:
-        """Synchronous writer; SQLite orders it with async writers on the same database."""
+    @contextmanager
+    def write_sync(self) -> Iterator[sqlite3.Connection]:
+        """Own a complete synchronous transaction, including child-first deletion."""
         conn = self._begin_write()
         try:
             try:
-                conn.execute(sql, params)
+                yield conn
                 conn.execute("COMMIT")
             except BaseException:
                 if conn.in_transaction:
@@ -112,6 +115,11 @@ class StorageEngine:
                 raise
         finally:
             conn.close()
+
+    def execute_write_sync(self, sql: str, params: tuple[Any, ...] = ()) -> None:
+        """Synchronous writer; SQLite orders it with async writers on the same database."""
+        with self.write_sync() as conn:
+            conn.execute(sql, params)
 
     def execute_script(self, script: str) -> None:
         """Run bootstrap DDL on an owned connection, outside managed transactions."""

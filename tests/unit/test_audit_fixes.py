@@ -54,7 +54,7 @@ class TestC1GoogleBuildConfig:
         """The return annotation must not claim a tuple."""
         from kalash.models.providers.google import GeminiProvider
 
-        hints = GeminiProvider._build_config.__annotations__
+        hints = GeminiProvider._build_config.__annotations__  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         ret = hints.get("return", "")
         # It used to say tuple[Any, Any] — now should be Any or a concrete type
         assert "tuple" not in str(ret).lower(), (
@@ -88,8 +88,8 @@ class TestC2PickerSetItems:
         ]
         picker.open(PickerMode.COMMAND, items)
         picker.filter("/sta")
-        assert len(picker._shown) == 1
-        assert picker._shown[0].value == "/status"
+        assert len(picker._shown) == 1  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+        assert picker._shown[0].value == "/status"  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +128,7 @@ class TestC5MCPEntryTyping:
 
         from kalash.mcp.registry import MCPRegistry
 
-        sig = inspect.signature(MCPRegistry._to_config)
+        sig = inspect.signature(MCPRegistry._to_config)  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         param = sig.parameters["entry"]
         assert "MCPServerEntry" in str(param.annotation), (
             f"_entry_to_config parameter should be MCPServerEntry, got {param.annotation}"
@@ -155,7 +155,7 @@ class TestC6ModelIdNone:
             model = None
             context_window = 200_000
 
-            async def stream(self, messages, **kwargs):
+            async def stream(self, messages, **kwargs):  # noqa: ARG002 - Preserve provider/tool callback signature.
                 yield MessageStop(StopReason.END_TURN)
 
         class FakeRes:
@@ -167,7 +167,7 @@ class TestC6ModelIdNone:
 
         monkeypatch.setattr(
             "kalash.models.resolve.build_provider",
-            lambda *a, **k: FakeRes(),
+            lambda *a, **k: FakeRes(),  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
         )
         from kalash.runtime.agent import build_agent
 
@@ -185,7 +185,7 @@ class TestC6ModelIdNone:
 class TestS2ProviderTypeNarrowing:
     """The provider variable in build_provider was narrowing on each branch."""
 
-    def test_build_provider_returns_correct_types(self, isolated_store):
+    def test_build_provider_returns_correct_types(self, isolated_store):  # noqa: ARG002 - Preserve provider/tool callback signature.
         from kalash.tui.auth_store import save_credential, set_active_provider
 
         set_active_provider("groq", "openai/gpt-oss-20b")
@@ -206,7 +206,7 @@ class TestS2ProviderTypeNarrowing:
 class TestS3FallbackNone:
     """build_gateway must not pass None providers in the fallback list."""
 
-    def test_fallback_list_has_no_nones(self, isolated_store):
+    def test_fallback_list_has_no_nones(self, isolated_store):  # noqa: ARG002 - Preserve provider/tool callback signature.
         from kalash.tui.auth_store import save_credential
 
         save_credential("groq", "gsk-test")
@@ -234,7 +234,8 @@ class TestMCPSetupLifecycle:
         from tests.unit.test_wiring import FakeProvider, FakeResolution
 
         monkeypatch.setattr(
-            "kalash.models.resolve.build_provider", lambda *a: FakeResolution(FakeProvider([]))
+            "kalash.models.resolve.build_provider",
+            lambda *a: FakeResolution(FakeProvider([])),  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
         )
         wire = AsyncMock(return_value=None)
         monkeypatch.setattr("kalash.mcp.load.wire_mcp_tools", wire)
@@ -368,7 +369,7 @@ class TestA5StructlogFallback:
 
         bus = EventBus()
 
-        async def exploding_handler(event: Event) -> None:
+        async def exploding_handler(event: Event) -> None:  # noqa: ARG001 - Preserve callback/keyword compatibility.
             raise RuntimeError("boom")
 
         bus.on(EventType.TURN_START, exploding_handler)
@@ -391,7 +392,7 @@ class TestA5StructlogFallback:
 class TestProviderKeyPersistence:
     """Switching providers and back should not re-ask for API key."""
 
-    def test_saved_key_survives_switch(self, isolated_store):
+    def test_saved_key_survives_switch(self, isolated_store):  # noqa: ARG002 - Preserve provider/tool callback signature.
         from kalash.tui.auth_store import get_credential, save_credential
 
         save_credential("openrouter", "sk-or-test-key-123")
@@ -401,14 +402,14 @@ class TestProviderKeyPersistence:
         assert get_credential("openrouter") == "sk-or-test-key-123"
         assert get_credential("groq") == "gsk-test-key-456"
 
-    def test_credential_for_finds_saved_key(self, isolated_store):
+    def test_credential_for_finds_saved_key(self, isolated_store):  # noqa: ARG002 - Preserve provider/tool callback signature.
         from kalash.models.resolve import credential_for
         from kalash.tui.auth_store import save_credential
 
         save_credential("openrouter", "sk-or-saved")
         assert credential_for("openrouter") == "sk-or-saved"
 
-    def test_env_var_used_as_fallback(self, isolated_store, monkeypatch):
+    def test_env_var_used_as_fallback(self, isolated_store, monkeypatch):  # noqa: ARG002 - Preserve provider/tool callback signature.
         from kalash.models.resolve import credential_for
 
         monkeypatch.setenv("GROQ_API_KEY", "gsk-from-env")
@@ -479,7 +480,8 @@ class TestSessionSerialization:
         assert isinstance(messages[0].content[-1], ToolUseBlock)
         result = messages[1].content[0]
         assert isinstance(result, ToolResultBlock)
-        assert result.tool_use_id == "tu_orphan" and result.is_error
+        assert result.tool_use_id == "tu_orphan"
+        assert result.is_error
 
 
 # ---------------------------------------------------------------------------
@@ -520,7 +522,7 @@ class TestSystemPrompt:
             name = "stub"
             context_window = 200_000
 
-            async def stream(self, messages, *, system=None, **kwargs):
+            async def stream(self, messages, *, system=None, **kwargs):  # noqa: ARG002 - Preserve provider/tool callback signature.
                 self.last_system = system
                 yield MessageStop(StopReason.END_TURN)
 
@@ -533,7 +535,7 @@ class TestSystemPrompt:
 
         monkeypatch.setattr(
             "kalash.models.resolve.build_provider",
-            lambda *a, **k: StubRes(),
+            lambda *a, **k: StubRes(),  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
         )
         from kalash.runtime.agent import build_agent
 
@@ -554,20 +556,20 @@ class TestSystemPrompt:
 class TestAuthStoreIntegrity:
     """Credentials must survive save/load cycle and be encrypted at rest."""
 
-    def test_roundtrip_preserves_key(self, isolated_store):
+    def test_roundtrip_preserves_key(self, isolated_store):  # noqa: ARG002 - Preserve provider/tool callback signature.
         from kalash.tui.auth_store import get_credential, save_credential
 
         save_credential("test-provider", "sk-secret-12345")
         assert get_credential("test-provider") == "sk-secret-12345"
 
-    def test_key_not_plaintext_on_disk(self, isolated_store):
+    def test_key_not_plaintext_on_disk(self, isolated_store):  # noqa: ARG002 - Preserve provider/tool callback signature.
         from kalash.tui.auth_store import _auth_path, save_credential
 
         save_credential("test-provider", "sk-secret-12345")
         raw = _auth_path().read_text()
         assert "sk-secret-12345" not in raw
 
-    def test_remove_credential(self, isolated_store):
+    def test_remove_credential(self, isolated_store):  # noqa: ARG002 - Preserve provider/tool callback signature.
         from kalash.tui.auth_store import (
             get_credential,
             remove_credential,
@@ -579,7 +581,7 @@ class TestAuthStoreIntegrity:
         remove_credential("doomed")
         assert get_credential("doomed") is None
 
-    def test_multiple_providers_coexist(self, isolated_store):
+    def test_multiple_providers_coexist(self, isolated_store):  # noqa: ARG002 - Preserve provider/tool callback signature.
         from kalash.tui.auth_store import get_credential, save_credential
 
         save_credential("provider-a", "key-a")
@@ -590,7 +592,7 @@ class TestAuthStoreIntegrity:
         assert get_credential("provider-b") == "key-b"
         assert get_credential("provider-c") == "key-c"
 
-    def test_active_provider_persists(self, isolated_store):
+    def test_active_provider_persists(self, isolated_store):  # noqa: ARG002 - Preserve provider/tool callback signature.
         from kalash.tui.auth_store import (
             get_active_provider,
             set_active_provider,
@@ -626,7 +628,7 @@ class TestAgentConversationContinuity:
             context_window = 200_000
             requests = []
 
-            async def stream(self, messages, **kwargs):
+            async def stream(self, messages, **kwargs):  # noqa: ARG002 - Preserve provider/tool callback signature.
                 self.requests.append(messages)
                 for event in [
                     MessageStart(id="m", model="fake"),
@@ -647,7 +649,7 @@ class TestAgentConversationContinuity:
 
         monkeypatch.setattr(
             "kalash.models.resolve.build_provider",
-            lambda *a, **k: FakeRes(),
+            lambda *a, **k: FakeRes(),  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
         )
         from kalash.runtime.agent import build_agent
 

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from pydantic import BaseModel, Field
 
 from kalash.skills.loader import SkillLoader
 from kalash.tools.base import SideEffect, ToolContext, ToolEnvelope
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # Bundled reference files can be long; cap what one call returns.
 MAX_REFERENCE_CHARS = 20_000
@@ -83,7 +86,7 @@ class SkillTool:
     def cancellable(self) -> bool:
         return False
 
-    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:
+    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:  # noqa: ARG002 - Preserve provider/tool callback signature.
         return frozenset()
 
     async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:

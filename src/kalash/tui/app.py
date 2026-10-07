@@ -13,33 +13,24 @@ import asyncio
 import contextlib
 import os
 import time
-from collections.abc import Callable
+from datetime import UTC
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
-from rich.style import Style
-from textual.widget import Widget
-
-from kalash.models.normalize import Message
-
-if TYPE_CHECKING:
-    from kalash.runtime.agent import Agent
-
-
 import rich.default_styles
+from rich.style import Style
 from textual import events, on, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical, VerticalScroll
+from textual.containers import Container, Vertical
 from textual.css.query import NoMatches
 from textual.reactive import reactive
+from textual.screen import ModalScreen
 from textual.theme import ThemeProvider
 from textual.widgets import Input, Static
 from textual.worker import Worker, WorkerState
 
-# Force transparent backgrounds for inline code by stripping the background from default styles
-rich.default_styles.DEFAULT_STYLES["markdown.code_inline"] = Style.parse("bold cyan")
-
+from kalash.tui.formatting import summarize_tool_call
 from kalash.tui.messages import (
     AssistantMessage,
     SubagentLine,
@@ -50,14 +41,24 @@ from kalash.tui.messages import (
 )
 from kalash.tui.picker import Picker, PickerItem, PickerMode
 from kalash.tui.theme import APP_CSS, KalashTheme, register_kalash_themes
+from kalash.tui.transcript import Transcript
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from textual.widget import Widget
+
+    from kalash.models.normalize import Message
+    from kalash.runtime.agent import Agent
+
+
+# Force transparent backgrounds for inline code by stripping the background from default styles
+rich.default_styles.DEFAULT_STYLES["markdown.code_inline"] = Style.parse("bold cyan")
+
 
 # How often the elapsed counter on a running tool call refreshes.
 TOOL_TICK_SECONDS = 0.1
 
-
-from datetime import UTC
-
-from kalash.tui.formatting import summarize_tool_call
 
 SLASH_COMMANDS: list[tuple[str, str]] = [
     ("/connect", "Connect or switch AI model provider"),
@@ -153,6 +154,8 @@ class KalashApp(App[None]):
         self._history: list[str] = []
         self._history_pos: int | None = None
         self._banner_removed = False
+        self._follow_pending = False
+        self._transcript_view: Transcript | None = None
         self._clear_confirmed = False
         self._stream_worker: Worker[None] | None = None
         self._resolution_error: str | None = None
@@ -185,7 +188,8 @@ class KalashApp(App[None]):
         from textual.containers import Horizontal
 
         with Horizontal():
-            with VerticalScroll(id="transcript"):
+            self._transcript_view = Transcript(id="transcript")
+            with self._transcript_view:
                 yield WelcomeBanner()
             yield Static(
                 "Workspace Context\n\n- No active files\n- Token usage: 0\n- Agents: Idle",
@@ -220,7 +224,7 @@ class KalashApp(App[None]):
 
             with contextlib.suppress(Exception):
                 if hasattr(self._driver, "_disable_mouse_support"):
-                    self._driver._disable_mouse_support()
+                    self._driver._disable_mouse_support()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
                 self._driver.write("\x1b[?1000l\x1b[?1003l\x1b[?1015l\x1b[?1006l")
                 self._driver.flush()
 
@@ -296,15 +300,13 @@ class KalashApp(App[None]):
             text.append("  ·  ", style="dim")
             text.append(f"step {self._react_step}", style="bold cyan")
 
-        try:
-            self.query_one("#statusline", Static).update(text)
-        except NoMatches:
-            pass
+        with contextlib.suppress(NoMatches):
+            self._transcript().screen.query_one("#statusline", Static).update(text)
         self._refresh_sidebar()
 
     def _refresh_sidebar(self) -> None:
         try:
-            sidebar = self.query_one("#context-sidebar", Static)
+            sidebar = self._transcript().screen.query_one("#context-sidebar", Static)
         except Exception:
             return
 
@@ -351,36 +353,76 @@ class KalashApp(App[None]):
                 text.append("   ")
             text.append(key, style="bold cyan")
             text.append(f" {label}", style="dim")
-        try:
-            self.query_one("#hints", Static).update(text)
-        except NoMatches:
-            pass
+        with contextlib.suppress(NoMatches):
+            self._transcript().screen.query_one("#hints", Static).update(text)
 
     def watch_busy(self, busy: bool) -> None:
         try:
-            wrap = self.query_one("#input-wrap")
+            wrap = self._transcript().screen.query_one("#input-wrap")
         except NoMatches:
             return
         wrap.set_class(busy, "busy")
         try:
-            prompt = self.query_one("#prompt", Input)
+            prompt = self._transcript().screen.query_one("#prompt", Input)
             prompt.placeholder = "Streaming… esc to stop" if busy else "Ask anything…"
         except NoMatches:
             pass
 
     # -- transcript --------------------------------------------------------
 
-    def _transcript(self) -> VerticalScroll:
-        return self.query_one("#transcript", VerticalScroll)
+    def _transcript(self) -> Transcript:
+        # App queries walk only the active screen. Approvals and the command
+        # palette must not disconnect the background run from its transcript.
+        transcript = self._transcript_view
+        if transcript is None or not transcript.is_attached:
+            raise NoMatches("The conversation transcript is not mounted")
+        return transcript
 
     async def _post(self, widget: Widget) -> None:
-        """Mount a widget into the transcript and scroll to it."""
+        """Append without pulling a reader away from earlier output."""
         if not self._banner_removed:
-            for banner in self.query(WelcomeBanner):
+            for banner in self._transcript().query(WelcomeBanner):
                 await banner.remove()
             self._banner_removed = True
-        await self._transcript().mount(widget)
-        self._transcript().scroll_end(animate=False)
+        transcript = self._transcript()
+        await transcript.mount(widget)
+        protected = set(self._active_tools.values()) | set(self._subagents.values()) | {widget}
+        if self._current_assistant is not None:
+            protected.add(self._current_assistant)
+        await transcript.prune(protected)
+        self._queue_follow()
+
+    def _queue_follow(self) -> None:
+        if not self._follow_pending:
+            self._follow_pending = True
+            if not self.call_after_refresh(self._follow_transcript):
+                self._follow_pending = False
+
+    def _follow_transcript(self) -> None:
+        self._follow_pending = False
+        transcript = self._transcript_view
+        # A queued repaint can outlive the transcript during shutdown/recompose.
+        if transcript is None or not transcript.is_attached:
+            return
+        if transcript.follow_output:
+            transcript.scroll_end(animate=False, immediate=True, x_axis=False)
+
+    def on_transcript_changed(self) -> None:
+        self._queue_follow()
+
+    def _finish_assistant(self) -> None:
+        if self._current_assistant is not None:
+            self._current_assistant.finish()
+            if not self._current_assistant.has_content:
+                self._current_assistant.display = False
+            self._current_assistant = None
+
+    async def _begin_assistant(self) -> None:
+        if self._current_assistant is not None and not self._current_assistant.text:
+            return
+        self._finish_assistant()
+        self._current_assistant = AssistantMessage()
+        await self._post(self._current_assistant)
 
     def _say(self, lines: list[str] | str, *, error: bool = False) -> None:
         """Post a system message without blocking the caller."""
@@ -388,37 +430,56 @@ class KalashApp(App[None]):
 
     # -- actions -----------------------------------------------------------
 
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        # Priority conversation bindings (Escape, arrows, Tab) must not consume
+        # keys intended for permission dialogs or the command palette.
+        if isinstance(self.screen, ModalScreen) and action in {
+            "dismiss",
+            "toggle_mode",
+            "history_or_picker",
+            "complete_command",
+            "scroll_page_up",
+            "scroll_page_down",
+            "scroll_line_up",
+            "scroll_line_down",
+            "scroll_to_home",
+            "scroll_to_end",
+            "toggle_output",
+            "toggle_sidebar",
+        }:
+            return False
+        return super().check_action(action, parameters)
+
     def action_scroll_page_up(self) -> None:
         """Scroll the transcript up by one page."""
         try:
+            self._transcript().follow_output = False
             self._transcript().scroll_page_up(animate=False)
         except NoMatches:
             pass
 
     def action_scroll_page_down(self) -> None:
         """Scroll the transcript down by one page."""
-        try:
+        with contextlib.suppress(NoMatches):
             self._transcript().scroll_page_down(animate=False)
-        except NoMatches:
-            pass
 
     def action_scroll_line_up(self) -> None:
         """Scroll the transcript up by several lines."""
         try:
+            self._transcript().follow_output = False
             self._transcript().scroll_relative(y=-4, animate=False)
         except NoMatches:
             pass
 
     def action_scroll_line_down(self) -> None:
         """Scroll the transcript down by several lines."""
-        try:
+        with contextlib.suppress(NoMatches):
             self._transcript().scroll_relative(y=4, animate=False)
-        except NoMatches:
-            pass
 
     def action_scroll_to_home(self) -> None:
         """Scroll the transcript to the very top."""
         try:
+            self._transcript().follow_output = False
             self._transcript().scroll_home(animate=False)
         except NoMatches:
             pass
@@ -426,23 +487,23 @@ class KalashApp(App[None]):
     def action_scroll_to_end(self) -> None:
         """Scroll the transcript to the very bottom."""
         try:
+            self._transcript().follow_output = True
             self._transcript().scroll_end(animate=False)
         except NoMatches:
             pass
 
-    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:  # noqa: ARG002 - Preserve provider/tool callback signature.
         """Handle mouse scroll up anywhere on screen."""
         try:
+            self._transcript().follow_output = False
             self._transcript().scroll_relative(y=-3, animate=False)
         except NoMatches:
             pass
 
-    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:  # noqa: ARG002 - Preserve provider/tool callback signature.
         """Handle mouse scroll down anywhere on screen."""
-        try:
+        with contextlib.suppress(NoMatches):
             self._transcript().scroll_relative(y=3, animate=False)
-        except NoMatches:
-            pass
 
     def action_toggle_mode(self) -> None:
         self.mode = Mode.PLAN.value if self.mode == Mode.BUILD.value else Mode.BUILD.value
@@ -585,7 +646,9 @@ class KalashApp(App[None]):
     def _reset_intent(self) -> None:
         self._intent = InputIntent.PROMPT
         try:
-            self.query_one("#prompt", Input).placeholder = "Ask anything…"
+            prompt = self.query_one("#prompt", Input)
+            prompt.placeholder = "Ask anything…"
+            prompt.password = False
         except NoMatches:
             pass
 
@@ -593,6 +656,7 @@ class KalashApp(App[None]):
         self._intent = intent
         prompt = self.query_one("#prompt", Input)
         prompt.placeholder = placeholder
+        prompt.password = intent is InputIntent.API_KEY
         prompt.value = ""
         prompt.focus()
 
@@ -674,7 +738,11 @@ class KalashApp(App[None]):
         """Plain text of everything currently in the transcript."""
         from kalash.tui.messages import AssistantMessage, SystemMessage, UserMessage
 
-        parts: list[str] = []
+        transcript = self._transcript()
+        archived = transcript.archived_text.rstrip()
+        parts: list[str] = [archived] if archived else []
+        if transcript.archive_error:
+            parts.append(transcript.archive_error)
         for widget in self._transcript().children:
             if hasattr(widget, "plain_text") and widget.plain_text:
                 parts.append(str(widget.plain_text))
@@ -845,8 +913,8 @@ class KalashApp(App[None]):
             banner = self.query_one(WelcomeBanner)
             await banner.remove()
             self._banner_removed = True
-        except Exception:
-            pass
+        except NoMatches:
+            self._banner_removed = True
 
         for msg in history:
             role = getattr(msg, "role", None)
@@ -1022,6 +1090,7 @@ class KalashApp(App[None]):
     # -- sending -----------------------------------------------------------
 
     async def _send(self, text: str) -> None:
+        self._transcript().follow_output = True
         await self._post(UserMessage(text))
         if self.provider_id is None or self.model_id is None:
             await self._post(SystemMessage("no provider connected — run /connect", error=True))
@@ -1050,8 +1119,7 @@ class KalashApp(App[None]):
                 return
 
             result = await agent.send(text, on_text_delta=self._make_sink(sink))
-            sink.finish()
-            self._current_assistant = None
+            self._finish_assistant()
 
             match result.termination_reason:
                 case TerminationReason.ERROR:
@@ -1076,29 +1144,24 @@ class KalashApp(App[None]):
         except Exception as exc:  # surfaced in the transcript, never a crash
             from kalash.models.diagnose import explain
 
-            sink.set_error(explain(str(exc), self.model_id or ""))
+            (self._current_assistant or sink).set_error(explain(str(exc), self.model_id or ""))
         finally:
+            self._finish_assistant()
+            for line in self._active_tools.values():
+                line.finish(failed=True)
+            self._active_tools.clear()
+            self._active_tool_started.clear()
+            self._active_tool = None
             self.busy = False
             self._current_assistant = None
             self._react_step = 0
             self._refresh_statusline()
 
     def _make_sink(self, sink: AssistantMessage) -> Callable[[str], None]:
-        """Callback that streams assistant text smoothly into the transcript."""
-        last_scroll = 0.0
+        """Route each response to its own entry, after the preceding tools."""
 
         def emit(delta: str) -> None:
-            nonlocal last_scroll
-            sink.append(delta)
-            now = time.monotonic()
-            if now - last_scroll >= 0.045:
-                last_scroll = now
-                try:
-                    ts = self._transcript()
-                    if ts.scroll_y >= max(0, ts.max_scroll_y - 6):
-                        ts.scroll_end(animate=False)
-                except (NoMatches, AttributeError):
-                    pass
+            (self._current_assistant or sink).append(delta)
 
         return emit
 

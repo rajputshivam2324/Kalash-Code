@@ -7,16 +7,19 @@ and catchup_policy. Creates headless agent sessions for each run.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.core.events import Event, EventType, get_event_bus
 from kalash.core.ids import generate_id
 from kalash.scheduler.cron import CronExpression
-from kalash.storage.engine import StorageEngine
+
+if TYPE_CHECKING:
+    from kalash.storage.engine import StorageEngine
 
 
 class OverlapPolicy(StrEnum):
@@ -83,6 +86,7 @@ class SchedulerDaemon:
         self._leader_id = generate_id("sched_")
         self._tick_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._active_run: asyncio.Task[None] | None = None
         self._notification_hooks: list[NotificationHook] = []
 
     def on_notification(self, hook: NotificationHook) -> None:
@@ -101,16 +105,12 @@ class SchedulerDaemon:
         self._running = False
         if self._tick_task:
             self._tick_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._tick_task
-            except asyncio.CancelledError:
-                pass
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
-            try:
+            with contextlib.suppress(asyncio.CancelledError):
                 await self._heartbeat_task
-            except asyncio.CancelledError:
-                pass
         await self._release_lease()
 
     async def _tick_loop(self) -> None:
@@ -150,38 +150,21 @@ class SchedulerDaemon:
         now = datetime.now(UTC).isoformat()
         expires = (datetime.now(UTC) + timedelta(seconds=self._lease_duration)).isoformat()
 
-        # Try to insert or claim an expired lease
+        # Compare-and-swap ownership inside one SQLite writer transaction.
         try:
-            rows = await self._engine.execute_read_async(
-                "SELECT leader_id, lease_expires_at FROM scheduler_lock WHERE id = 'singleton'"
-            )
-            if not rows:
-                # No lock exists — claim it
-                await self._engine.execute_write(
-                    """INSERT INTO scheduler_lock (id, leader_id, lease_expires_at, heartbeat_at)
-                       VALUES ('singleton', ?, ?, ?)""",
-                    (self._leader_id, expires, now),
+            async with self._engine.write() as connection:
+                connection.execute(
+                    """INSERT INTO scheduler_lock VALUES ('singleton', ?, ?, ?)
+                    ON CONFLICT(id) DO UPDATE SET leader_id=excluded.leader_id,
+                    lease_expires_at=excluded.lease_expires_at, heartbeat_at=excluded.heartbeat_at
+                    WHERE scheduler_lock.lease_expires_at < ? OR scheduler_lock.leader_id=?""",
+                    (self._leader_id, expires, now, now, self._leader_id),
                 )
-                self._leader = True
-                return True
-
-            row = rows[0]
-            current_expires = row["lease_expires_at"]
-            if current_expires and current_expires < now:
-                # Lease expired — take over
-                await self._engine.execute_write(
-                    """UPDATE scheduler_lock
-                       SET leader_id = ?, lease_expires_at = ?, heartbeat_at = ?
-                       WHERE id = 'singleton'""",
-                    (self._leader_id, expires, now),
-                )
-                self._leader = True
-                return True
-
-            # Check if we already own it
-            if row["leader_id"] == self._leader_id:
-                self._leader = True
-                return True
+                row = connection.execute(
+                    "SELECT leader_id FROM scheduler_lock WHERE id='singleton'"
+                ).fetchone()
+                self._leader = row[0] == self._leader_id
+                return self._leader
 
         except Exception as e:
             import logging as _log
@@ -195,12 +178,17 @@ class SchedulerDaemon:
         """Renew the advisory lock lease."""
         now = datetime.now(UTC).isoformat()
         expires = (datetime.now(UTC) + timedelta(seconds=self._lease_duration)).isoformat()
-        await self._engine.execute_write(
-            """UPDATE scheduler_lock
+        async with self._engine.write() as connection:
+            renewed = connection.execute(
+                """UPDATE scheduler_lock
                SET lease_expires_at = ?, heartbeat_at = ?
-               WHERE id = 'singleton' AND leader_id = ?""",
-            (expires, now, self._leader_id),
-        )
+               WHERE id = 'singleton' AND leader_id = ? AND lease_expires_at >= ?""",
+                (expires, now, self._leader_id, now),
+            ).rowcount
+        if not renewed:
+            self._leader = False
+            if self._active_run is not None:
+                self._active_run.cancel()
 
     async def _release_lease(self) -> None:
         """Release the advisory lock."""
@@ -212,18 +200,42 @@ class SchedulerDaemon:
 
     async def _process_due_schedules(self) -> None:
         """Find and fire all due schedules."""
+        if not self._leader:
+            return
         now = datetime.now(UTC).isoformat()
 
+        queued = await self._engine.execute_read_async(
+            """SELECT s.*, r.id AS queued_run, r.session_id AS queued_session
+            FROM schedule_runs r JOIN schedules s ON s.id=r.schedule_id
+            WHERE r.status='pending' AND s.enabled=1 ORDER BY r.started_at"""
+        )
+        for row in queued:
+            await self._execute_scheduled(dict(row))
+            if not self._leader:
+                return
         rows = await self._engine.execute_read_async(
             """SELECT * FROM schedules
-               WHERE enabled = 1 AND next_fire_at <= ?
-               ORDER BY next_fire_at""",
+               WHERE enabled = 1 AND next_run_at <= ?
+               ORDER BY next_run_at""",
             (now,),
         )
 
         for row in rows:
             schedule = dict(row)
-            await self._fire_schedule(schedule)
+            await self._execute_scheduled(schedule)
+            if not self._leader:
+                return
+
+    async def _execute_scheduled(self, schedule: dict[str, Any]) -> None:
+        self._active_run = asyncio.create_task(self._fire_schedule(schedule))
+        try:
+            await self._active_run
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            if task is not None and task.cancelling():
+                raise
+        finally:
+            self._active_run = None
 
     async def _fire_schedule(self, schedule: dict[str, Any]) -> None:
         """Fire a single schedule, respecting overlap and catchup policies."""
@@ -248,14 +260,23 @@ class SchedulerDaemon:
                 (datetime.now(UTC).isoformat(), schedule_id),
             )
 
-        run_id = generate_id("sr_")
+        run_id = schedule.get("queued_run") or generate_id("sr_")
         started = datetime.now(UTC).isoformat()
-        await self._engine.execute_write(
-            """INSERT INTO schedule_runs
+        if schedule.get("queued_run"):
+            async with self._engine.write() as connection:
+                claimed = connection.execute(
+                    "UPDATE schedule_runs SET status='running' WHERE id=? AND status='pending'",
+                    (run_id,),
+                ).rowcount
+            if not claimed:
+                return
+        else:
+            await self._engine.execute_write(
+                """INSERT INTO schedule_runs
                (id, schedule_id, status, started_at, trigger_source)
                VALUES (?, ?, 'running', ?, 'scheduler')""",
-            (run_id, schedule_id, started),
-        )
+                (run_id, schedule_id, started),
+            )
 
         try:
             bus = get_event_bus()
@@ -278,16 +299,50 @@ class SchedulerDaemon:
             from kalash.runtime.bootstrap import prepare_agent
 
             sandbox_mode = str(schedule.get("sandbox_mode", "read-only"))
+            from pathlib import Path
+
             from kalash.core.config import load_config
 
-            config = load_config(overrides={"permissions": {"sandbox": sandbox_mode}})
+            base = Path(schedule.get("project_dir") or Path.cwd())
+            inherited = load_config(base)
+            requested_turns = int(schedule.get("max_turns", 10))
+            if requested_turns < 1:
+                raise ValueError("Scheduled max_turns must be positive")
+            budget_limits: dict[str, Any] = {
+                "max_turns": min(inherited.budget.max_turns, requested_turns)
+            }
+            for key, inherited_limit, scheduled_limit in (
+                ("max_tokens", inherited.budget.max_tokens, schedule.get("budget_tokens")),
+                ("max_cost_usd", inherited.budget.max_cost_usd, schedule.get("budget_cost_usd")),
+            ):
+                if scheduled_limit is not None:
+                    from decimal import Decimal
+
+                    budget_limits[key] = (
+                        str(min(Decimal(str(inherited_limit)), Decimal(str(scheduled_limit))))
+                        if inherited_limit is not None
+                        else str(scheduled_limit)
+                    )
+            overrides = {
+                "permissions": {"sandbox": sandbox_mode, "approval": "never"},
+                "budget": budget_limits,
+            }
+            if schedule.get("model"):
+                overrides["model"] = {"primary": schedule["model"]}
+            config = load_config(base, overrides=overrides)
             agent, reason = build_agent(
                 config=config,
+                cwd=base,
+                session_id=schedule.get("queued_session"),
+                resume=bool(schedule.get("queued_session")),
                 mode="plan" if sandbox_mode == "read-only" else "build",
                 interactive=False,
             )
             if agent is None:
                 raise RuntimeError(reason or "could not build agent")
+            await self._engine.execute_write(
+                "UPDATE schedule_runs SET session_id=? WHERE id=?", (agent.session_id, run_id)
+            )
 
             try:
                 await prepare_agent(agent)
@@ -302,7 +357,7 @@ class SchedulerDaemon:
                 )
             finished = datetime.now(UTC).isoformat()
             await self._engine.execute_write(
-                """UPDATE schedule_runs SET status = 'succeeded', finished_at = ?,
+                """UPDATE schedule_runs SET status = 'stopped_unverified', finished_at = ?,
                    tokens_used = ? WHERE id = ?""",
                 (finished, result.total_tokens, run_id),
             )
@@ -311,8 +366,21 @@ class SchedulerDaemon:
                 "UPDATE schedules SET consecutive_failures = 0 WHERE id = ?",
                 (schedule_id,),
             )
-            await self._notify("success", schedule_id, {"run_id": run_id})
+            await self._notify("stopped_unverified", schedule_id, {"run_id": run_id})
 
+        except asyncio.CancelledError:
+            await self._engine.execute_write(
+                (
+                    "UPDATE schedule_runs SET status='uncertain', finished_at=?, "
+                    "error_code=? WHERE id=?"
+                ),
+                (
+                    datetime.now(UTC).isoformat(),
+                    "Execution interrupted; inspect session before retrying",
+                    run_id,
+                ),
+            )
+            raise
         except Exception as e:
             finished = datetime.now(UTC).isoformat()
             await self._engine.execute_write(
@@ -328,13 +396,13 @@ class SchedulerDaemon:
 
     async def _advance_next_fire(self, schedule: dict[str, Any]) -> None:
         """Compute and store the next fire time."""
-        cron_expr = schedule.get("cron")
+        cron_expr = schedule.get("spec") if schedule.get("spec_kind") == "cron" else None
         if cron_expr:
             tz = schedule.get("timezone", "UTC")
             cron = CronExpression.parse(cron_expr, tz)
             next_fire = cron.next_fire()
             await self._engine.execute_write(
-                "UPDATE schedules SET next_fire_at = ? WHERE id = ?",
+                "UPDATE schedules SET next_run_at = ? WHERE id = ?",
                 (next_fire.isoformat(), schedule["id"]),
             )
 

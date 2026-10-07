@@ -84,7 +84,7 @@ class TestEncode:
         assert folded.prefix == "/home/u/proj/src/pkg/"
         assert folded.items == ("@tools/fs.py", "@tools/web.py", "@runtime/loop.py")
         assert len(folded.render()) < len("\n".join(paths))
-        for original, item in zip(paths, folded.items):
+        for original, item in zip(paths, folded.items, strict=False):
             assert folded.unfold(item) == original
 
     def test_fold_paths_declines_when_not_worth_it(self):
@@ -213,7 +213,7 @@ class TestScratchpadExpand:
         body = "y" * (INLINE_MAX_BYTES + 10)
         ref = pad.put("file", "a", body).ref
 
-        def boom(_digest):
+        def boom(_digest, *, max_bytes=None):  # noqa: ARG001 - Preserve callback/keyword compatibility.
             raise FileNotFoundError
 
         monkeypatch.setattr("kalash.runtime.scratchpad.read_blob", boom)
@@ -303,7 +303,9 @@ class TestScratchpadPersistence:
 
         recovered = Scratchpad("ses_bad", root=root)
         assert recovered.stats()["refs"] == 0
-        assert recovered.put("file", "a", "b").ref == "#f1"
+        with pytest.raises(OSError, match="preserved"):
+            recovered.put("file", "a", "b")
+        assert pad.index_path.read_text() == "{not json"
 
     def test_malformed_observation_row_skipped(self, tmp_path):
         root = tmp_path / "pads"
@@ -458,7 +460,7 @@ def fake_response(count=3):
 class TestWebSearchTool:
     @pytest.mark.asyncio
     async def test_snippets_are_stored_not_inlined(self, ctx, monkeypatch):
-        async def stub(query, *, max_results=5, provider=""):
+        async def stub(query, *, max_results=5, provider=""):  # noqa: ARG001 - Preserve callback/keyword compatibility.
             return fake_response()
 
         monkeypatch.setattr("kalash.tools.web.run_search", stub)
@@ -477,7 +479,7 @@ class TestWebSearchTool:
 
     @pytest.mark.asyncio
     async def test_index_keeps_urls_actionable_without_scheme(self, ctx, monkeypatch):
-        async def stub(query, *, max_results=5, provider=""):
+        async def stub(query, *, max_results=5, provider=""):  # noqa: ARG001 - Preserve callback/keyword compatibility.
             return fake_response(1)
 
         monkeypatch.setattr("kalash.tools.web.run_search", stub)
@@ -490,7 +492,7 @@ class TestWebSearchTool:
     async def test_index_is_far_cheaper_than_inlining(self, ctx, monkeypatch):
         response = fake_response(5)
 
-        async def stub(query, *, max_results=5, provider=""):
+        async def stub(query, *, max_results=5, provider=""):  # noqa: ARG001 - Preserve callback/keyword compatibility.
             return response
 
         monkeypatch.setattr("kalash.tools.web.run_search", stub)
@@ -503,7 +505,7 @@ class TestWebSearchTool:
 
     @pytest.mark.asyncio
     async def test_repeated_search_reuses_refs(self, ctx, monkeypatch):
-        async def stub(query, *, max_results=5, provider=""):
+        async def stub(query, *, max_results=5, provider=""):  # noqa: ARG001 - Preserve callback/keyword compatibility.
             return fake_response(2)
 
         monkeypatch.setattr("kalash.tools.web.run_search", stub)
@@ -516,7 +518,7 @@ class TestWebSearchTool:
 
     @pytest.mark.asyncio
     async def test_no_results_is_success(self, ctx, monkeypatch):
-        async def stub(query, *, max_results=5, provider=""):
+        async def stub(query, *, max_results=5, provider=""):  # noqa: ARG001 - Preserve callback/keyword compatibility.
             return SearchResponse(provider="brave", query=query)
 
         monkeypatch.setattr("kalash.tools.web.run_search", stub)
@@ -526,7 +528,7 @@ class TestWebSearchTool:
 
     @pytest.mark.asyncio
     async def test_provider_error_surfaces_with_remediation(self, ctx, monkeypatch):
-        async def stub(query, *, max_results=5, provider=""):
+        async def stub(query, *, max_results=5, provider=""):  # noqa: ARG001 - Preserve callback/keyword compatibility.
             raise SearchProviderError("No web search provider configured.")
 
         monkeypatch.setattr("kalash.tools.web.run_search", stub)

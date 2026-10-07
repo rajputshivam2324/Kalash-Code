@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 from typing import Any
@@ -11,6 +12,8 @@ from kalash.models.normalize import (
     ImageBlock,
     MemoryBlock,
     Message,
+    OpaqueBlock,
+    OpaquePayload,
     Role,
     TextBlock,
     ThinkingBlock,
@@ -24,6 +27,18 @@ logger = logging.getLogger(__name__)
 FORMAT_VERSION = 1
 
 
+def _pack_signature(value: Any) -> Any:
+    if isinstance(value, bytes):
+        return {"encoding": "base64", "value": base64.b64encode(value).decode("ascii")}
+    return value
+
+
+def _unpack_signature(value: Any) -> Any:
+    if isinstance(value, dict) and value.get("encoding") == "base64":
+        return base64.b64decode(value["value"], validate=True)
+    return value
+
+
 def _block_to_json(block: ContentBlock) -> dict[str, Any] | None:
     """Convert one block to a JSON-safe dict, or None if not persistable."""
     match block:
@@ -35,7 +50,7 @@ def _block_to_json(block: ContentBlock) -> dict[str, Any] | None:
                 "id": block.id,
                 "name": block.name,
                 "input": block.input,
-                "thought_signature": block.thought_signature,
+                "thought_signature": _pack_signature(block.thought_signature),
             }
         case ToolResultBlock():
             content = block.content
@@ -67,6 +82,13 @@ def _block_to_json(block: ContentBlock) -> dict[str, Any] | None:
                 "source": block.source,
                 "relevance": block.relevance,
             }
+        case OpaqueBlock():
+            return {
+                "t": "opaque",
+                "provider": block.payload.provider,
+                "model_family": block.payload.model_family,
+                "data": block.payload.data,
+            }
         case _:
             return None
 
@@ -83,7 +105,7 @@ def _block_from_json(raw: dict[str, Any]) -> ContentBlock | None:
                     id=str(raw["id"]),
                     name=str(raw["name"]),
                     input=dict(raw.get("input") or {}),
-                    thought_signature=raw.get("thought_signature"),
+                    thought_signature=_unpack_signature(raw.get("thought_signature")),
                 )
             case "tool_result":
                 return ToolResultBlock(
@@ -108,6 +130,14 @@ def _block_from_json(raw: dict[str, Any]) -> ContentBlock | None:
                     content=str(raw.get("content", "")),
                     source=str(raw.get("source", "")),
                     relevance=float(raw.get("relevance", 1.0)),
+                )
+            case "opaque":
+                return OpaqueBlock(
+                    OpaquePayload(
+                        provider=str(raw["provider"]),
+                        model_family=str(raw["model_family"]),
+                        data=dict(raw["data"]),
+                    )
                 )
             case _:
                 return None
@@ -136,11 +166,15 @@ def deserialize_blocks(text: str | None) -> list[ContentBlock]:
 
     if not isinstance(payload, dict) or "blocks" not in payload:
         return [TextBlock(text=text)]
+    if payload.get("v", 1) != FORMAT_VERSION:
+        raise ValueError("Unsupported stored message version; migrate the session before resuming")
 
     blocks: list[ContentBlock] = []
     for raw in payload.get("blocks") or []:
         if isinstance(raw, dict) and (block := _block_from_json(raw)) is not None:
             blocks.append(block)
+        else:
+            raise ValueError("Unrecognized or corrupt stored content block")
     return blocks
 
 
@@ -187,7 +221,9 @@ def _repair_interrupted_tools(messages: list[Message]) -> list[Message]:
             missing: list[ContentBlock] = [
                 ToolResultBlock(
                     tool_use_id=call_id,
-                    content="No durable result. Outcome unknown; inspect workspace before retrying.",
+                    content=(
+                        "No durable result. Outcome unknown; inspect workspace before retrying."
+                    ),
                     is_error=True,
                 )
                 for call_id in pending
@@ -207,7 +243,9 @@ def _repair_interrupted_tools(messages: list[Message]) -> list[Message]:
                 content=[
                     ToolResultBlock(
                         tool_use_id=call_id,
-                        content="No durable result. Outcome unknown; inspect workspace before retrying.",
+                        content=(
+                            "No durable result. Outcome unknown; inspect workspace before retrying."
+                        ),
                         is_error=True,
                     )
                     for call_id in pending

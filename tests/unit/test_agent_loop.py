@@ -115,7 +115,7 @@ class AutoApprover:
         self.seen.append(context)
         return PromptResult(response=self.response)
 
-    async def show_info(self, message: str) -> None:
+    async def show_info(self, message: str) -> None:  # noqa: ARG002 - Preserve provider/tool callback signature.
         return None
 
 
@@ -269,7 +269,8 @@ class TestPermissionGate:
         host = make_host(tmp_path, mode="plan", ui=AutoApprover())
         names = {s["name"] for s in host.schemas()}
         assert "read" in names
-        assert "write" not in names and "shell" not in names
+        assert "write" not in names
+        assert "shell" not in names
 
         out = await host.execute(
             "write", {"path": str(tmp_path / "x"), "content": "y"}, tool_use_id="t1"
@@ -321,14 +322,14 @@ class TestPermissionGate:
         assert "visible" in out
 
     @pytest.mark.asyncio
-    async def test_session_grant_stops_re_asking(self, tmp_path):
+    async def test_session_grant_does_not_cover_different_destructive_targets(self, tmp_path):
         ui = AutoApprover(ApprovalResponse.ALLOW_SESSION)
         host = make_host(tmp_path, ui=ui)
         for index in range(3):
             target = tmp_path / f"f{index}.txt"
             target.write_text("x")
             await host.execute("shell", {"command": f"rm -rf {target}"}, tool_use_id=f"t{index}")
-        assert len(ui.seen) == 1, "an allow-session grant must not re-prompt"
+        assert len(ui.seen) == 3, "different destructive targets require separate approval"
 
     @pytest.mark.asyncio
     async def test_shell_grant_is_scoped_to_the_program(self, tmp_path):
@@ -519,7 +520,8 @@ class TestSerialization:
         assert isinstance(messages[0].content[-1], ToolUseBlock)
         outcome = messages[1].content[0]
         assert isinstance(outcome, ToolResultBlock)
-        assert outcome.tool_use_id == "tu_orphan" and outcome.is_error
+        assert outcome.tool_use_id == "tu_orphan"
+        assert outcome.is_error
         assert "Outcome unknown" in outcome.content
 
     def test_rehydrate_keeps_answered_tool_calls(self):

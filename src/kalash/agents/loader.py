@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kalash.core.frontmatter import read_body, read_metadata
 from kalash.core.paths import agents_dirs
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @dataclass

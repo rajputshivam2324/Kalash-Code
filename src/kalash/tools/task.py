@@ -69,8 +69,8 @@ class TaskTool:
     @property
     def description(self) -> str:
         return (
-            "Spawn an isolated subagent to handle a delegated task. "
-            "Returns only the structured result — no context leakage."
+            "Delegate read-only analysis in a separate context. Files are shared; "
+            "the child cannot edit them. Returns a bounded result and child receipt."
         )
 
     @property
@@ -170,7 +170,10 @@ class TaskTool:
             if definition.model:
                 return ToolEnvelope.fail(
                     code="KALASH_TOOL_ERROR",
-                    message="A delegated agent must inherit its parent's provider; use agents run for a model override",
+                    message=(
+                        "A delegated agent must inherit its parent's provider; use agents "
+                        "run for a model override"
+                    ),
                 )
             child_instructions = definition.body
             allowed_tools = frozenset(definition.tools) if definition.tools else None
@@ -205,11 +208,23 @@ class TaskTool:
                 recoverable=True,
             )
 
-        if outcome.get("status") != "completed":
-            return ToolEnvelope.fail(
+        if outcome.get("status") not in {"completed", "stopped_unverified", "verified_complete"}:
+            failure = ToolEnvelope.fail(
                 code="KALASH_TOOL_ERROR",
-                message=f"Subagent did not complete: {outcome.get('error') or 'unknown'}",
+                message=(
+                    f"Subagent did not complete: {outcome.get('error') or 'unknown'}\nPartial "
+                    f"output: {outcome.get('output', '')}"
+                ),
                 recoverable=True,
+            )
+            return ToolEnvelope(
+                ok=False,
+                error=failure.error,
+                metadata={
+                    "child_id": outcome.get("child_id", ""),
+                    "status": outcome.get("status", "failed"),
+                    "workspace_mode": outcome.get("workspace_mode", "shared_read_only"),
+                },
             )
 
         output = str(outcome.get("output") or "").strip()
@@ -223,7 +238,10 @@ class TaskTool:
                 "turns": outcome.get("turns", 0),
                 "child_tokens": child_tokens,
                 "termination": outcome.get("termination", ""),
-                "status": "completed",
+                "status": outcome.get("status", "stopped_unverified"),
+                "verified": bool(outcome.get("verified", False)),
+                "child_id": outcome.get("child_id", ""),
+                "workspace_mode": outcome.get("workspace_mode", "shared_read_only"),
             },
             side_effects=(SideEffectRecord(kind="executed", path=f"task:{task_id}"),),
         )

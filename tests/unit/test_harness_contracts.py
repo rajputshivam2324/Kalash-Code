@@ -2,7 +2,7 @@
 
 import asyncio
 from decimal import Decimal
-from types import SimpleNamespace as NS
+from types import SimpleNamespace as Namespace
 from unittest.mock import AsyncMock
 
 from kalash.core.budget import BudgetState, Pricing, Usage
@@ -47,24 +47,28 @@ class SDKStream:
 async def test_sarvam_reasoning_usage_tail_and_wire_roundtrip():
     stream = SDKStream(
         [
-            NS(
+            Namespace(
                 choices=[
-                    NS(
-                        delta=NS(reasoning_content="inspect source", content=None, tool_calls=None),
+                    Namespace(
+                        delta=Namespace(
+                            reasoning_content="inspect source", content=None, tool_calls=None
+                        ),
                         finish_reason=None,
                     )
                 ]
             ),
-            NS(
+            Namespace(
                 choices=[
-                    NS(
-                        delta=NS(
+                    Namespace(
+                        delta=Namespace(
                             content=None,
                             tool_calls=[
-                                NS(
+                                Namespace(
                                     index=0,
                                     id="call",
-                                    function=NS(name="read", arguments='{"path":"src/a.py"}'),
+                                    function=Namespace(
+                                        name="read", arguments='{"path":"src/a.py"}'
+                                    ),
                                 )
                             ],
                         ),
@@ -72,20 +76,20 @@ async def test_sarvam_reasoning_usage_tail_and_wire_roundtrip():
                     )
                 ]
             ),
-            NS(
+            Namespace(
                 choices=[],
-                usage=NS(
+                usage=Namespace(
                     prompt_tokens=100,
                     completion_tokens=30,
                     prompt_cache_hit_tokens=80,
-                    completion_tokens_details=NS(reasoning_tokens=20),
+                    completion_tokens_details=Namespace(reasoning_tokens=20),
                 ),
             ),
         ]
     )
     create = AsyncMock(return_value=stream)
     provider = SarvamProvider(model="sarvam-105b")
-    provider._client = NS(chat=NS(completions=NS(create=create)))
+    provider._client = Namespace(chat=Namespace(completions=Namespace(create=create)))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     handler = StreamHandler()
     events = [
         event
@@ -120,24 +124,28 @@ async def test_sarvam_reasoning_usage_tail_and_wire_roundtrip():
 
 
 async def test_sarvam_complete_preserves_sdk_reasoning_and_usage():
-    response = NS(
+    response = Namespace(
         id="response",
         model="sarvam-105b",
         choices=[
-            NS(
-                message=NS(content="done", reasoning_content="opaque reasoning", tool_calls=[]),
+            Namespace(
+                message=Namespace(
+                    content="done", reasoning_content="opaque reasoning", tool_calls=[]
+                ),
                 finish_reason="stop",
             )
         ],
-        usage=NS(
+        usage=Namespace(
             prompt_tokens=10,
             completion_tokens=4,
-            prompt_tokens_details=NS(cached_tokens=3),
-            completion_tokens_details=NS(reasoning_tokens=2),
+            prompt_tokens_details=Namespace(cached_tokens=3),
+            completion_tokens_details=Namespace(reasoning_tokens=2),
         ),
     )
     provider = SarvamProvider(model="sarvam-105b")
-    provider._client = NS(chat=NS(completions=NS(create=AsyncMock(return_value=response))))
+    provider._client = Namespace(  # noqa: SLF001 - Intentional provider fault fixture.
+        chat=Namespace(completions=Namespace(create=AsyncMock(return_value=response)))
+    )
     result = await provider.complete([])
     assert any(
         isinstance(block, ThinkingBlock) and block.thinking == "opaque reasoning"
@@ -182,7 +190,7 @@ async def test_cancel_interrupts_stalled_provider_and_closes_stream(tmp_path):
     closed = asyncio.Event()
 
     class Stalled(FakeGateway):
-        async def stream(self, *args, **kwargs):
+        async def stream(self, *args, **kwargs):  # noqa: ARG002 - Preserve provider/tool callback signature.
             try:
                 await asyncio.Event().wait()
                 yield MessageStop(StopReason.END_TURN)
@@ -200,7 +208,7 @@ async def test_cancel_interrupts_stalled_provider_and_closes_stream(tmp_path):
 
 async def test_wallclock_bounds_provider_wait(tmp_path):
     class Stalled(FakeGateway):
-        async def stream(self, *args, **kwargs):
+        async def stream(self, *args, **kwargs):  # noqa: ARG002 - Preserve provider/tool callback signature.
             await asyncio.Event().wait()
             yield MessageStop(StopReason.END_TURN)
 
@@ -228,7 +236,7 @@ async def test_error_flag_and_attempt_budget_survive_host(tmp_path):
 async def test_mutation_precedes_following_read(tmp_path):
     host = make_host(tmp_path, ui=AutoApprover())
     loop = make_loop(FakeGateway([]), host)
-    results = await loop._execute_tools(
+    results = await loop._execute_tools(  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         [
             ToolUseBlock(id="write", name="write", input={"path": "a.txt", "content": "new"}),
             ToolUseBlock(id="read", name="read", input={"path": "a.txt"}),
@@ -241,7 +249,7 @@ async def test_mutation_precedes_following_read(tmp_path):
 async def test_tool_limit_stops_later_calls(tmp_path):
     loop = make_loop(FakeGateway([]), make_host(tmp_path, ui=AutoApprover()))
     loop.budget.max_tool_calls = 1
-    results = await loop._execute_tools(
+    results = await loop._execute_tools(  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         [
             ToolUseBlock(
                 id=str(index), name="write", input={"path": f"{index}.txt", "content": "new"}
@@ -258,7 +266,9 @@ async def test_tool_limit_stops_later_calls(tmp_path):
 async def test_sdk_stream_closes_if_consumer_stops_at_start():
     stream = SDKStream([])
     provider = SarvamProvider(model="sarvam-105b")
-    provider._client = NS(chat=NS(completions=NS(create=AsyncMock(return_value=stream))))
+    provider._client = Namespace(  # noqa: SLF001 - Intentional provider fault fixture.
+        chat=Namespace(completions=Namespace(create=AsyncMock(return_value=stream)))
+    )
     iterator = provider.stream([])
     await anext(iterator)
     await iterator.aclose()
@@ -269,7 +279,7 @@ async def test_cancelled_tool_exchange_has_error_result(tmp_path):
     started = asyncio.Event()
     host = make_host(tmp_path)
 
-    async def stalled(*args, **kwargs):
+    async def stalled(*args, **kwargs):  # noqa: ARG001 - Preserve callback/keyword compatibility.
         started.set()
         await asyncio.Event().wait()
 
@@ -306,7 +316,7 @@ async def test_child_inherits_tools_mode_extensions_and_accounts_usage(tmp_path)
     outcome = await agent.host.delegate(
         prompt="inspect", mode="build", allowed_tools=frozenset({"read", "write"})
     )
-    assert outcome["status"] == "completed"
+    assert outcome["status"] == "stopped_unverified"
     assert {tool["name"] for tool in provider.requests[0]["tools"]} == {"read"}
     assert "Mode: PLAN" in provider.requests[0]["system"]
     assert "<skills>" not in provider.requests[0]["system"]
@@ -363,24 +373,24 @@ async def test_compaction_is_charged_and_preserves_user_constraints(tmp_path):
     host = make_host(tmp_path)
     gateway = FakeGateway([text_turn("## Remaining work\nRun the checks.")])
     loop = make_loop(gateway, host)
-    loop._conversation = [Message(Role.USER, [TextBlock(text="Never edit legacy/")])]
+    loop._conversation = [Message(Role.USER, [TextBlock(text="Never edit legacy/")])]  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     for index in range(8):
-        loop._conversation.extend(
+        loop._conversation.extend(  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
             [
                 Message(Role.ASSISTANT, [TextBlock(text=f"Observed src/{index}.py")]),
                 Message(Role.USER, [TextBlock(text="Keep changes compatible.")]),
             ]
         )
     before = loop.budget.tokens_used
-    await loop._ensure_context_fits("system", [], prompt_tokens=loop.assembler.context_window)
+    await loop._ensure_context_fits("system", [], prompt_tokens=loop.assembler.context_window)  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     assert loop.budget.tokens_used > before
     assert loop.budget.turns_used == 1
-    assert loop._conversation[0].content[0].text == "Never edit legacy/"
+    assert loop._conversation[0].content[0].text == "Never edit legacy/"  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     assert all(
         any(block.text == "Keep changes compatible." for block in message.content)
-        for message in loop._conversation[1:-3]
+        for message in loop._conversation[1:-3]  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     )
-    assert "Remaining work" in loop._compacted_summary
+    assert "Remaining work" in loop._compacted_summary  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
 
 async def test_sarvam_sdk_uses_v2_subscription_key_and_full_reasoning():
@@ -418,11 +428,11 @@ async def test_sarvam_sdk_uses_v2_subscription_key_and_full_reasoning():
         )
 
     provider = SarvamProvider(model="glm5.3", api_key="test-only-key")
-    client = provider._get_client()
+    client = provider._get_client()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     await client.close()
-    provider._client = openai.AsyncOpenAI(
+    provider._client = openai.AsyncOpenAI(  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         api_key="test-only-key",
-        base_url=provider._base_url,
+        base_url=provider._base_url,  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         default_headers={"api-subscription-key": "test-only-key"},
         max_retries=0,
         http_client=httpx.AsyncClient(transport=httpx.MockTransport(server)),
@@ -540,7 +550,7 @@ def test_oversized_observation_retains_retrievable_body(tmp_path):
 
     host = make_host(tmp_path)
     body = "λ" * 50_000 + "\nimportant tail"
-    rendered = host._bound_observation("mcp__large", body, 4096)
+    rendered = host._bound_observation("mcp__large", body, 4096)  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     assert len(rendered.encode("utf-8")) <= 4096
     assert "Full result: expand(" in rendered
     ref = rendered.split("expand(", 1)[1].split(",", 1)[0]
@@ -568,14 +578,14 @@ async def test_stdio_eof_fails_pending_requests_immediately():
     from kalash.mcp.client import MCPClient, MCPConnectionError, MCPServerConfig
 
     client = MCPClient(MCPServerConfig(name="dead"))
-    client._connected = True
-    client._stdout = asyncio.StreamReader()
-    client._stdout.feed_eof()
+    client._connected = True  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+    client._stdout = asyncio.StreamReader()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+    client._stdout.feed_eof()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     future = asyncio.get_running_loop().create_future()
-    client._pending[1] = future
-    await client._read_loop()
+    client._pending[1] = future  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+    await client._read_loop()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     assert not client.is_connected
-    assert not client._pending
+    assert not client._pending  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     try:
         await future
     except MCPConnectionError:
@@ -590,20 +600,20 @@ async def test_legacy_sse_waits_for_endpoint_then_initializes(monkeypatch):
     client = MCPClient(
         MCPServerConfig(name="legacy", transport=TransportType.SSE, url="https://example.com/sse")
     )
-    http = NS(aclose=AsyncMock())
-    monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: http)
+    http = Namespace(aclose=AsyncMock())
+    monkeypatch.setattr("httpx.AsyncClient", lambda **kwargs: http)  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
 
     async def read():
-        client._post_endpoint = "https://example.com/messages"
-        client._endpoint_ready.set()
+        client._post_endpoint = "https://example.com/messages"  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+        client._endpoint_ready.set()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
-    client._sse_read_loop = read
-    client._send_request = AsyncMock(return_value={"protocolVersion": "2024-11-05"})
-    client._send_notification = AsyncMock()
-    await client._connect_sse()
-    assert client._send_request.call_args.args[0] == "initialize"
-    assert client._post_endpoint.endswith("/messages")
-    client._send_notification.assert_awaited_once_with("notifications/initialized", {})
+    client._sse_read_loop = read  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+    client._send_request = AsyncMock(return_value={"protocolVersion": "2024-11-05"})  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+    client._send_notification = AsyncMock()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+    await client._connect_sse()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+    assert client._send_request.call_args.args[0] == "initialize"  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+    assert client._post_endpoint.endswith("/messages")  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+    client._send_notification.assert_awaited_once_with("notifications/initialized", {})  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     await client.disconnect()
 
 
@@ -617,7 +627,7 @@ async def test_300_step_run_compacts_without_losing_constraints_or_tool_pairs(tm
             self.steps = 0
             self.summaries = 0
 
-        async def stream(self, messages, *, system=None, tools=None, **kwargs):
+        async def stream(self, messages, *, system=None, tools=None, **kwargs):  # noqa: ARG002 - Preserve provider/tool callback signature.
             if tools is None:
                 self.summaries += 1
                 events = text_turn("## Goal\nInspect observations.\n## Remaining work\nContinue.")
@@ -658,7 +668,9 @@ async def test_300_step_run_compacts_without_losing_constraints_or_tool_pairs(tm
     assert result.termination_reason is TerminationReason.NO_TOOL_CALLS
     assert gateway.steps == 300
     assert gateway.summaries > 1
-    assert len(loop._conversation) < 50
+    # Free observation reduction can retain more small exchanges than semantic
+    # compaction did. Qualify occupancy rather than an arbitrary message count.
+    assert loop.assembler.total_tokens_used + loop.max_output_tokens + 256 <= 32_000
 
 
 async def test_hook_drains_large_stdout_and_stderr_with_bounded_retention():
@@ -672,8 +684,8 @@ async def test_hook_drains_large_stdout_and_stderr_with_bounded_retention():
     command = shlex.join(
         [sys.executable, "-c", "import sys; print('x'*200000); sys.stderr.write('y'*200000)"]
     )
-    runner = HookRunner(engine=NS())
-    result = await runner._execute_command(
+    runner = HookRunner(engine=Namespace())
+    result = await runner._execute_command(  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         HookConfig(command=command, timeout_s=5),
         HookPayload(event=HookEvent.SESSION_START),
         time.time(),

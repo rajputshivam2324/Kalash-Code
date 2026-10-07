@@ -64,7 +64,7 @@ def _is_allowed(name: str) -> bool:
     return name.startswith(("watch_", "action_", "on_", "key_"))
 
 
-@pytest.mark.parametrize("class_name,cls", list(_widget_classes()))
+@pytest.mark.parametrize(("class_name", "cls"), list(_widget_classes()))
 def test_no_framework_method_shadowing(class_name: str, cls: type) -> None:
     collisions = sorted(
         name for name in _own_callables(cls) if name in FRAMEWORK_NAMES and not _is_allowed(name)
@@ -170,7 +170,7 @@ def test_app_guard_detects_a_real_collision() -> None:
             return "unreachable"
 
     instance = Offender()
-    assert not callable(instance._current_mode)
+    assert not callable(instance._current_mode)  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
     assert "_current_mode" in _textual_app_instance_attrs()
 
 
@@ -212,8 +212,8 @@ def _framework_surface() -> frozenset[str]:
     names.update(BareApp().__dict__)
     try:
         names.update(Static("x").__dict__)
-    except Exception:  # pragma: no cover - defensive
-        pass
+    except Exception as error:  # pragma: no cover - defensive
+        raise AssertionError("Widget contract fixture could not be inspected") from error
     return frozenset(names)
 
 
@@ -290,7 +290,7 @@ def _init_assigned_names(cls: type) -> set[str]:
     return set(re.findall(r"self\.(_?[A-Za-z_][A-Za-z0-9_]*)\s*=", source))
 
 
-@pytest.mark.parametrize("label,cls", list(_kalash_tui_classes()))
+@pytest.mark.parametrize(("label", "cls"), list(_kalash_tui_classes()))
 def test_no_framework_name_is_shadowed(label: str, cls: type) -> None:
     surface = _framework_surface()
     candidates = (_declared_names(cls) | _init_assigned_names(cls)) - ALLOWED_EXACT

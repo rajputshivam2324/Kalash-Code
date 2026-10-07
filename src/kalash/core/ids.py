@@ -56,9 +56,9 @@ def timestamp_from_id(ulid: str) -> float:
         raw = ulid.split("_", 1)[1]
 
     # Decode first 10 chars (timestamp portion)
-    _DECODING = {c: i for i, c in enumerate(_ENCODING)}
+    decoding = {c: i for i, c in enumerate(_ENCODING)}
     val = 0
     for ch in raw[:10]:
-        val = (val << 5) | _DECODING[ch.upper()]
+        val = (val << 5) | decoding[ch.upper()]
 
     return val / 1000.0

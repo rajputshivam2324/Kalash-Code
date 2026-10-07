@@ -82,15 +82,15 @@ class TestThemePaintsTheScreen:
         app = KalashApp()
         async with app.run_test(size=(80, 24)) as pilot:
             await pilot.pause()
-            app._theme.set_preset("light")
-            app._apply_theme()
+            app._theme.set_preset("light")  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+            app._apply_theme()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
             await pilot.pause()
             bg = app.screen.styles.background
             assert bg.rgb[0] > 200
             assert app.theme == f"{KALASH_THEME_PREFIX}Light"
 
-            app._theme.set_preset("dark")
-            app._apply_theme()
+            app._theme.set_preset("dark")  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+            app._apply_theme()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
             await pilot.pause()
             bg = app.screen.styles.background
             assert bg.rgb[0] < 40

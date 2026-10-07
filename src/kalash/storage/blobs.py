@@ -7,9 +7,12 @@ Verified on read (I-025).
 from __future__ import annotations
 
 import hashlib
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kalash.core.paths import blobs_dir
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 # Threshold for externalizing to blob store
 BLOB_THRESHOLD = 64 * 1024  # 64 KiB
@@ -49,7 +52,7 @@ def store_blob(data: bytes) -> str:
     return digest
 
 
-def read_blob(digest: str) -> bytes:
+def read_blob(digest: str, *, max_bytes: int | None = None) -> bytes:
     """Read a blob by digest, verifying integrity (I-025)."""
     path = blob_path(digest)
 
@@ -57,7 +60,13 @@ def read_blob(digest: str) -> bytes:
         msg = f"Blob not found: {digest}"
         raise FileNotFoundError(msg)
 
-    data = path.read_bytes()
+    if max_bytes is None:
+        data = path.read_bytes()
+    else:
+        with path.open("rb") as stream:
+            data = stream.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise ValueError("Blob exceeds the caller's read limit")
 
     # Verify integrity
     actual_digest = compute_digest(data)

@@ -199,6 +199,17 @@ class BlockDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class BlockMetadata:
+    """Identity/signature fragments that arrive after a block starts."""
+
+    index: int
+    tool_use_id: str | None = None
+    tool_name: str | None = None
+    signature: str | None = None
+    type: str = field(default="block_metadata", init=False)
+
+
+@dataclass(frozen=True, slots=True)
 class BlockStop:
     """A content block finished."""
 
@@ -208,7 +219,7 @@ class BlockStop:
 
 @dataclass(frozen=True, slots=True)
 class UsageUpdate:
-    """Incremental usage information during streaming."""
+    """Cumulative per-counter usage; absent counters retain earlier observations."""
 
     input_tokens: int = 0
     output_tokens: int = 0
@@ -216,6 +227,21 @@ class UsageUpdate:
     cache_write_tokens: int = 0
     reasoning_tokens: int = 0
     type: str = field(default="usage_update", init=False)
+
+    def merge(self, update: UsageUpdate) -> UsageUpdate:
+        """Keep observed high-water marks, including partial or repeated reports."""
+        counters = (
+            "input_tokens",
+            "output_tokens",
+            "cache_read_tokens",
+            "cache_write_tokens",
+            "reasoning_tokens",
+        )
+        if any(getattr(update, name) < 0 for name in counters):
+            raise ValueError("Negative provider usage")
+        return UsageUpdate(
+            **{name: max(getattr(self, name), getattr(update, name)) for name in counters}
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,7 +264,14 @@ class StreamError:
 
 # Union of all stream event types
 StreamEvent = (
-    MessageStart | BlockStart | BlockDelta | BlockStop | UsageUpdate | MessageStop | StreamError
+    MessageStart
+    | BlockStart
+    | BlockDelta
+    | BlockMetadata
+    | BlockStop
+    | UsageUpdate
+    | MessageStop
+    | StreamError
 )
 
 

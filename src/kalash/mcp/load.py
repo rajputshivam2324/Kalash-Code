@@ -3,12 +3,16 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from kalash.mcp.manager import MCPManager
 from kalash.mcp.registry import MCPRegistry
 from kalash.mcp.tools import MCPToolAdapter
-from kalash.tools.registry import ToolRegistry
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from kalash.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -36,11 +40,12 @@ async def wire_mcp_tools(
             project_config = mcp_registry.cwd / ".kalash" / "settings" / "mcp.json"
             if not is_trusted(project_config):
                 logger.warning(
-                    "Skipping untrusted project MCP configuration; run kalash mcp trust after reviewing it"
+                    "Skipping untrusted project MCP configuration; run kalash mcp "
+                    "trust after reviewing it"
                 )
                 continue
         try:
-            configs.append(mcp_registry._to_config(entry))
+            configs.append(mcp_registry._to_config(entry))  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         except (ValueError, TypeError) as exc:
             logger.warning("Skipping MCP server %s: %s", entry.name, exc)
     manager = MCPManager()

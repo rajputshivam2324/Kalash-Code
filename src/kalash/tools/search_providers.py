@@ -19,9 +19,11 @@ of them mark it — that is the caller's job, and it happens once in
 from __future__ import annotations
 
 import os
-from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Coroutine
 
 # Search APIs are interactive-path calls; a slow provider should fail rather
 # than hold the turn open.

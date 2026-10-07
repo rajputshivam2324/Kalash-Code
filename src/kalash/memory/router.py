@@ -10,7 +10,7 @@ from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from decimal import Decimal
 from enum import StrEnum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from kalash.core.ids import generate_id
 from kalash.memory.protocol import (
@@ -26,7 +26,9 @@ from kalash.memory.protocol import (
     Scope,
     WriteReceipt,
 )
-from kalash.memory.registry import MemoryRegistry
+
+if TYPE_CHECKING:
+    from kalash.memory.registry import MemoryRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -178,7 +180,8 @@ class MemoryRouter:
         else:
             results = await asyncio.gather(*(self._call(p, "recall", query) for p in providers))
             ranked = {
-                p.name: self._filter(hits or [], query) for p, hits in zip(providers, results)
+                p.name: self._filter(hits or [], query)
+                for p, hits in zip(providers, results, strict=False)
             }
         # A single provider's relevance score needs no fusion.
         hits = self._rrf_merge(ranked) if len(ranked) > 1 else next(iter(ranked.values()), [])

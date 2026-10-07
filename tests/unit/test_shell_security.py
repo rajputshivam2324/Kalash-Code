@@ -147,10 +147,13 @@ class TestClassifyCommand:
         # This is acceptable — the pattern matches word boundaries
         caps = _classify_command("echo the file is mounting slowly")
         # 'mounting' does NOT match \bmount\b because there's no word boundary between t and i
-        # Wait — actually \bmount\b WILL match 'mounting' because 'mount' has a word boundary before 'm' and after 't'
-        # Actually no — 'mounting' = m-o-u-n-t-i-n-g. \bmount\b matches at position 0-5 if we consider
+        # Wait — actually \bmount\b WILL match 'mounting' because 'mount' has a word boundary
+        # before 'm' and after 't'
+        # Actually no — 'mounting' = m-o-u-n-t-i-n-g. \bmount\b matches at position 0-5 if we
+        # consider
         # 'mount' as a substring with word char 'i' following, so \b fails after 't'.
-        # \b requires transition between word/non-word. 't' followed by 'i' = word-word = no boundary. ✓
+        # \b requires transition between word/non-word. 't' followed by 'i' = word-word = no
+        # boundary. ✓
         assert "shell.destructive" not in caps
 
     def test_safe_ls_command(self):
@@ -190,7 +193,7 @@ class TestDangerousPatterns:
     """Verify the pattern registry itself."""
 
     def test_all_patterns_have_capability(self):
-        for pattern, cap in _DANGEROUS_PATTERNS.items():
+        for _pattern, cap in _DANGEROUS_PATTERNS.items():
             assert isinstance(cap, str)
             assert "." in cap, f"Capability '{cap}' should be dotted (e.g. 'shell.destructive')"
 

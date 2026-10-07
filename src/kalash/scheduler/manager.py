@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from pathlib import Path
 
 from kalash.core.ids import generate_id
 from kalash.scheduler.cron import CronExpression
@@ -33,6 +34,7 @@ class LogEntry:
     success: bool
     duration_seconds: float
     session_id: str | None = None
+    status: str = "unknown"
 
 
 class SchedulerManager:
@@ -58,15 +60,13 @@ class SchedulerManager:
     ) -> ScheduleJob:
         job_id = generate_id("sch_")
         now = datetime.now(UTC)
-        try:
-            cron = CronExpression.parse(schedule)
-            next_run = cron.next_fire(now)
-        except Exception:
-            next_run = None
+        cron = CronExpression.parse(schedule)
+        next_run = cron.next_fire(now)
         self._engine.execute_write_sync(
             """INSERT INTO schedules
-               (id, name, spec, spec_kind, prompt, enabled, next_run_at, created_at, updated_at)
-               VALUES (?, ?, ?, 'cron', ?, 1, ?, ?, ?)""",
+               (id, name, spec, spec_kind, prompt, enabled, next_run_at, created_at,
+               updated_at, model, max_turns, project_dir)
+               VALUES (?, ?, ?, 'cron', ?, 1, ?, ?, ?, ?, ?, ?)""",
             (
                 job_id,
                 name,
@@ -75,6 +75,9 @@ class SchedulerManager:
                 next_run.isoformat() if next_run else None,
                 now.isoformat(),
                 now.isoformat(),
+                model,
+                max_turns,
+                str(Path.cwd()),
             ),
         )
         return ScheduleJob(
@@ -134,10 +137,18 @@ class SchedulerManager:
         )
 
     def delete(self, job_id: str) -> bool:
-        self._engine.execute_write_sync(
-            "DELETE FROM schedules WHERE id = ? OR id LIKE ?",
-            (job_id, f"{job_id}%"),
-        )
+        job = self.get(job_id)
+        if job is None:
+            return False
+        with self._engine.write_sync() as connection:
+            active = connection.execute(
+                "SELECT 1 FROM schedule_runs WHERE schedule_id=? AND status='running'", (job.id,)
+            ).fetchone()
+            if active is not None:
+                raise ValueError("Disable the schedule and stop its active run before deleting")
+            for table in ("schedule_runs", "schedule_leases"):
+                connection.execute(f"DELETE FROM {table} WHERE schedule_id=?", (job.id,))  # noqa: S608 - Only fixed SQL identifiers/predicates; values are bound parameters.
+            connection.execute("DELETE FROM schedules WHERE id=?", (job.id,))
         return True
 
     def set_enabled(self, job_id: str, *, enabled: bool) -> bool:
@@ -151,12 +162,18 @@ class SchedulerManager:
         job = self.get(job_id)
         if job is None:
             return None
-        session_id = generate_id("ses_")
+        row = self._engine.execute_read("SELECT project_dir FROM schedules WHERE id=?", (job.id,))[
+            0
+        ]
+        from kalash.runtime.session import SessionManager
+
+        session_id = SessionManager().create(row["project_dir"] or str(Path.cwd())).id
         now = datetime.now(UTC).isoformat()
         self._engine.execute_write_sync(
-            """INSERT INTO schedule_runs (id, schedule_id, status, started_at, trigger_source)
-               VALUES (?, ?, 'running', ?, 'manual')""",
-            (generate_id("sr_"), job.id, now),
+            """INSERT INTO schedule_runs (id, schedule_id, status, started_at,
+            trigger_source, session_id)
+               VALUES (?, ?, 'pending', ?, 'manual', ?)""",
+            (generate_id("sr_"), job.id, now, session_id),
         )
         return TriggerResult(session_id=session_id)
 
@@ -192,6 +209,8 @@ class SchedulerManager:
                     job_name=str(data.get("job_name", "unknown")),
                     success=data.get("status") == "succeeded",
                     duration_seconds=duration,
+                    session_id=data.get("session_id"),
+                    status=str(data.get("status", "unknown")),
                 )
             )
         return entries

@@ -30,7 +30,7 @@ class FakeProvider:
         self.turns = list(turns)
         self.requests = []
 
-    async def stream(self, messages, *, system=None, tools=None, **kwargs):
+    async def stream(self, messages, *, system=None, tools=None, **kwargs):  # noqa: ARG002 - Preserve provider/tool callback signature.
         self.requests.append({"system": system, "tools": tools})
         events = self.turns.pop(0) if self.turns else [MessageStop(StopReason.END_TURN)]
         for event in events:
@@ -81,7 +81,8 @@ def workspace(tmp_path, monkeypatch):
 def install_provider(monkeypatch, turns):
     provider = FakeProvider(turns)
     monkeypatch.setattr(
-        "kalash.models.resolve.build_provider", lambda *a, **k: FakeResolution(provider)
+        "kalash.models.resolve.build_provider",
+        lambda *a, **k: FakeResolution(provider),  # noqa: ARG005 - Fixture accepts the callback protocol's arguments.
     )
     return provider
 
@@ -97,7 +98,7 @@ class TestSubagents:
 
         outcome = await run_isolated("investigate something", cwd=workspace)
 
-        assert outcome["status"] == "completed"
+        assert outcome["status"] == "stopped_unverified"
         assert outcome["output"] == "the answer is 42"
         assert outcome["turns"] == 1
 
@@ -130,7 +131,7 @@ class TestSubagents:
 
         assert env.ok
         assert "child findings here" in env.content
-        assert env.metadata["status"] == "completed"
+        assert env.metadata["status"] == "stopped_unverified"
 
     @pytest.mark.asyncio
     async def test_spawn_depth_is_enforced(self, workspace, monkeypatch):
@@ -228,7 +229,8 @@ class TestSkills:
         env = await SkillTool().execute(SkillParams(), ctx)
 
         assert env.ok
-        assert "alpha" in env.content and "beta" in env.content
+        assert "alpha" in env.content
+        assert "beta" in env.content
         assert env.metadata["count"] == 14
 
     @pytest.mark.asyncio
@@ -420,7 +422,7 @@ class TestHooks:
         from kalash.tools.builtins import default_registry
 
         class BlockingRunner:
-            async def dispatch(self, payload, *, chain_id=None):
+            async def dispatch(self, payload, *, chain_id=None):  # noqa: ARG002 - Preserve provider/tool callback signature.
                 if payload.event is HookEvent.PRE_TOOL_USE:
                     return [
                         HookResult(
@@ -450,21 +452,28 @@ class TestHooks:
 
     @pytest.mark.asyncio
     async def test_post_tool_hook_failure_does_not_break_the_turn(self, workspace):
-        from kalash.core.events import EventBus
+        from kalash.core.events import EventBus, EventType
         from kalash.runtime.toolhost import ToolHost
         from kalash.tools.builtins import default_registry
 
         class ExplodingRunner:
-            async def dispatch(self, payload, *, chain_id=None):
+            async def dispatch(self, payload, *, chain_id=None):  # noqa: ARG002 - Preserve provider/tool callback signature.
                 from kalash.hooks.events import HookEvent
 
                 if payload.event is HookEvent.POST_TOOL_USE:
                     raise RuntimeError("hook blew up")
                 return []
 
+        bus = EventBus()
+        events = []
+
+        async def record(event):
+            events.append(event)
+
+        bus.on(EventType.HOOK_RUN, record)
         host = ToolHost(
             registry=default_registry(),
-            event_bus=EventBus(),
+            event_bus=bus,
             session_id="s",
             cwd=workspace,
             hooks=ExplodingRunner(),
@@ -474,6 +483,9 @@ class TestHooks:
 
         assert target.exists(), "a PostToolUse failure must not undo the work"
         assert "REFUSED" not in out
+        assert events[0].data["phase"] == "PostToolUse"
+        assert events[0].data["tool_ok"] is True
+        assert events[0].data["status"] == "failed"
 
 
 # --- regressions the eval suite caught -------------------------------------
@@ -587,7 +599,7 @@ class TestSandboxCorrectness:
         from kalash.sandbox.policy import SandboxMode, SandboxPolicy
 
         # tmp_path is under /tmp on Linux, which is the case that regressed.
-        assert str(tmp_path).startswith("/tmp")
+        assert str(tmp_path).startswith("/tmp")  # noqa: S108 - Virtual sandbox path or synthetic path; no host temporary file creation.
         policy = SandboxPolicy(mode=SandboxMode.WORKSPACE_WRITE, workspace_root=tmp_path)
         argv = LinuxSandbox(policy=policy).wrap_command(
             ["/bin/bash", "-c", "true"], cwd=str(tmp_path)

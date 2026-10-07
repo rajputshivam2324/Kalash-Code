@@ -116,10 +116,13 @@ class ToolCancelledError(ToolError):
 # --- Permission errors ---
 
 
-class PermissionError_(KalashError):
+class KalashPermissionError(KalashError):
     """Permission-related errors."""
 
     code = "KALASH_PERMISSION_DENIED"
+
+
+PermissionError_ = KalashPermissionError  # Backwards-compatible public import.
 
 
 class ApprovalRequiredError(PermissionError_):
@@ -170,10 +173,13 @@ class SandboxUnavailableError(SandboxError):
 # --- Memory errors ---
 
 
-class MemoryError_(KalashError):
+class KalashMemoryError(KalashError):
     """Memory-related errors."""
 
     code = "KALASH_MEMORY_ERROR"
+
+
+MemoryError_ = KalashMemoryError  # Backwards-compatible public import.
 
 
 class UnsupportedCapabilityError(MemoryError_):

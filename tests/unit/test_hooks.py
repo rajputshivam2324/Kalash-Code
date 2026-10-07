@@ -80,7 +80,7 @@ class TestHookEvents:
     def test_file_edit_payload(self):
         p = FileEditPayload(
             event=HookEvent.PRE_FILE_EDIT,
-            path="/tmp/test.py",
+            path="/tmp/test.py",  # noqa: S108 - Virtual sandbox path or synthetic path; no host temporary file creation.
             operation="create",
             content_preview="import os",
         )
@@ -189,7 +189,7 @@ class TestHookRunnerImport:
         runner = HookRunner(engine=MagicMock())
         # Artificially exceed depth
         chain_id = "test_chain"
-        runner._chain_depth[chain_id] = runner.MAX_CHAIN_DEPTH + 1
+        runner._chain_depth[chain_id] = runner.MAX_CHAIN_DEPTH + 1  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
         payload = HookPayload(event=HookEvent.SESSION_START)
         results = await runner.dispatch(payload, chain_id=chain_id)
         assert results == []
@@ -205,8 +205,8 @@ class TestHookRunnerImport:
             handler_type=HandlerType.COMMAND,
         )
         runner.register(config)
-        assert HookEvent.SESSION_START in runner._hooks
-        assert len(runner._hooks[HookEvent.SESSION_START]) == 1
+        assert HookEvent.SESSION_START in runner._hooks  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
+        assert len(runner._hooks[HookEvent.SESSION_START]) == 1  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
     def test_register_python_handler(self):
         from kalash.hooks.runner import HookRunner
@@ -217,7 +217,7 @@ class TestHookRunnerImport:
             pass
 
         runner.register_python("test", HookEvent.PRE_TOOL_USE, my_handler)
-        assert HookEvent.PRE_TOOL_USE in runner._hooks
+        assert HookEvent.PRE_TOOL_USE in runner._hooks  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
 
 
 async def test_runtime_hooks_require_pinned_source_and_recheck_changes(tmp_path):

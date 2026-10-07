@@ -3,8 +3,33 @@
 ## Session Continuity
 
 Before continuing harness work, read [NEXT_SESSION.md](NEXT_SESSION.md) for the
-completed refactor, verified results, remaining priorities and benchmark pause.
+current baseline, measured failures, completed fixes and next reliability priorities.
 Check the current working tree before relying on its recorded baseline.
+
+## Harness Reliability Priority
+
+- The user's current objective is a reliable harness. Real-model reliability
+  remains unproved; passing unit tests and packaged skills do not establish it.
+- Read the handoff and measured eval reports before changing the runtime.
+  Preserve existing work, failed runs and the user's commits. Diagnose one
+  demonstrated failure at a time and add a regression before claiming it fixed.
+- Prioritize provider/tool-call completion, actionable errors, accurate budget
+  accounting, safe read-to-write workflows, verified completion and recovery.
+  Keep improvements in the relevant runtime/provider/tool modules.
+- Distinguish model failure, provider failure, controller refusal, grader defect
+  and infrastructure failure. A budget-stopped partial artifact is not a complete
+  build; a scripted reference pass is not a real-model success.
+- Preserve permissions, OS sandboxing, stale-write checks and secret handling.
+  Never bypass them, ignore usage, reset a shared ledger or weaken a grader to
+  manufacture a passing score. Fix flawed checks transparently and preserve revisions.
+- Work is deferred to the next session. Start with local reproduction and fixes;
+  live benchmarks are paused until the user requests another live evaluation.
+  Then establish its budget and scope from the user's instructions; do not infer
+  fresh spending authority merely from an old successful provider probe.
+- Judge produced artifacts using independent checks and evidence. Report actual
+  outcomes, limitations and failures; make comparative claims only after matched trials.
+- Update NEXT_SESSION.md with changes, verification and remaining work before
+  handing off. Do not commit or push unless the user requests those Git actions.
 
 ## Project Structure & Module Organization
 

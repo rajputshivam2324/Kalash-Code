@@ -239,7 +239,7 @@ def _analyze_segment(segment: str) -> CommandRisk:
     return result
 
 
-def _classify_argv(  # noqa: PLR0911 - a flat rule table reads better than nesting
+def _classify_argv(
     argv0: str,
     rest: list[str],
     flags: set[str],

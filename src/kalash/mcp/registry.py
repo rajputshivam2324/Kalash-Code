@@ -232,7 +232,7 @@ class MCPRegistry:
 
         return asyncio.run(probe())
 
-    def oauth_flow(self, name: str) -> OAuthResult:
+    def oauth_flow(self, name: str) -> OAuthResult:  # noqa: ARG002 - Preserve provider/tool callback signature.
         return OAuthResult(
             success=False,
             error="OAuth flow not yet implemented — use `kalash mcp auth --flow token`",

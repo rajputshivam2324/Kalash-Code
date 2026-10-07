@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import os
+import re as _re
 import signal
 import sys
 from pathlib import Path
@@ -96,7 +97,6 @@ _DANGEROUS_PATTERNS = {
 
 # P-2: Pre-compile word-boundary regex for single-word patterns at module load
 # so _classify_command doesn't recompile on every call.
-import re as _re
 
 _COMPILED_PATTERNS: list[tuple[_re.Pattern[str], str]] = []
 _MULTI_WORD_PATTERNS: list[tuple[str, str]] = []
@@ -287,7 +287,10 @@ class ShellTool:
                     return ToolEnvelope.fail(
                         code="KALASH_SANDBOX_UNAVAILABLE",
                         message=sandbox_warning or "No enforced sandbox is available",
-                        remediation="Install a working sandbox backend, or explicitly use danger-full-access for trusted work.",
+                        remediation=(
+                            "Install a working sandbox backend, or explicitly use "
+                            "danger-full-access for trusted work."
+                        ),
                     )
                 process = await asyncio.create_subprocess_exec(*argv, **kwargs)
 
@@ -305,8 +308,11 @@ class ShellTool:
                 return ToolEnvelope.success(
                     content=(
                         f"Background process started (PID: {process.pid}). "
-                        "Background output is discarded; redirect to a workspace log file if needed. "
-                        "background jobs stop when the session is interrupted."
+                        + (
+                            "Background output is discarded; redirect to a workspace log file "
+                            "if needed. "
+                        )
+                        + "background jobs stop when the session is interrupted."
                     ),
                     metadata=meta,
                     side_effects=(SideEffectRecord(kind="executed", path=args.command),),
@@ -320,7 +326,7 @@ class ShellTool:
                     stdout_truncated,
                     stderr_truncated,
                 ) = await _run_with_timeout(process, ctx=ctx, timeout=args.timeout)
-            except _ShellCancelled:
+            except _ShellCancelledError:
                 return ToolEnvelope.fail(
                     code="KALASH_CANCELLED",
                     message=f"Command cancelled: {args.command}",
@@ -397,7 +403,7 @@ class ShellTool:
         )
 
 
-class _ShellCancelled(Exception):
+class _ShellCancelledError(Exception):
     """Raised when a shell command is aborted via cancel_event."""
 
 
@@ -444,6 +450,9 @@ async def _collect_stream(
     if reader is None:
         return b"", False
     chunks: list[bytes] = []
+    from kalash.core.privacy import StreamRedactor
+
+    redactor = StreamRedactor()
     total = 0
     truncated = False
     while True:
@@ -459,9 +468,12 @@ async def _collect_stream(
         total += len(data)
         if total <= limit:
             chunks.append(data)
-            await _emit_stream_chunk(ctx, stream, data.decode("utf-8", errors="replace"))
+            await _emit_stream_chunk(
+                ctx, stream, redactor.feed(data.decode("utf-8", errors="replace"))
+            )
         else:
             truncated = True
+    await _emit_stream_chunk(ctx, stream, redactor.feed("", final=True))
     return b"".join(chunks), truncated
 
 
@@ -483,7 +495,7 @@ async def _run_with_timeout(
         while process.returncode is None:
             if ctx.cancel_event is not None and ctx.cancel_event.is_set():
                 await _terminate_process(process)
-                raise _ShellCancelled
+                raise _ShellCancelledError
             remaining = deadline - asyncio.get_running_loop().time()
             if remaining <= 0:
                 await _terminate_process(process)
@@ -492,7 +504,7 @@ async def _run_with_timeout(
                 await asyncio.wait_for(process.wait(), timeout=min(0.2, remaining))
             except TimeoutError:
                 continue
-    except (TimeoutError, _ShellCancelled, asyncio.CancelledError):
+    except (TimeoutError, _ShellCancelledError, asyncio.CancelledError):
         await _terminate_process(process)
         stdout_task.cancel()
         stderr_task.cancel()
