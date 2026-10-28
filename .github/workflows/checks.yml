@@ -1,4 +1,4 @@
-name: Runtime checks
+name: Checks
 
 on:
   pull_request:
@@ -14,20 +14,22 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-      - run: python -m pip install uv
-      - run: uv sync --frozen --all-extras
-      - name: All configured lint rules
-        run: uv run ruff check src tests evals
-      - run: uv run ruff format --check src tests evals
+      - uses: astral-sh/setup-uv@v5
+      - name: System packages (sandbox + fast search)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap ripgrep
+          # Ubuntu 24.04 restricts unprivileged user namespaces, which bubblewrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+      - run: uv sync --frozen --extra dev --python ${{ matrix.python }}
+      - name: Sandbox is usable (the sandbox tests must run, not skip)
+        run: uv run kalash doctor | tee /dev/stderr | grep -q '\[ok  \] sandbox'
+      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src tests
       - run: uv run mypy src
       - run: uv run pytest -q
       - run: uv build
-      - name: Install and smoke-test base wheel outside source tree
+      - name: Installed-wheel smoke test (outside the source tree)
         run: |
-          uv venv /tmp/kalash-wheel --python '${{ matrix.python }}'
-          uv pip install --python /tmp/kalash-wheel/bin/python dist/*.whl
-          cd /tmp
-          env -u PYTHONPATH /tmp/kalash-wheel/bin/python "$GITHUB_WORKSPACE/evals/wheel_smoke.py"
+          export KALASH_WHEEL="$(ls $PWD/dist/*.whl)"
+          uv run pytest tests/process/test_wheel.py -q

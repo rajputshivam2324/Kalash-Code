@@ -1,1 +1,0 @@
-"""Kalash Code test suite."""

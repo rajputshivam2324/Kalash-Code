@@ -1,1268 +1,1572 @@
-"""Kalash TUI.
+"""Interactive terminal UI.
 
-Layout is a scrolling transcript with a pinned footer. The footer holds the
-selection picker (when open), the prompt, a status line, and key hints. The
-welcome banner is the first item in the transcript and is removed once the
-conversation starts, so it scrolls away naturally instead of the app swapping
-between two competing full-screen views.
+Rules that keep it from crashing mid-run (each one was a real bug):
+
+* Widgets are held by reference, never queried through the active screen (an approval dialog
+  replaces it).
+* Never reuse a Textual attribute name; ``tests/tui`` checks this against a bare ``App``.
+* Commands that open modals run as tasks. Awaiting a modal inside a message handler would block
+  that widget's message pump, so the modal could never receive a key.
+* Streaming text goes through Textual's ``MarkdownStream``; the agent turn is an ordinary task
+  that cancellation can always reach.
 """
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
+import shlex
+import subprocess
 import time
-from datetime import UTC
-from enum import StrEnum
-from typing import TYPE_CHECKING, Any
+from collections.abc import Coroutine
+from pathlib import Path
+from typing import Any
 
-import rich.default_styles
-from rich.style import Style
-from textual import events, on, work
+from rich.console import Group
+from rich.table import Table
+from rich.text import Text
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import Container, Vertical
-from textual.css.query import NoMatches
-from textual.reactive import reactive
-from textual.screen import ModalScreen
-from textual.theme import ThemeProvider
-from textual.widgets import Input, Static
-from textual.worker import Worker, WorkerState
+from textual.containers import VerticalScroll
+from textual.widgets import Static, TextArea
 
-from kalash.tui.formatting import summarize_tool_call
-from kalash.tui.messages import (
+from kalash import __version__, commands, gitinfo, history
+from kalash.agent import context as ctxmod
+from kalash.agent import effort as effort_mod
+from kalash.agent.build import Runtime, create_runtime
+from kalash.agent.context_blocks import instruction_files
+from kalash.agent.events import (
+    AgentEvent,
+    Compacted,
+    ContextUpdate,
+    ModeChanged,
+    Notice,
+    ReasoningChunk,
+    Retry,
+    TextChunk,
+    ToolDone,
+    ToolOutput,
+    ToolPending,
+    ToolRunning,
+    TurnEnd,
+    TurnResult,
+    TurnStart,
+)
+from kalash.config import ConfigError, Settings, settings_path, update_setting
+from kalash.credentials import CredentialError, save_credential, set_selected_model
+from kalash.llm.http import Adapter
+from kalash.llm.providers import (
+    ProviderError,
+    ProviderSpec,
+    all_specs,
+    catalog_for,
+    has_credential,
+    model_problem,
+    parse_model,
+)
+from kalash.modes import MODES, next_mode, resolve_mode
+from kalash.paths import project_root
+from kalash.permissions import Answer, ApprovalRequest
+from kalash.session.log import SessionError, SessionLog, find_session, list_sessions
+from kalash.skills import Skill, discover_skills
+from kalash.tui import theme as themes
+from kalash.tui.describe import mcp_server_of
+from kalash.tui.screens import (
+    ApprovalScreen,
+    ConfirmScreen,
+    HelpScreen,
+    KeyScreen,
+    PickerScreen,
+    PlanScreen,
+    TextScreen,
+)
+from kalash.tui.slash import SlashCommand, builtin_commands, grouped, match_commands
+from kalash.tui.widgets import (
+    GROUPABLE,
+    ActivityBar,
     AssistantMessage,
-    SubagentLine,
-    SystemMessage,
-    ToolCallLine,
+    ErrorCard,
+    ExploreGroup,
+    NoticeRow,
+    PromptArea,
+    ReasoningRow,
+    StatusBar,
+    StatusData,
+    Suggestion,
+    Suggestions,
+    ToolBlock,
+    ToolData,
+    Transcript,
+    TurnFooter,
     UserMessage,
     WelcomeBanner,
 )
-from kalash.tui.picker import Picker, PickerItem, PickerMode
-from kalash.tui.theme import APP_CSS, KalashTheme, register_kalash_themes
-from kalash.tui.transcript import Transcript
 
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from textual.widget import Widget
-
-    from kalash.models.normalize import Message
-    from kalash.runtime.agent import Agent
+INIT_PROMPT = (
+    "Analyze this codebase and create an AGENTS.md at the repository root that tells a coding "
+    "agent how to work here: the project layout, the exact build, test and lint commands, code "
+    "style conventions, and anything surprising. Read the real files and configs first; do not "
+    "guess commands. Keep it under 80 lines. If an AGENTS.md already exists, improve it "
+    "instead of replacing it."
+)
+SKIP_DIRS = {".git", "node_modules", "__pycache__", ".venv", "venv", "dist", "build", ".mypy_cache"}
 
 
-# Force transparent backgrounds for inline code by stripping the background from default styles
-rich.default_styles.DEFAULT_STYLES["markdown.code_inline"] = Style.parse("bold cyan")
+def _tokens(count: int) -> str:
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    return f"{count / 1000:.1f}k" if count >= 1000 else str(count)
 
 
-# How often the elapsed counter on a running tool call refreshes.
-TOOL_TICK_SECONDS = 0.1
+def _provider_status(spec: ProviderSpec) -> str:
+    """One line for the provider picker: where the key comes from, or what is missing."""
+    if not spec.requires_key:
+        return f"{spec.name}  no key needed"
+    env = next((name for name in spec.env_keys if os.environ.get(name)), None)
+    if env:
+        return f"{spec.name}  ✓ key from {env}"
+    if has_credential(spec):
+        return f"{spec.name}  ✓ key stored"
+    return f"{spec.name}  needs {spec.env_keys[0] if spec.env_keys else 'a key'}"
 
 
-SLASH_COMMANDS: list[tuple[str, str]] = [
-    ("/connect", "Connect or switch AI model provider"),
-    ("/key", "Update API key for the current provider"),
-    ("/models", "Switch active model"),
-    ("/mode", "Toggle build/plan mode (tab)"),
-    ("/plan", "View current task plan and progress"),
-    ("/cost", "Show token usage and session cost"),
-    ("/sessions", "List and resume previous sessions"),
-    ("/new", "Start a fresh session"),
-    ("/notes", "Show durable project notes"),
-    ("/tools", "List registered tools"),
-    ("/skills", "List active project skills"),
-    ("/mcp", "List connected MCP servers"),
-    ("/theme", "Switch UI theme (dark/light/high-contrast)"),
-    ("/status", "Show session diagnostics and status"),
-    ("/init", "Initialize .kalash/ and KALASH.md"),
-    ("/copy", "Copy text to clipboard (/copy reply|code|transcript)"),
-    ("/export", "Export transcript to file"),
-    ("/clear", "Clear the transcript"),
-    ("/help", "List available commands"),
-    ("/exit", "Exit Kalash Code"),
-]
+def _popup_description(command: SlashCommand, query: str) -> str:
+    """The popup's description, noting the alias that matched when the name itself did not."""
+    if query and not command.name.startswith(query):
+        alias = next((a for a in command.aliases if a.startswith(query)), None)
+        if alias is not None:
+            return f"{command.description}  (/{alias})"
+    return command.description
 
 
-class InputIntent(StrEnum):
-    """What the prompt is currently collecting."""
-
-    PROMPT = "prompt"
-    API_KEY = "api_key"
-    BASE_URL = "base_url"
-
-
-class Mode(StrEnum):
-    BUILD = "Build"
-    PLAN = "Plan"
-
-
-class KalashApp(App[None]):
-    """Kalash Code terminal interface."""
-
+class KalashApp(App[int]):
     TITLE = "Kalash"
-
-    ENABLE_COMMAND_PALETTE = True
-    COMMANDS = {ThemeProvider}
-
-    CSS = APP_CSS
-
+    CSS_PATH = "app.tcss"
+    ENABLE_COMMAND_PALETTE = False
     BINDINGS = [
-        Binding("ctrl+c", "interrupt", "Interrupt", show=False),
-        Binding("ctrl+d", "quit", "Quit", show=False),
-        Binding("tab", "toggle_mode", "Toggle mode", show=False, priority=True),
-        Binding("shift+tab", "toggle_mode", "Toggle mode", show=False, priority=True),
-        Binding("escape", "dismiss", "Dismiss", show=False, priority=True),
-        Binding("up", "history_or_picker(-1)", "Up", show=False, priority=True),
-        Binding("down", "history_or_picker(1)", "Down", show=False, priority=True),
-        Binding("pageup", "scroll_page_up", "Scroll up", show=False, priority=True),
-        Binding("pagedown", "scroll_page_down", "Scroll down", show=False, priority=True),
-        Binding("shift+pageup", "scroll_page_up", "Scroll up", show=False, priority=True),
-        Binding("shift+pagedown", "scroll_page_down", "Scroll down", show=False, priority=True),
-        Binding("shift+up", "scroll_line_up", "Scroll line up", show=False, priority=True),
-        Binding("shift+down", "scroll_line_down", "Scroll line down", show=False, priority=True),
-        Binding("ctrl+up", "scroll_line_up", "Scroll line up", show=False, priority=True),
-        Binding("ctrl+down", "scroll_line_down", "Scroll line down", show=False, priority=True),
-        Binding("home", "scroll_to_home", "Scroll top", show=False, priority=True),
-        Binding("end", "scroll_to_end", "Scroll bottom", show=False, priority=True),
-        Binding("ctrl+y", "copy_reply", "Copy last reply", show=False),
-        Binding("ctrl+k", "copy_code", "Copy code block", show=False),
-        Binding("ctrl+t", "copy_transcript", "Copy transcript", show=False),
-        Binding("ctrl+o", "toggle_output", "Expand output", show=False),
-        Binding("ctrl+b", "toggle_sidebar", "Toggle Context", show=False),
+        Binding("escape", "interrupt", "Cancel", show=False),
+        Binding("ctrl+c", "ctrl_c", "Cancel", show=False, priority=True),
+        Binding("ctrl+d", "quit_app", "Quit", show=False, priority=True),
+        Binding("shift+tab", "cycle_mode", "Mode", show=False, priority=True),
+        Binding("ctrl+t", "cycle_effort", "Effort", show=False, priority=True),
+        Binding("ctrl+o", "toggle_verbose", "Details", show=False, priority=True),
+        Binding("pageup", "page_up", show=False, priority=True),
+        Binding("pagedown", "page_down", show=False, priority=True),
+        Binding("ctrl+end", "follow", show=False, priority=True),
+        Binding("f1", "help", "Help", show=False, priority=True),
     ]
-
-    mode: reactive[str] = reactive(Mode.BUILD.value)
-    provider_id: reactive[str | None] = reactive(None)
-    model_id: reactive[str | None] = reactive(None)
-    busy: reactive[bool] = reactive(False)
 
     def __init__(
         self,
         *,
-        resume_session: str | None = None,
-        mode: str = "build",
+        cwd: Path,
+        settings: Settings,
+        model: str | None = None,
+        session_ref: str | None = None,
+        continue_latest: bool = False,
+        adapter: Adapter | None = None,
     ) -> None:
-        self._theme = KalashTheme.load()
         super().__init__()
-        register_kalash_themes(self, activate=self._theme.textual_name)
-        self.set_class(self._theme.high_contrast, "high-contrast")
-        self._resume_session = resume_session
-        self._intent = InputIntent.PROMPT
-        self._pending_provider: str | None = None
-        self._pending_base_url: str | None = None
-        self._history: list[str] = []
-        self._history_pos: int | None = None
-        self._banner_removed = False
-        self._follow_pending = False
-        self._transcript_view: Transcript | None = None
-        self._clear_confirmed = False
-        self._stream_worker: Worker[None] | None = None
-        self._resolution_error: str | None = None
-        self._agent: Agent | None = None
-        self._agent_signature: str = ""
-        self._active_tool: ToolCallLine | None = None
-        self._active_tools: dict[str, ToolCallLine] = {}
-        self._active_tool_started: dict[str, float] = {}
-        self._current_assistant: AssistantMessage | None = None
-        self._constraints_announced = False
-        self._model_profile: str = ""
-        self._context_fill: float = 0.0
-        self._react_step: int = 0
-        self._subagents: dict[str, SubagentLine] = {}
-        self._event_unsubscribe: Any = None
-        self._tool_event_bus: Any = None
-        self._restore_session()
-        if mode.strip().lower() == "plan":
-            self.mode = Mode.PLAN.value
+        self.cwd = cwd
+        self.settings = settings
+        self.model_arg = model
+        self.session_ref = session_ref
+        self.continue_latest = continue_latest
+        self._adapter = adapter
+        self.runtime: Runtime | None = None
+        self._turn: asyncio.Task[Any] | None = None
+        self._command_task: asyncio.Task[Any] | None = None
+        self._turn_active = False
+        self._interrupted = False
+        self._assistant: AssistantMessage | None = None
+        self._reasoning: ReasoningRow | None = None
+        self._tools: dict[str, ToolBlock] = {}
+        self._queue: list[tuple[str, UserMessage]] = []
+        self._bg: set[asyncio.Task[Any]] = set()
+        self._verbose = bool(settings.tui.get("verbose", False))
+        self._files: list[str] | None = None
+        self._history = history.load()
+        self._custom: dict[str, commands.CustomCommand] = {}
+        self._skills: dict[str, Skill] = {}
+        self._commands: list[SlashCommand] = []
+        self._last_ctrl_c = 0.0
+        self._ctx_used = 0
+        self._ctx_window = 0
+        self._git: gitinfo.GitStatus | None = None
+        self._welcome: WelcomeBanner | None = None
+        self._stick_value = True  # keep the newest output in view until the user scrolls away
+        self._follow_revision = 0  # newer input invalidates deferred follow decisions
+        self._turn_edits: dict[str, tuple[int, int]] = {}  # path -> (+added, -removed) this turn
 
-    # -- setup -------------------------------------------------------------
-
-    def _restore_session(self) -> None:
-        """Load the previously selected provider and model, if any."""
-        from kalash.models.resolve import active_selection
-
-        self.provider_id, self.model_id = active_selection()
+    # -- layout ------------------------------------------------------------------------
 
     def compose(self) -> ComposeResult:
-        from textual.containers import Horizontal
+        yield Transcript(on_user_scroll=self._transcript_scrolled, widget_id="transcript")
+        yield Static("", id="activity")
+        yield Suggestions(id="suggestions")
+        yield PromptArea(id="prompt")
+        yield Static("", id="status")
 
-        with Horizontal():
-            self._transcript_view = Transcript(id="transcript")
-            with self._transcript_view:
-                yield WelcomeBanner()
-            yield Static(
-                "Workspace Context\n\n- No active files\n- Token usage: 0\n- Agents: Idle",
-                id="context-sidebar",
+    async def on_mount(self) -> None:
+        themes.register(self)
+        self.theme = themes.resolve(
+            self.settings.tui.get("theme", themes.DEFAULT_THEME), self.available_themes
+        )
+        self.palette = themes.palette_for(self)
+        self._transcript = self.query_one("#transcript", VerticalScroll)
+        self._prompt = self.query_one("#prompt", PromptArea)
+        self._suggest = self.query_one("#suggestions", Suggestions)
+        self._prompt.suggestions = self._suggest
+        self._prompt.prompt_history = self._history
+        old_activity = self.query_one("#activity", Static)
+        old_status = self.query_one("#status", Static)
+        self._activity = ActivityBar(self.palette)
+        self._activity.id = "activity"
+        self._status = StatusBar(self.palette)
+        self._status.id = "status"
+        await old_activity.remove()
+        await old_status.remove()
+        await self.mount(self._activity, before=self._suggest)
+        await self.mount(self._status)
+        self._prompt.focus()
+        self.watch(self, "theme", self._on_theme_changed)
+        self.set_interval(0.1, self._tick)
+        self.set_interval(5.0, self._poll_git)
+        self._commands = builtin_commands()
+        await self._start_runtime(self.model_arg, self.session_ref, self.continue_latest)
+        self._poll_git()
+
+    def _on_theme_changed(self, _name: str) -> None:
+        self.palette = themes.palette_for(self)
+        for widget in (self._activity, self._status):
+            widget.palette = self.palette
+        for block in self.query(ToolBlock):
+            block.set_palette(self.palette)
+        for group in self.query(ExploreGroup):
+            group.set_palette(self.palette)
+        if self._welcome is not None:
+            self._welcome.palette = self.palette
+            self._welcome.refresh_view()
+        self._refresh_status()
+
+    # -- runtime lifecycle -------------------------------------------------------------
+
+    async def _start_runtime(
+        self,
+        model: str | None,
+        session_ref: str | None,
+        continue_latest: bool,
+        session: SessionLog | None = None,
+    ) -> bool:
+        root = project_root(self.cwd)
+        self._custom = commands.discover(root)
+        self._skills = discover_skills(root)
+        try:
+            if session is None and session_ref:
+                session = SessionLog.open(find_session(root, session_ref))
+            elif session is None and continue_latest:
+                found = list_sessions(root)
+                if found:
+                    session = SessionLog.open(found[0].path)
+            self.runtime = await create_runtime(
+                cwd=self.cwd,
+                settings=self.settings,
+                model=model,
+                session=session,
+                approver=self._approve,
+                emit=self._on_event,
+                adapter=self._adapter,
             )
-        with Vertical(id="footer"):
-            yield Picker()
-            with Container(id="input-wrap"):
-                yield Input(placeholder="Ask anything…", id="prompt")
-            yield Static(id="statusline")
-            yield Static(id="hints")
-
-    def action_toggle_sidebar(self) -> None:
-        """Toggle the right context sidebar."""
-        sidebar = self.query_one("#context-sidebar")
-        if sidebar.has_class("visible"):
-            sidebar.remove_class("visible")
-        else:
-            sidebar.add_class("visible")
-
-    def on_mount(self) -> None:
-        self.theme_changed_signal.subscribe(self, self._on_textual_theme_changed)
-        self._apply_theme()
-        self._refresh_statusline()
-        self._refresh_hints()
-        self.query_one("#prompt", Input).focus()
-
-        # Automatically disable terminal mouse reporting so standard native OS terminal
-        # text selection, highlighting, and right-click context menu copy work seamlessly.
-        if hasattr(self, "_driver") and self._driver is not None:
-            import contextlib
-
-            with contextlib.suppress(Exception):
-                if hasattr(self._driver, "_disable_mouse_support"):
-                    self._driver._disable_mouse_support()  # noqa: SLF001 - Internal collaborator or deliberate fault-injection boundary.
-                self._driver.write("\x1b[?1000l\x1b[?1003l\x1b[?1015l\x1b[?1006l")
-                self._driver.flush()
-
-        # Keeps the elapsed counter moving on long tool calls, so a slow build
-        # is visibly slow rather than apparently frozen.
-        self.set_interval(TOOL_TICK_SECONDS, self._tick_active_tool)
-        if self._resume_session is not None:
-            self._resume_on_start()
-
-    @work(group="resume")
-    async def _resume_on_start(self) -> None:
-        """Restore a session named on the command line."""
-        session_id = self._resume_session
-        if not session_id:
-            from kalash.runtime.session import SessionManager
-
-            try:
-                recent = SessionManager().list_sessions(limit=1)
-            except Exception as exc:
-                await self._post(SystemMessage(f"could not resume: {exc}", error=True))
-                return
-            if not recent:
-                await self._post(SystemMessage("no saved sessions to resume"))
-                return
-            session_id = str(recent[0]["id"])
-
-        await self._session_chosen(session_id)
-
-    # -- picker triggers ---------------------------------------------------
-
-    def _open_command_picker(self) -> None:
-        items = [PickerItem(value=c, label=c, detail=d) for c, d in SLASH_COMMANDS]
-        self._open_picker(PickerMode.COMMAND, items)
-
-    def _filter_commands(self, prefix: str) -> None:
-        picker = self.query_one(Picker)
-        if not picker.is_open:
-            return
-        picker.filter(prefix)
-
-    # -- status line -------------------------------------------------------
-
-    def _refresh_statusline(self) -> None:
-        from rich.text import Text
-
-        from kalash.models.catalog import get_provider
-
-        text = Text()
-        mode_label = f"[{self.mode.upper()}]"
-        text.append(mode_label, style="bold green" if self.mode == Mode.BUILD else "bold cyan")
-
-        if self.provider_id and self.model_id:
-            provider = get_provider(self.provider_id)
-            name = provider.name if provider else self.provider_id
-            text.append("  ·  ", style="dim")
-            text.append(self.model_id, style="bold")
-            text.append(f" ({name})", style="dim")
-        else:
-            text.append("  ·  ", style="dim")
-            text.append("no provider — run /connect", style="yellow")
-
-        if self._model_profile:
-            text.append("  ·  ", style="dim")
-            text.append(self._model_profile, style="dim")
-
-        if self._context_fill > 0:
-            pct = int(self._context_fill * 100)
-            style = "green" if pct < 70 else ("yellow" if pct < 85 else "red")
-            text.append("  ·  ", style="dim")
-            text.append(f"context: {pct}%", style=style)
-
-        if self._react_step > 0 and self.busy:
-            text.append("  ·  ", style="dim")
-            text.append(f"step {self._react_step}", style="bold cyan")
-
-        with contextlib.suppress(NoMatches):
-            self._transcript().screen.query_one("#statusline", Static).update(text)
-        self._refresh_sidebar()
-
-    def _refresh_sidebar(self) -> None:
-        try:
-            sidebar = self._transcript().screen.query_one("#context-sidebar", Static)
-        except Exception:
-            return
-
-        lines = ["[bold cyan]Workspace Context[/bold cyan]\n"]
-
-        if self._agent and self._agent.budget:
-            budget = self._agent.budget
-            lines.append(f"[bold]Tokens:[/bold] {budget.tokens_used:,}")
-            if budget.max_tokens:
-                lines.append(f"[bold]Limit:[/bold] {budget.max_tokens:,}")
-            lines.append(f"[bold]Cost:[/bold] ${budget.cost_used:.4f}")
-            lines.append(f"[bold]Tools:[/bold] {budget.tool_calls_used}")
-        else:
-            lines.append("[bold]Tokens:[/bold] 0")
-            lines.append("[bold]Cost:[/bold] $0.00")
-
-        lines.append("")
-
-        state = "[yellow]Thinking...[/yellow]" if self.busy else "[green]Idle[/green]"
-        lines.append(f"[bold]Status:[/bold] {state}")
-
-        if self._react_step > 0:
-            lines.append(f"[bold]Step:[/bold] {self._react_step}")
-
-        sidebar.update("\n".join(lines))
-
-    def _refresh_hints(self) -> None:
-        from rich.text import Text
-
-        text = Text()
-        pairs = [
-            ("tab", "mode"),
-            ("/", "commands"),
-            ("pgup/dn", "scroll"),
-            ("ctrl+y", "copy"),
-            ("ctrl+k", "copy code"),
-            ("ctrl+o", "expand"),
-            ("ctrl+p", "theme"),
-            ("ctrl+c", "stop"),
-            ("ctrl+d", "quit"),
-        ]
-        for index, (key, label) in enumerate(pairs):
-            if index:
-                text.append("   ")
-            text.append(key, style="bold cyan")
-            text.append(f" {label}", style="dim")
-        with contextlib.suppress(NoMatches):
-            self._transcript().screen.query_one("#hints", Static).update(text)
-
-    def watch_busy(self, busy: bool) -> None:
-        try:
-            wrap = self._transcript().screen.query_one("#input-wrap")
-        except NoMatches:
-            return
-        wrap.set_class(busy, "busy")
-        try:
-            prompt = self._transcript().screen.query_one("#prompt", Input)
-            prompt.placeholder = "Streaming… esc to stop" if busy else "Ask anything…"
-        except NoMatches:
-            pass
-
-    # -- transcript --------------------------------------------------------
-
-    def _transcript(self) -> Transcript:
-        # App queries walk only the active screen. Approvals and the command
-        # palette must not disconnect the background run from its transcript.
-        transcript = self._transcript_view
-        if transcript is None or not transcript.is_attached:
-            raise NoMatches("The conversation transcript is not mounted")
-        return transcript
-
-    async def _post(self, widget: Widget) -> None:
-        """Append without pulling a reader away from earlier output."""
-        if not self._banner_removed:
-            for banner in self._transcript().query(WelcomeBanner):
-                await banner.remove()
-            self._banner_removed = True
-        transcript = self._transcript()
-        await transcript.mount(widget)
-        protected = set(self._active_tools.values()) | set(self._subagents.values()) | {widget}
-        if self._current_assistant is not None:
-            protected.add(self._current_assistant)
-        await transcript.prune(protected)
-        self._queue_follow()
-
-    def _queue_follow(self) -> None:
-        if not self._follow_pending:
-            self._follow_pending = True
-            if not self.call_after_refresh(self._follow_transcript):
-                self._follow_pending = False
-
-    def _follow_transcript(self) -> None:
-        self._follow_pending = False
-        transcript = self._transcript_view
-        # A queued repaint can outlive the transcript during shutdown/recompose.
-        if transcript is None or not transcript.is_attached:
-            return
-        if transcript.follow_output:
-            transcript.scroll_end(animate=False, immediate=True, x_axis=False)
-
-    def on_transcript_changed(self) -> None:
-        self._queue_follow()
-
-    def _finish_assistant(self) -> None:
-        if self._current_assistant is not None:
-            self._current_assistant.finish()
-            if not self._current_assistant.has_content:
-                self._current_assistant.display = False
-            self._current_assistant = None
-
-    async def _begin_assistant(self) -> None:
-        if self._current_assistant is not None and not self._current_assistant.text:
-            return
-        self._finish_assistant()
-        self._current_assistant = AssistantMessage()
-        await self._post(self._current_assistant)
-
-    def _say(self, lines: list[str] | str, *, error: bool = False) -> None:
-        """Post a system message without blocking the caller."""
-        self.call_later(self._post, SystemMessage(lines, error=error))
-
-    # -- actions -----------------------------------------------------------
-
-    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
-        # Priority conversation bindings (Escape, arrows, Tab) must not consume
-        # keys intended for permission dialogs or the command palette.
-        if isinstance(self.screen, ModalScreen) and action in {
-            "dismiss",
-            "toggle_mode",
-            "history_or_picker",
-            "complete_command",
-            "scroll_page_up",
-            "scroll_page_down",
-            "scroll_line_up",
-            "scroll_line_down",
-            "scroll_to_home",
-            "scroll_to_end",
-            "toggle_output",
-            "toggle_sidebar",
-        }:
+        except (ProviderError, ConfigError, SessionError, CredentialError) as error:
+            self.runtime = None
+            self._show_welcome(onboarding=str(error))
+            self._refresh_status()
             return False
-        return super().check_action(action, parameters)
+        self.runtime.agent.plan_decider = self._plan_decision
+        self._transcript.remove_children()
+        self._tools.clear()
+        self._welcome = None
+        self._show_welcome()
+        self._render_history(self.runtime.session)
+        agent = self.runtime.agent  # the meter should be right before the first request, too
+        self._ctx_window = agent.window
+        self._ctx_used = ctxmod.context_tokens(
+            agent.session, agent.system_prompt, agent.tool_specs()
+        )
+        self.sub_title = f"{self.runtime.ref}"
+        self._refresh_status()
+        return True
 
-    def action_scroll_page_up(self) -> None:
-        """Scroll the transcript up by one page."""
-        try:
-            self._transcript().follow_output = False
-            self._transcript().scroll_page_up(animate=False)
-        except NoMatches:
-            pass
+    def _show_welcome(self, onboarding: str | None = None) -> None:
+        if self._welcome is not None and self._welcome.is_attached:
+            self._welcome.remove()  # re-shown after a key or model change: never stack banners
+        palette = self.palette
+        lines: list[tuple[str, str]] = []
+        if self.runtime is None:
+            specs = all_specs(self.settings.providers)
+            ready = [s.name for s in specs.values() if s.requires_key and has_credential(s)]
+            fresh = onboarding is None or onboarding.startswith("no model selected")
+            if ready:
+                lines = [
+                    ("status", "Pick a model to start." if fresh else str(onboarding)),
+                    ("keys", ", ".join(ready)),
+                    ("next", "/model  choose a model\n/provider  add another provider's key"),
+                ]
+            else:
+                lines = [
+                    ("status", "Add an API key to start." if fresh else str(onboarding)),
+                    (
+                        "next",
+                        "/provider  store a key for a provider\n"
+                        "or export ANTHROPIC_API_KEY, OPENAI_API_KEY or GEMINI_API_KEY\n"
+                        "then /model to choose a model",
+                    ),
+                ]
+            lines.append(("help", "/help  keys and commands"))
+        else:
+            rt = self.runtime
+            mode = MODES[rt.agent.mode]
+            effort = rt.agent.effort_display
+            files = instruction_files(project_root(self.cwd), self.cwd)
+            git = self._git
+            where = gitinfo.shorten_path(self.cwd) + (f"  ({git.branch})" if git else "")
+            tools = len(rt.agent.registry)
+            extras = [f"{tools} tools"]
+            if rt.mcp and rt.mcp.clients:
+                extras.append(f"{len(rt.mcp.clients)} MCP")
+            if self._custom:
+                extras.append(f"{len(self._custom)} custom commands")
+            lines = [
+                ("model", f"{rt.ref}" + (f"  ·  {effort}" if effort else "")),
+                ("mode", f"{mode.label} - {mode.description}"),
+                ("folder", where),
+                (
+                    "context",
+                    ("AGENTS.md loaded" if files else "no AGENTS.md (try /init)")
+                    + "  ·  "
+                    + "  ·  ".join(extras),
+                ),
+                ("", ""),
+                ("tips", "/ commands · @ file · !cmd shell · shift+tab mode · ctrl+o details"),
+            ]
+        self._welcome = WelcomeBanner(lines, __version__, palette)
+        self._transcript.mount(self._welcome)
 
-    def action_scroll_page_down(self) -> None:
-        """Scroll the transcript down by one page."""
-        with contextlib.suppress(NoMatches):
-            self._transcript().scroll_page_down(animate=False)
-
-    def action_scroll_line_up(self) -> None:
-        """Scroll the transcript up by several lines."""
-        try:
-            self._transcript().follow_output = False
-            self._transcript().scroll_relative(y=-4, animate=False)
-        except NoMatches:
-            pass
-
-    def action_scroll_line_down(self) -> None:
-        """Scroll the transcript down by several lines."""
-        with contextlib.suppress(NoMatches):
-            self._transcript().scroll_relative(y=4, animate=False)
-
-    def action_scroll_to_home(self) -> None:
-        """Scroll the transcript to the very top."""
-        try:
-            self._transcript().follow_output = False
-            self._transcript().scroll_home(animate=False)
-        except NoMatches:
-            pass
-
-    def action_scroll_to_end(self) -> None:
-        """Scroll the transcript to the very bottom."""
-        try:
-            self._transcript().follow_output = True
-            self._transcript().scroll_end(animate=False)
-        except NoMatches:
-            pass
-
-    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:  # noqa: ARG002 - Preserve provider/tool callback signature.
-        """Handle mouse scroll up anywhere on screen."""
-        try:
-            self._transcript().follow_output = False
-            self._transcript().scroll_relative(y=-3, animate=False)
-        except NoMatches:
-            pass
-
-    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:  # noqa: ARG002 - Preserve provider/tool callback signature.
-        """Handle mouse scroll down anywhere on screen."""
-        with contextlib.suppress(NoMatches):
-            self._transcript().scroll_relative(y=3, animate=False)
-
-    def action_toggle_mode(self) -> None:
-        self.mode = Mode.PLAN.value if self.mode == Mode.BUILD.value else Mode.BUILD.value
-        self._refresh_statusline()
-
-    def action_toggle_output(self) -> None:
-        """Expand or fold the most recent tool block with hidden output."""
-        lines = list(self.query(ToolCallLine))
-        for line in reversed(lines):
-            if line.is_expandable:
-                line.toggle_expand()
-                return
-
-    def action_dismiss(self) -> None:
-        picker = self.query_one(Picker)
-        if picker.is_open:
-            picker.close()
-            self._reset_intent()
+    def _render_history(self, session: SessionLog) -> None:
+        messages = session.messages()
+        if not messages:
             return
-        if self.busy:
-            self.action_interrupt()
+        for message in messages:
+            if message.role == "user":
+                text = message.text
+                if text.startswith("This is an automatically generated checkpoint"):
+                    self._mount(NoticeRow("earlier conversation summarised"))
+                elif message.visible_text.strip():  # harness-only nudges are not the user's words
+                    self._mount(UserMessage(message.visible_text.strip()[:4000]))
+            elif message.role == "assistant":
+                if message.text.strip():
+                    widget = AssistantMessage()
+                    widget.append(message.text)
+                    self._mount(widget)
+                    self._spawn(widget.finish())
+                for call in message.tool_calls:
+                    try:
+                        args = json.loads(call.arguments or "{}")
+                    except ValueError:
+                        args = {}
+                    data = ToolData(call.id, call.name, args if isinstance(args, dict) else {})
+                    data.state = "ok"
+                    block = ToolBlock(data, self.palette, self.cwd)
+                    self._tools[call.id] = block
+                    self._mount(block)
+            elif message.role == "tool" and message.tool_call_id in self._tools:
+                block = self._tools[message.tool_call_id]
+                block.data.output = message.text
+                block.data.state = "error" if message.is_error else "ok"
+                block.refresh_view()
+                self._fold_exploration(block)
+        self._note(f"Resumed {session.id} · {len(messages)} messages")
+
+    # -- helpers -----------------------------------------------------------------------
+
+    @property
+    def _stick(self) -> bool:
+        return self._stick_value
+
+    @_stick.setter
+    def _stick(self, value: bool) -> None:
+        self._follow_revision += 1
+        self._stick_value = value
+        activity = getattr(self, "_activity", None)
+        if value and activity is not None and activity.behind:
+            activity.behind = False
+            activity.refresh_view(time.monotonic())
+
+    def _mark_behind(self) -> None:
+        """Output arrived below the part of the transcript the user scrolled to."""
+        if not self._stick and not self._activity.behind:
+            self._activity.behind = True
+            self._activity.refresh_view(time.monotonic())
+
+    def _fold_exploration(self, block: ToolBlock) -> None:
+        """Fold a finished read/glob/grep into the run of them just above it (one summary row)."""
+        if block.data.name not in GROUPABLE or block.data.state != "ok" or block.group:
+            return
+        children = list(self._transcript.children)
+        if block not in children:
+            return
+        i = children.index(block)
+        j = i - 1
+        while j >= 0:  # hidden members of a group sit between its header and the new block
+            member = children[j]
+            if not (isinstance(member, ToolBlock) and member.group is not None):
+                break
+            j -= 1
+        header = children[j] if j >= 0 else None
+        if isinstance(header, ExploreGroup) and all(
+            isinstance(c, ToolBlock) and c.group is header for c in children[j + 1 : i]
+        ):
+            header.add(block)
+            return
+        previous = children[i - 1] if i else None
+        if (
+            isinstance(previous, ToolBlock)
+            and previous.group is None
+            and previous.data.name in GROUPABLE
+            and previous.data.state == "ok"
+        ):
+            group = ExploreGroup(self.palette, unfolded=self._verbose)
+            self._transcript.mount(group, before=previous)
+            group.add(previous)
+            group.add(block)
+
+    def _spawn(self, coroutine: Coroutine[Any, Any, Any]) -> None:
+        task = asyncio.ensure_future(coroutine)
+        self._bg.add(task)
+        task.add_done_callback(self._bg.discard)
+
+    def _mount(self, widget: Static | AssistantMessage | ToolBlock) -> None:
+        self._transcript.mount(widget)
+        if self._stick:
+            self._transcript.call_after_refresh(self._follow_output)
+        else:
+            self._mark_behind()
+
+    def _follow_output(self) -> None:
+        # A wheel gesture can arrive between mounting output and the refresh.
+        # Recheck follow state here; scroll_end's default would defer a second,
+        # unguarded scroll beyond this check.
+        if self._stick:
+            self._transcript.scroll_end(animate=False, immediate=True)
+
+    def _note(self, text: str, level: str = "info") -> None:
+        self._mount(NoticeRow(text, level))
+
+    def toast(self, message: str, severity: str = "information") -> None:
+        self.notify(message, severity=severity, timeout=3)  # type: ignore[arg-type]
+
+    def _tick(self) -> None:
+        if self._stick and not self._at_bottom():
+            self._follow_output()  # streamed text grows between mounts
+        now = time.monotonic()
+        self._activity.tick(now)
+        for block in self._tools.values():
+            if block.data.state == "running":
+                block.data.elapsed = now - block.data.started
+                block.tick()
+
+    def _poll_git(self) -> None:
+        self._spawn(self._refresh_git())
+
+    async def _refresh_git(self) -> None:
+        self._git = await gitinfo.status(self.cwd)
+        self._refresh_status()
+
+    def _status_data(self) -> StatusData:
+        rt = self.runtime
+        data = StatusData(verbose=self._verbose, cwd=gitinfo.shorten_path(self.cwd))
+        if rt is not None:
+            mode = MODES[rt.agent.mode]
+            data.mode_id, data.mode_label = mode.id, mode.label
+            data.model = str(rt.ref)
+            data.effort = rt.agent.effort_display
+            data.used, data.window = self._ctx_used, self._ctx_window or rt.agent.window
+            data.cost = rt.session.cost_total()
+            data.tokens = rt.session.usage_total().total
+            todos = rt.session.todos()
+            data.todos = (sum(1 for t in todos if t.get("status") == "completed"), len(todos))
+        if self._git is not None:
+            data.branch, data.dirty = self._git.branch, self._git.dirty
+        return data
+
+    def _refresh_status(self) -> None:
+        data = self._status_data()
+        self._status.set_data(data)
+        for name in ("ask", "auto", "plan", "read-only", "full"):
+            self.screen.set_class(data.mode_id == name and self.runtime is not None, f"mode-{name}")
+
+    # -- agent events ------------------------------------------------------------------
+
+    def _on_event(self, event: AgentEvent) -> None:
+        if isinstance(event, TextChunk):
+            self._end_reasoning()
+            if self._assistant is None:
+                self._assistant = AssistantMessage()
+                self._mount(self._assistant)
+            self._assistant.append(event.text)
+            self._activity.verb = "Responding"
+            self._activity.tokens += max(1, len(event.text) // 4)
+        elif isinstance(event, ReasoningChunk):
+            if self._reasoning is None:
+                self._reasoning = ReasoningRow()
+                self._reasoning.set_verbose(self._verbose)
+                self._mount(self._reasoning)
+            self._reasoning.add(event.text)
+            self._activity.verb = "Thinking"
+            self._activity.tokens += max(1, len(event.text) // 4)
+        elif isinstance(event, ToolPending):
+            self._end_reasoning()
+            self._end_assistant()
+            self._tool_block(event.call_id, event.name)
+        elif isinstance(event, ToolRunning):
+            self._end_assistant()
+            block = self._tool_block(event.call_id, event.name)
+            block.data.args, block.data.summary = event.arguments, event.summary
+            block.data.state, block.data.started = "running", time.monotonic()
+            block.refresh_view()
+            self._activity.verb = f"Running {block.data.name}"
+        elif isinstance(event, ToolOutput):
+            existing = self._tools.get(event.call_id)
+            if existing is not None:
+                existing.data.output = (existing.data.output + event.text)[-6000:]
+                existing.refresh_view()
+        elif isinstance(event, ToolDone):
+            self._end_assistant()
+            block = self._tool_block(event.call_id, event.name)
+            block.data.state = "denied" if event.denied else ("error" if event.is_error else "ok")
+            block.data.output, block.data.diff = event.text, event.diff
+            block.refresh_view()
+            self._fold_exploration(block)
+            if event.diff:
+                added, removed = self._turn_edits.get(str(event.diff["path"]), (0, 0))
+                self._turn_edits[str(event.diff["path"])] = (
+                    added + int(event.diff["added"]),
+                    removed + int(event.diff["removed"]),
+                )
+            self._activity.verb = "Working"
+            if event.name == "todo_write":
+                self._refresh_status()
+        elif isinstance(event, Notice):
+            self._note(event.text, event.level)
+        elif isinstance(event, Retry):
+            self._activity.note = f"retry {event.attempt} in {event.delay:.0f}s"
+            self._note(
+                f"Retrying in {event.delay:.1f}s (attempt {event.attempt}): {event.error}",
+                "warning",
+            )
+        elif isinstance(event, Compacted):
+            self._activity.verb = "Working"
+            self._note(
+                f"Context compacted: ~{event.tokens_before:,} → ~{event.tokens_after:,} tokens"
+            )
+        elif isinstance(event, ContextUpdate):
+            self._ctx_used, self._ctx_window = event.used, event.window
+            self._activity.note = ""
+            self._refresh_status()
+        elif isinstance(event, ModeChanged):
+            self._refresh_status()
+        elif isinstance(event, TurnStart):
+            self._activity.verb = "Working"
+        elif isinstance(event, TurnEnd):
+            self._end_reasoning()
+            self._end_assistant()
+            result = event.result
+            footer = self._turn_footer(result)
+            if footer:
+                self._mount(TurnFooter(footer))
+            if result.reason in ("error", "limit", "refused", "max_tokens", "stuck"):
+                self._mount(ErrorCard.for_result(result.reason, result.error, result.error_code))
+            elif result.reason == "cancelled":
+                self._note(
+                    "Interrupted. The conversation is intact; send a new message.", "warning"
+                )
+            for denial in result.denials:
+                server = mcp_server_of(denial)
+                hint = (
+                    f"  → /mcp trust {server} lets its tools run without asking" if server else ""
+                )
+                self._note(f"Denied: {denial.split('. Do not retry')[0]}{hint}", "warning")
+
+    def _turn_footer(self, result: TurnResult) -> str | None:
+        """One dim line summarising a completed turn (time, calls, tokens, files changed)."""
+        if result.reason != "completed":
+            return None
+        elapsed = time.monotonic() - self._activity.started if self._activity.started else 0.0
+        if elapsed < 5 and not result.tool_calls and not self._turn_edits:
+            return None
+        parts = [f"{elapsed:.0f}s" if elapsed >= 1 else "<1s"]
+        if result.tool_calls:
+            parts.append(f"{result.tool_calls} tool call{'s' if result.tool_calls != 1 else ''}")
+        used_in, used_out = result.usage.input_tokens, result.usage.output_tokens
+        if used_in or used_out:
+            parts.append(f"{_tokens(used_in or 0)} in · {_tokens(used_out or 0)} out")
+        if result.cost is not None:
+            parts.append(f"${result.cost:.3f}")
+        if self._turn_edits:
+            plus = sum(a for a, _ in self._turn_edits.values())
+            minus = sum(r for _, r in self._turn_edits.values())
+            files = len(self._turn_edits)
+            parts.append(f"edited {files} file{'s' if files != 1 else ''} +{plus} −{minus}")
+        return "✓ " + " · ".join(parts)
+
+    def _tool_block(self, call_id: str, name: str) -> ToolBlock:
+        block = self._tools.get(call_id)
+        if block is None:
+            block = ToolBlock(ToolData(call_id, name), self.palette, self.cwd)
+            block.set_verbose(self._verbose)
+            self._tools[call_id] = block
+            self._mount(block)
+        return block
+
+    def _end_assistant(self) -> None:
+        if self._assistant is not None:
+            self._spawn(self._assistant.finish())
+            self._assistant = None
+
+    def _end_reasoning(self) -> None:
+        if self._reasoning is not None:
+            self._reasoning.finish()
+            self._reasoning = None
+
+    # -- modals ------------------------------------------------------------------------
+
+    async def _modal(self, screen: Any) -> Any:
+        """Show a modal and return its result (usable from any task, not only workers)."""
+        future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
+
+        def done(result: Any) -> None:
+            if not future.done():
+                future.set_result(result)
+
+        self.push_screen(screen, callback=done)
+        return await future
+
+    async def _approve(self, request: ApprovalRequest) -> Answer:
+        if self.settings.tui.get("bell", False):
+            self.bell()
+        screen = ApprovalScreen(request, self.palette)
+        future: asyncio.Future[Answer] = asyncio.get_running_loop().create_future()
+
+        def done(answer: Answer | None) -> None:
+            if not future.done():
+                future.set_result(answer or "deny")
+
+        self.push_screen(screen, callback=done)
+        try:
+            return await future
+        finally:
+            if not future.done() or screen.is_attached:
+                with contextlib.suppress(Exception):
+                    screen.dismiss("deny")
+
+    async def _plan_decision(self, plan: str) -> tuple[str, str]:
+        verdict, feedback = await self._modal(PlanScreen(plan))
+        return str(verdict), str(feedback)
+
+    # -- input -------------------------------------------------------------------------
+
+    async def on_prompt_area_submitted(self, message: PromptArea.Submitted) -> None:
+        text = message.text.strip()
+        if not text:
+            return
+        plain_message = not text.startswith(("/", "!"))
+        if plain_message and self.runtime is None:  # keep what the user typed; nothing was sent
+            self._note("No model is configured. Use /provider and /model first.", "warning")
+            return
+        self._history = history.add(self._history, text)
+        self._prompt.prompt_history = self._history
+        self._prompt.reset()
+        self._suggest.hide()
+        if text.startswith("/"):
+            self._command_task = asyncio.create_task(self._run_command(text))
+        elif text.startswith("!"):
+            self._command_task = asyncio.create_task(self._run_user_shell(text[1:].strip()))
+        else:
+            await self._send(text)
+
+    async def _send(self, text: str, shown: str | None = None) -> None:
+        if self.runtime is None:
+            self._note("No model is configured. Use /provider and /model first.", "warning")
+            return
+        if self._turn_active:
+            widget = UserMessage(shown or text, queued=True)
+            self._mount(widget)
+            self._queue.append((text, widget))
+            self._activity.queued = len(self._queue)
+            self.toast("Queued - it will be sent when the current turn ends")
+            return
+        self._begin_turn(text, UserMessage(shown or text))
+
+    def _begin_turn(self, text: str, widget: UserMessage) -> None:
+        assert self.runtime is not None
+        if widget.parent is None:
+            self._mount(widget)
+        widget.mark_sent()
+        if self._welcome is not None:
+            self._welcome = None
+        self._stick = True
+        self._turn_edits = {}
+        self._turn_active = True
+        self._activity.begin(time.monotonic())
+        self._refresh_status()
+        self._turn = asyncio.create_task(self._run_turn(text))
+
+    async def _run_turn(self, text: str) -> None:
+        assert self.runtime is not None
+        try:
+            await self.runtime.agent.run_turn(text)
+        except asyncio.CancelledError:
+            pass
+        except Exception as error:
+            self._note(f"Unexpected failure: {type(error).__name__}: {error}", "error")
+        finally:
+            self._turn_active = False
+            self._turn = None
+            self._activity.end()
+            if self.settings.tui.get("bell", False):
+                self.bell()
+            self._refresh_status()
+            self._poll_git()
+            interrupted, self._interrupted = self._interrupted, False
+            if self._queue and interrupted:
+                self._restore_queue()  # never send queued messages right after an Esc
+            elif self._queue and self.runtime is not None:
+                next_text, widget = self._queue.pop(0)
+                self._activity.queued = len(self._queue)
+                self._begin_turn(next_text, widget)
+
+    async def _run_user_shell(self, command: str) -> None:
+        if self.runtime is None or not command:
+            return
+        if self._turn_active:
+            self._note("Wait for the running turn to finish before using !commands.", "warning")
+            return
+        self._mount(UserMessage(f"!{command}"))
+        try:
+            await self.runtime.agent.run_shell(command)
+        except Exception as error:
+            self._note(f"Command failed: {type(error).__name__}: {error}", "error")
+        self._poll_git()
+
+    # -- suggestions (slash commands and @files) --------------------------------------------
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if event.text_area is not self._prompt:
+            return
+        self._update_suggestions()
+
+    def _update_suggestions(self) -> None:
+        row, col = self._prompt.cursor_location
+        line = self._prompt.document.get_line(row)[:col]
+        if row == 0 and line.startswith("/") and " " not in line:
+            query = line[1:].lower()
+            found = match_commands(query, self._all_commands())
+            current = self.runtime.agent.mode if self.runtime is not None else None
+            self._suggest.show_items(
+                [
+                    Suggestion(
+                        f"/{c.name}",
+                        f"/{c.name}",
+                        c.args,
+                        _popup_description(c, query),
+                        "current" if c.mode and c.mode == current else "",
+                        None if query else c.section,
+                    )
+                    for c in found
+                ],
+                f"{len(found)} commands · ↑↓ move · Tab complete · Enter run · Esc close",
+            )
+            return
+        token = line.rsplit(None, 1)[-1] if line.strip() else ""
+        if token.startswith("@") and not line.endswith(" "):
+            paths = self._complete_files(token[1:])
+            self._suggest.show_items(
+                [Suggestion(f"@{p}", p) for p in paths],
+                "↑↓ move · Tab or Enter insert · Esc close",
+            )
+            if self._files is None:
+                self._spawn(self._load_files())
+            return
+        self._suggest.hide()
+
+    def _all_commands(self) -> list[SlashCommand]:
+        """Built-ins, then the project's own commands, then skills (a built-in name wins)."""
+        taken = {c.name for c in self._commands} | {a for c in self._commands for a in c.aliases}
+        custom = [
+            SlashCommand(c.name, c.description or "custom command", "[args]", (), False,
+                         "Custom commands")
+            for c in self._custom.values()
+            if c.name not in taken
+        ]  # fmt: skip
+        taken |= {c.name for c in custom}
+        skills = [
+            SlashCommand(
+                s.name, " ".join(s.description.split())[:90], "[task]", (), False, "Skills"
+            )
+            for s in self._skills.values()
+            if s.name not in taken
+        ]
+        return [*self._commands, *custom, *skills]
+
+    async def _load_files(self) -> None:
+        files = await gitinfo.tracked_files(self.cwd)
+        if not files:
+            files = []
+            for dirpath, dirnames, filenames in os.walk(self.cwd):
+                dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS and not d.startswith(".")]
+                for name in filenames:
+                    files.append(os.path.relpath(os.path.join(dirpath, name), self.cwd))
+                if len(files) > 5000:
+                    break
+        self._files = files
+        self._update_suggestions()
+
+    def _complete_files(self, query: str) -> list[str]:
+        files = self._files or []
+        needle = query.lower()
+        if not needle:
+            return files[:8]
+        scored: list[tuple[int, int, str]] = []
+        for path in files:
+            low = path.lower()
+            base = low.rsplit("/", 1)[-1]
+            if base.startswith(needle):
+                score = 0
+            elif needle in base:
+                score = 1
+            elif needle in low:
+                score = 2
+            else:
+                continue
+            scored.append((score, len(path), path))
+        return [p for _, _, p in sorted(scored)[:8]]
+
+    async def on_prompt_area_accept(self, message: PromptArea.Accept) -> None:
+        value = self._suggest.selected_value()
+        if value is None:
+            return
+        row, col = self._prompt.cursor_location
+        line = self._prompt.document.get_line(row)
+        if value.startswith("/"):
+            alone = "\n" not in self._prompt.text and not line[col:].strip()
+            if message.submit and alone:  # Enter on a command runs it; Tab only completes it
+                await self.on_prompt_area_submitted(PromptArea.Submitted(value))
+                return
+            # replace just the command word - never the rest of a multi-line draft
+            self._prompt.replace(value + " ", (0, 0), (0, col))
+        else:
+            start = line[:col].rfind("@")
+            self._prompt.replace(value + " ", (row, start), (row, col))
+        self._suggest.hide()
+
+    # -- commands ----------------------------------------------------------------------
+
+    async def _run_command(self, line: str) -> None:
+        try:
+            await self._command(line)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            self._note(f"Command failed: {type(error).__name__}: {error}", "error")
+
+    async def _command(self, line: str) -> None:
+        name, _, arg = line[1:].partition(" ")
+        name, arg = name.lower(), arg.strip()
+        command = next((c for c in self._commands if name == c.name or name in c.aliases), None)
+        if command is None:
+            custom = self._custom.get(name)
+            if custom is not None:
+                await self._send(custom.expand(arg), shown=line)
+                return
+            skill = self._skills.get(name)
+            if skill is not None:  # /skill-name [task] asks the model to load that skill
+                task = f" for this task: {arg}" if arg else "."
+                await self._send(f"Use the `{skill.name}` skill{task}", shown=line)
+                return
+            self._note(f"Unknown command /{name}. Try /help.", "warning")
+            return
+        if self._turn_active and not command.during_turn:
+            self._note(
+                f"/{command.name} can't run while the agent is working. Press Esc first.", "warning"
+            )
+            return
+        if command.mode is not None:
+            await self._set_mode(command.mode)
+            return
+        handler = getattr(self, f"_cmd_{command.name.replace('-', '_')}")
+        await handler(arg)
+
+    def _help_content(self) -> Group:
+        p = self.palette
+
+        def section(title: str, rows: list[tuple[str, str]]) -> list[Text | Table]:
+            grid = Table.grid(padding=(0, 3))
+            grid.add_column(style=f"bold {p.accent}", no_wrap=True)
+            grid.add_column(ratio=1)
+            for left, right in rows:
+                grid.add_row(left, right)
+            return [Text(title, style="bold underline"), Text(""), grid, Text("")]
+
+        keys = [
+            ("Enter", "send (queues while the agent works)"),
+            ("Ctrl+J / Shift+Enter", "new line"),
+            ("Esc", "interrupt the agent, close a popup, or clear the prompt"),
+            ("Ctrl+C", "copy the selection, else interrupt, else clear; twice to quit"),
+            ("Shift+Tab", "cycle mode: Ask → Auto → Plan"),
+            ("Ctrl+T", "cycle reasoning effort (only the levels this model accepts)"),
+            ("Ctrl+O", "show or hide tool details and reasoning"),
+            ("↑ / ↓", "prompt history"),
+            ("PgUp / PgDn / Ctrl+End", "scroll, and jump back to the newest output"),
+            ("Tab", "complete a /command or @file"),
+            ("!cmd", "run a shell command yourself (same sandbox)"),
+            ("Ctrl+D", "quit"),
+        ]
+        blocks: list[Text | Table] = list(section("Keys", keys))
+        for title, group in grouped(self._all_commands()):
+            rows = [(f"/{c.name}{(' ' + c.args) if c.args else ''}", c.description) for c in group]
+            blocks.extend(section(title, rows))
+        return Group(*blocks)
+
+    async def _cmd_help(self, _arg: str) -> None:
+        await self._modal(HelpScreen(self._help_content()))
+
+    async def _cmd_quit(self, _arg: str) -> None:
+        await self.action_quit_app()
+
+    async def _cmd_new(self, _arg: str) -> None:
+        if self.runtime is not None:
+            old, self.runtime = self.runtime, None
+            await old.aclose()
+        self._queue.clear()
+        self._ctx_used = 0
+        await self._start_runtime(self.model_arg, None, False)
+
+    async def _cmd_model(self, arg: str) -> None:
+        specs = all_specs(self.settings.providers)
+        if not arg:
+            items: list[tuple[str, str, str]] = []
+            for spec in specs.values():
+                if not has_credential(spec):
+                    continue
+                for model_id, info in catalog_for(spec).items():
+                    ctx = f"{info.context // 1000}k ctx"
+                    price = f"${info.price.input:g}/${info.price.output:g}" if info.price else ""
+                    items.append(
+                        (
+                            f"{spec.id}/{model_id}",
+                            f"{spec.id}/{model_id}",
+                            f"{ctx}  {price}  {info.note}".strip(),
+                        )
+                    )
+            if not items:
+                self._note(
+                    "No provider has a key yet. Use /provider first, or type /model provider/name.",
+                    "warning",
+                )
+                return
+            picked = await self._modal(
+                PickerScreen(
+                    "Choose a model",
+                    items,
+                    "Only providers with a key are listed. Type to filter; "
+                    "/model provider/name picks any other id.",
+                )
+            )
+            if not picked:
+                return
+            arg = picked
+        await self._switch_model(arg)
+
+    async def _switch_model(self, value: str) -> None:
+        try:
+            ref = parse_model(value, all_specs(self.settings.providers))
+        except ProviderError as error:
+            self._note(str(error), "error")
+            return
+        problem = model_problem(ref.provider, ref.model)
+        if problem and problem[0] == "error":
+            self._note(problem[1], "error")
+            return
+        old = self.runtime
+        try:
+            new = await create_runtime(
+                cwd=self.cwd,
+                settings=self.settings,
+                model=str(ref),
+                session=old.session if old else None,
+                approver=self._approve,
+                emit=self._on_event,
+            )
+        except (ProviderError, ConfigError, CredentialError) as error:
+            self._note(f"Cannot switch to {ref}: {error}", "error")
+            return
+        if old is not None:
+            mode = old.agent.mode
+            await old.aclose(keep_session=True)
+            new.agent.set_mode(mode, announce=False)
+        new.agent.plan_decider = self._plan_decision
+        self.runtime = new
+        self.model_arg = str(ref)
+        set_selected_model(ref.provider, ref.model)
+        self._ctx_window = new.agent.window
+        self.toast(f"Model: {ref}")
+        self._refresh_status()
+
+    async def _cmd_effort(self, arg: str) -> None:
+        if self.runtime is None:
+            return
+        agent = self.runtime.agent
+        options = effort_mod.choices(agent.info)
+        if not arg:
+            if not options:
+                self._note(f"{self.runtime.ref} has no reasoning control.")
+                return
+            current = agent.effort_setting or effort_mod.DEFAULT
+            items = [
+                (c.value, c.label, c.detail + ("  ● current" if c.value == current else ""))
+                for c in options
+            ]
+            picked = await self._modal(
+                PickerScreen(
+                    f"Reasoning effort for {self.runtime.ref}",
+                    items,
+                    "Only what this model accepts is listed. Ctrl+T cycles through them.",
+                )
+            )
+            if not picked:
+                return
+            arg = picked
+        self._apply_effort(arg)
+
+    def _apply_effort(self, requested: str | None) -> None:
+        assert self.runtime is not None
+        agent = self.runtime.agent
+        setting, message = agent.set_effort(requested)
+        if setting is None and message:
+            self._note(f"{message}.", "warning")
+            return
+        shown = agent.effort_display or "model default"
+        self.toast(f"Reasoning effort: {shown}" + (f" ({message})" if message else ""))
+        self._refresh_status()
+
+    def action_cycle_effort(self) -> None:
+        if self.runtime is None:
+            return
+        agent = self.runtime.agent
+        if not effort_mod.has_control(agent.info):
+            self.toast(f"{self.runtime.ref} has no reasoning control", "warning")
+            return
+        self._apply_effort(effort_mod.cycle(agent.info, agent.effort_setting))
+
+    async def _cmd_provider(self, arg: str) -> None:
+        specs = all_specs(self.settings.providers)
+        provider = arg.strip().lower()
+        if not provider:
+            items = [(s.id, s.id, _provider_status(s)) for s in specs.values()]
+            provider = (
+                await self._modal(PickerScreen("Providers - choose one to set its key", items))
+                or ""
+            )
+        if not provider:
+            return
+        spec = specs.get(provider)
+        if spec is None:
+            self._note(f"Unknown provider {provider!r}. Known: {', '.join(sorted(specs))}", "error")
+            return
+        if not spec.requires_key:
+            self._note(f"{spec.name} needs no API key ({spec.base_url}).")
+            return
+        key = await self._modal(KeyScreen(spec.name))
+        if not key:
+            return
+        try:
+            save_credential(spec.id, key)
+        except (CredentialError, OSError) as error:
+            self._note(f"Could not save the key: {error}", "error")
+            return
+        self._note(f"Saved the key for {spec.name}.")
+        self.toast(f"Saved the key for {spec.name}")  # starting the runtime clears the transcript
+        if self.runtime is None and not await self._start_runtime(self.model_arg, None, False):
+            await self._cmd_model("")
+
+    async def _cmd_resume(self, arg: str) -> None:
+        if not arg:
+            infos = list_sessions(project_root(self.cwd))
+            if not infos:
+                self._note("No sessions in this project yet.")
+                return
+            from datetime import datetime
+
+            items = [
+                (
+                    i.id,
+                    f"{datetime.fromtimestamp(i.updated_at):%m-%d %H:%M}  {i.title or i.id}",
+                    i.model,
+                )
+                for i in infos[:60]
+            ]
+            picked = await self._modal(PickerScreen("Resume a session", items))
+            if not picked:
+                return
+            arg = picked
+        old = self.runtime
+        if old is not None and arg == old.session.id:
+            return
+        try:
+            session = SessionLog.open(find_session(project_root(self.cwd), arg))
+        except SessionError as error:
+            self._note(str(error), "error")
+            return
+        if old is not None:
+            self.runtime = None
+            await old.aclose()
+        if not await self._start_runtime(self.model_arg, None, False, session=session):
+            session.close()
+
+    async def _cmd_compact(self, _arg: str) -> None:
+        if self.runtime is None:
+            return
+        self._turn_active = True
+        self._activity.begin(time.monotonic())
+        self._activity.verb = "Compacting"
+        try:
+            await self.runtime.agent.compact_now()
+        except ctxmod.NothingToCompact as error:
+            self._note(str(error).capitalize() + ".")
+        except Exception as error:
+            self._note(f"Compaction failed: {error}", "error")
+        finally:
+            self._turn_active = False
+            self._activity.end()
+            self._refresh_status()
+
+    async def _cmd_cost(self, _arg: str) -> None:
+        if self.runtime is None:
+            return
+        usage = self.runtime.session.usage_total()
+        cost = self.runtime.session.cost_total()
+        price = f"${cost:.4f}" if cost is not None else "unknown (no price for this model)"
+        self._note(
+            f"Tokens: {usage.input_tokens:,} in ({usage.cache_read_tokens:,} cached) · "
+            f"{usage.output_tokens:,} out · cost {price}"
+        )
+
+    async def _cmd_status(self, _arg: str) -> None:
+        if self.runtime is None:
+            self._note("No model configured.")
+            return
+        from kalash.sandbox import detect
+        from kalash.skills import discover_skills
+
+        rt, sandbox = self.runtime, detect()
+        mode = MODES[rt.agent.mode]
+        net = "on" if self.settings.sandbox.network else "off"
+        mcp = len(rt.mcp.clients) if rt.mcp else 0
+        skills = len(discover_skills(project_root(self.cwd)))
+        self._note(
+            f"model {rt.ref} · {len(rt.agent.registry)} tools · MCP {mcp} · skills {skills}\n"
+            f"mode {mode.label} (sandbox {mode.sandbox}, approval {mode.approval}) · "
+            f"{sandbox.backend}: {'ok' if sandbox.ok else sandbox.detail} · network {net}\n"
+            f"session {rt.session.path}"
+        )
+
+    async def _cmd_context(self, _arg: str) -> None:
+        if self.runtime is None:
+            return
+        agent = self.runtime.agent
+        specs = agent.tool_specs()
+        fixed = ctxmod.fixed_tokens(agent.system_prompt, specs)
+        total = ctxmod.context_tokens(agent.session, agent.system_prompt, specs)
+        window = agent.window
+        self._note(
+            f"context ≈ {total:,} / {window:,} tokens ({100 * total // max(window, 1)}%)\n"
+            f"  system prompt + tool definitions ≈ {fixed:,}\n"
+            f"  conversation ≈ {max(0, total - fixed):,}   "
+            f"(compacts automatically at {int(self.settings.compaction.threshold * 100)}%)"
+        )
+
+    async def _cmd_diff(self, _arg: str) -> None:
+        summary = await gitinfo.diff_summary(self.cwd)
+        agent_files = (
+            self.runtime.agent.checkpoints.changed_files(self.runtime.session)
+            if self.runtime
+            else []
+        )
+        parts = []
+        if summary is not None:
+            parts.append(f"git working tree:\n{summary}")
+        if agent_files:
+            parts.append(
+                "changed by the agent this session:\n"
+                + "\n".join(f"  {gitinfo.shorten_path(Path(p))}" for p in agent_files)
+            )
+        self._note("\n\n".join(parts) if parts else "No changes to show.")
+
+    async def _cmd_copy(self, _arg: str) -> None:
+        text = ""
+        for widget in reversed(list(self.query(AssistantMessage))):
+            if widget.text.strip():
+                text = widget.text
+                break
+        if not text:
+            self.toast("Nothing to copy yet", "warning")
+            return
+        self.copy_to_clipboard(text)
+        self.toast(f"Copied {len(text):,} characters")
+
+    async def _cmd_export(self, arg: str) -> None:
+        if self.runtime is None:
+            return
+        lines = [f"# Kalash session {self.runtime.session.id}\n", f"Model: {self.runtime.ref}\n"]
+        for message in self.runtime.session.messages():
+            if message.role == "user":
+                lines.append(f"\n## You\n\n{message.visible_text.strip()}\n")
+            elif message.role == "assistant":
+                if message.text.strip():
+                    lines.append(f"\n## Kalash\n\n{message.text}\n")
+                for call in message.tool_calls:
+                    lines.append(f"\n> tool `{call.name}`: `{call.arguments[:300]}`\n")
+        path = Path(arg).expanduser() if arg else self.cwd / f"kalash-{self.runtime.session.id}.md"
+        try:
+            path.write_text("".join(lines), "utf-8")
+        except OSError as error:
+            self._note(f"Could not write {path}: {error}", "error")
+            return
+        self._note(f"Exported conversation to {path}")
+
+    async def _cmd_init(self, _arg: str) -> None:
+        await self._send(INIT_PROMPT, shown="/init")
+
+    async def _cmd_memory(self, _arg: str) -> None:
+        root = project_root(self.cwd)
+        path = root / "AGENTS.md"
+        if not path.exists():
+            path.write_text("# Project instructions\n\n", "utf-8")
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano"
+        with self.suspend(), contextlib.suppress(OSError):
+            subprocess.run([*shlex.split(editor), str(path)], check=False)
+        if self.runtime is not None and self.runtime.agent.context is not None:
+            self.runtime.agent.context.refresh_instructions()  # re-sent with your next message
+        self._note(
+            f"Edited {path}. The model gets the updated instructions with your next message."
+        )
+
+    async def _cmd_permissions(self, arg: str) -> None:
+        if self.runtime is None:
+            return
+        if not arg:
+            items = [(m.id, m.label, m.description) for m in MODES.values()]
+            picked = await self._modal(PickerScreen("Permission mode", items))
+            if not picked:
+                return
+            arg = picked
+        mode = resolve_mode(arg)
+        if mode is None:
+            self._note(f"Unknown mode {arg!r}. Modes: {', '.join(MODES)}", "warning")
+            return
+        await self._set_mode(mode.id)
+
+    async def _set_mode(self, mode_id: str) -> None:
+        """Switch mode. Full access (no sandbox, no prompts) needs an explicit confirmation."""
+        if self.runtime is None:
+            self._note("No model is configured. Use /provider and /model first.", "warning")
+            return
+        mode = MODES[mode_id]
+        if mode_id == "full" and self.runtime.agent.mode != "full":
+            sure = await self._modal(
+                ConfirmScreen(
+                    "Enable full access?",
+                    "Commands and file changes will run WITHOUT the sandbox and WITHOUT asking "
+                    "you first. The agent can delete or overwrite anything your user can. Use it "
+                    "only in a throwaway or fully backed-up environment.",
+                    confirm="Enable full access",
+                )
+            )
+            if not sure:
+                self.toast("Full access not enabled")
+                return
+        self.runtime.agent.set_mode(mode.id)
+        self.toast(f"{mode.label}: {mode.description}")
+
+    async def _cmd_todos(self, _arg: str) -> None:
+        todos = self.runtime.session.todos() if self.runtime else []
+        if not todos:
+            self._note("No task list yet.")
+            return
+        marks = {"completed": "☑", "in_progress": "◐", "pending": "☐"}
+        self._note("\n".join(f"{marks.get(t['status'], '☐')} {t['content']}" for t in todos))
+
+    async def _cmd_undo(self, _arg: str) -> None:
+        if self.runtime is None:
+            return
+        self._note(self.runtime.agent.undo_last_turn())
+        self._poll_git()
+
+    async def _cmd_theme(self, arg: str) -> None:
+        if not arg:
+            items = [
+                (name, name, "current" if name == self.theme else "")
+                for name in themes.SELECTABLE
+                if name in self.available_themes
+            ]
+            picked = await self._modal(PickerScreen("Theme", items))
+            if not picked:
+                return
+            arg = picked
+        arg = themes.ALIASES.get(arg, arg)
+        if arg not in self.available_themes:
+            self._note(f"Unknown theme {arg!r}.", "warning")
+            return
+        self.theme = arg
+        with contextlib.suppress(ConfigError, OSError):
+            update_setting(settings_path("user", self.cwd), "tui.theme", arg)
+        self.toast(f"Theme: {arg}")
+
+    async def _cmd_rename(self, arg: str) -> None:
+        if self.runtime is None:
+            return
+        title = arg or await self._modal(TextScreen("Session name"))
+        if not title:
+            return
+        self.runtime.session.append("title", title=title)
+        self.toast(f"Renamed to {title}")
+
+    async def _cmd_mcp(self, arg: str) -> None:
+        rt = self.runtime
+        word, _, target = arg.partition(" ")
+        if word in ("trust", "untrust") and target.strip():
+            if rt is None or rt.mcp is None:
+                self._note("No MCP servers are connected.", "warning")
+                return
+            changed = rt.mcp.set_trust(target.strip(), word == "trust")
+            if not changed:
+                self._note(f"No connected MCP server named {target.strip()!r}.", "warning")
+                return
+            state = "run without asking" if word == "trust" else "ask first again"
+            self._note(
+                f"{target.strip()}: its {changed} tools now {state} for this session. "
+                f"To keep it: kalash mcp trust {target.strip()}"
+                + ("" if word == "trust" else " --off")
+            )
+            return
+        configured = self.settings.mcp_servers
+        if rt is None or (not configured and not (rt.mcp and rt.mcp.clients)):
+            self._note(
+                "No MCP servers configured. Add one:  kalash mcp add deepwiki "
+                "https://mcp.deepwiki.com/mcp   (then restart or /new)"
+            )
+            return
+        lines = []
+        connected = {c.name: c for c in (rt.mcp.clients if rt.mcp else [])}
+        for name, server in configured.items():
+            client = connected.get(name)
+            if client is None:
+                lines.append(f"✗ {name}: not connected ({server.target})")
+                continue
+            names = [t.remote_name for t in (rt.mcp.tools if rt.mcp else []) if t.client is client]
+            era = getattr(client, "era", None)
+            how = f"remote, {era} protocol {getattr(client, 'version', '')}" if era else "local"
+            trust = "trusted" if server.trust else "asks first"
+            shown = ", ".join(names[:6]) + (f" +{len(names) - 6}" if len(names) > 6 else "")
+            lines.append(f"✓ {name} ({how}, {trust}): {len(names)} tools - {shown}")
+        for warning in rt.mcp.warnings if rt.mcp else []:
+            lines.append(f"! {warning}")
+        self._note("\n".join(lines))
+
+    async def _cmd_skills(self, _arg: str) -> None:
+        from kalash.skills import discover_skills
+
+        skills = discover_skills(project_root(self.cwd))
+        if not skills:
+            self._note("No skills found (.kalash/skills/<name>/SKILL.md).")
+            return
+        self._note("\n".join(f"{s.name} - {s.description}" for s in skills.values()))
+
+    async def _cmd_verbose(self, _arg: str) -> None:
+        self.action_toggle_verbose()
+
+    async def _cmd_doctor(self, _arg: str) -> None:
+        from kalash.sandbox import detect
+
+        status = detect(refresh=True)
+        self._note(
+            f"sandbox: {status.backend} - {status.detail}"
+            + ("" if status.ok else "\n(commands are refused in confined modes)")
+        )
+
+    # -- actions -----------------------------------------------------------------------
 
     def action_interrupt(self) -> None:
-        """Stop the run. First press cancels, second press quits.
-
-        Cancelling the worker alone leaves a running subprocess orphaned — a
-        `npm install` would keep going invisibly — so the agent is signalled too,
-        which propagates cancellation into the tool layer and terminates the
-        process group.
-        """
-        if self._stream_worker is not None and self._stream_worker.state is WorkerState.RUNNING:
-            agent = self._agent
-            if agent is not None:
-                with contextlib.suppress(Exception):
-                    agent.cancel()
-                with contextlib.suppress(Exception):
-                    from kalash.tools.shell import terminate_session_backgrounds
-
-                    asyncio.create_task(terminate_session_backgrounds(agent.session_id))
-            self._stream_worker.cancel()
-
-            line = self._active_tool
-            self._active_tool = None
-            if line is not None:
-                with contextlib.suppress(Exception):
-                    line.finish(failed=True)
-
-            self._say("interrupted — partial work is saved, /status shows the plan")
-            self.busy = False
-            return
-        self.exit()
-
-    def action_history_or_picker(self, delta: int) -> None:
-        picker = self.query_one(Picker)
-        if picker.is_open:
-            picker.move(delta)
-            return
-        self._recall_history(delta)
-
-    def _recall_history(self, delta: int) -> None:
-        if not self._history:
-            return
-        prompt = self.query_one("#prompt", Input)
-        if self._history_pos is None:
-            self._history_pos = len(self._history)
-        self._history_pos = max(0, min(len(self._history), self._history_pos + delta))
-        prompt.value = (
-            "" if self._history_pos >= len(self._history) else self._history[self._history_pos]
-        )
-        prompt.cursor_position = len(prompt.value)
-
-    # -- input -------------------------------------------------------------
-
-    @on(Input.Changed, "#prompt")
-    def _on_changed(self, event: Input.Changed) -> None:
-        # While collecting a key or URL the prompt is not a search box.
-        if self._intent is not InputIntent.PROMPT:
-            return
-
-        picker = self.query_one(Picker)
-        value = event.value
-
-        # Provider and model lists are also type-to-filter, which matters most
-        # for model pickers that can run to dozens of entries.
-        if picker.mode in (
-            PickerMode.PROVIDER,
-            PickerMode.MODEL,
-            PickerMode.SESSION,
-            PickerMode.THEME,
-        ):
-            picker.filter(value)
-            return
-
-        if value.startswith("/"):
-            items = [PickerItem(value=c, label=c, detail=d) for c, d in SLASH_COMMANDS]
-            if picker.mode is PickerMode.COMMAND:
-                picker.filter(value)
-            else:
-                picker.open(PickerMode.COMMAND, items, value)
-        elif picker.mode is PickerMode.COMMAND:
-            picker.close()
-
-    @on(Input.Submitted, "#prompt")
-    async def _on_submitted(self, event: Input.Submitted) -> None:
-        raw = event.value
-        event.input.value = ""
-
-        # A confirmed picker selection takes precedence over raw text.
-        picker = self.query_one(Picker)
-        if picker.is_open and picker.has_items:
-            item = picker.selected()
-            mode = picker.mode
-            picker.close()
-            if item is not None:
-                await self._on_picked(mode, item)
-                return
-
-        text = raw.strip()
-        if not text:
-            return
-
-        if self._intent is InputIntent.API_KEY:
-            await self._store_api_key(text)
-            return
-        if self._intent is InputIntent.BASE_URL:
-            await self._store_base_url(text)
-            return
-
-        if text.startswith("/"):
-            await self._run_command(text)
-            return
-        if text.lower() in {"exit", "quit"}:
-            self.exit()
-            return
-
-        self._history.append(text)
-        self._history_pos = None
-        await self._send(text)
-
-    def _reset_intent(self) -> None:
-        self._intent = InputIntent.PROMPT
-        try:
-            prompt = self.query_one("#prompt", Input)
-            prompt.placeholder = "Ask anything…"
-            prompt.password = False
-        except NoMatches:
+        if self._cancel_turn():
             pass
+        elif self.focused is self._prompt and self._prompt.text:
+            self._prompt.reset()
+        elif self._queue:
+            self._clear_queue()
 
-    def _ask_for(self, intent: InputIntent, placeholder: str) -> None:
-        self._intent = intent
-        prompt = self.query_one("#prompt", Input)
-        prompt.placeholder = placeholder
-        prompt.password = intent is InputIntent.API_KEY
-        prompt.value = ""
-        prompt.focus()
+    def _cancel_turn(self) -> bool:
+        if self._turn is None or self._turn.done():
+            return False
+        self._interrupted = True
+        self._turn.cancel()
+        return True
 
-    # -- picker results ----------------------------------------------------
+    def _restore_queue(self) -> None:
+        """Hand queued messages back to the prompt so an interrupt never sends them."""
+        queued = "\n".join(text for text, _ in self._queue)
+        for _, widget in self._queue:
+            widget.remove()
+        self._queue.clear()
+        self._activity.queued = 0
+        current = self._prompt.text
+        self._prompt.set_text(f"{queued}\n{current}" if current else queued)
+        self.toast("Queued messages are back in the prompt")
 
-    async def _on_picked(self, mode: PickerMode, item: PickerItem) -> None:
-        if mode is PickerMode.COMMAND:
-            await self._run_command(item.value)
-        elif mode is PickerMode.PROVIDER:
-            await self._provider_chosen(item.value)
-        elif mode is PickerMode.MODEL:
-            await self._model_chosen(item.value)
-        elif mode is PickerMode.SESSION:
-            await self._session_chosen(item.value)
-        elif mode is PickerMode.THEME:
-            await self._theme_chosen(item.value)
+    def _clear_queue(self) -> None:
+        for _, widget in self._queue:
+            widget.remove()
+        self._queue.clear()
+        self._activity.queued = 0
+        self.toast("Queued messages cleared")
 
-    def _activate_saved_theme(self) -> None:
-        """Apply the saved palette without leaving a stale built-in theme active."""
-        self._theme.apply_to(self)
+    def action_ctrl_c(self) -> None:
+        selected = self.screen.get_selected_text()
+        if selected:
+            self.copy_to_clipboard(selected)
+            self.screen.clear_selection()
+            self.toast(f"Copied {len(selected):,} characters")
+        elif self._cancel_turn():
+            pass
+        elif self._prompt.text:
+            self._prompt.reset()
+        else:
+            now = time.monotonic()
+            if now - self._last_ctrl_c < 2.0:
+                self._spawn(self.action_quit_app())
+            else:
+                self._last_ctrl_c = now
+                self.toast("Press Ctrl+C again to quit")
 
-    def _on_textual_theme_changed(self, theme: object) -> None:
-        """Sync saved settings when the user picks a theme via Ctrl+P."""
-        from textual.theme import Theme
-
-        if not isinstance(theme, Theme):
+    def action_cycle_mode(self) -> None:
+        if self.runtime is None:
             return
-        preset = KalashTheme.preset_from_textual_name(theme.name)
-        if preset is not None and preset != self._theme.preset_id:
-            self._theme.set_preset(preset)
-            self._theme.save()
-        self.set_class(self._theme.high_contrast, "high-contrast")
-        self._refresh_statusline()
+        mode = MODES[next_mode(self.runtime.agent.mode)]
+        self.runtime.agent.set_mode(mode.id)
+        self.toast(f"{mode.label}: {mode.description}")
 
-    def _apply_theme(self) -> None:
-        """Apply the current palette (called on mount and after /theme)."""
-        self._activate_saved_theme()
+    def action_toggle_verbose(self) -> None:
+        self._verbose = not self._verbose
+        for block in self.query(ToolBlock):
+            block.set_verbose(self._verbose)
+        for row in self.query(ReasoningRow):
+            row.set_verbose(self._verbose)
+        for group in self.query(ExploreGroup):
+            group.set_open(self._verbose)
+        self._refresh_status()
+        self.toast("Details shown" if self._verbose else "Details hidden")
 
-    async def _start_theme(self) -> None:
-        items = [
-            PickerItem(
-                value=pid, label=label, detail="current" if pid == self._theme.preset_id else ""
-            )
-            for pid, label, _, _ in KalashTheme.PRESETS
-        ]
-        self._open_picker(PickerMode.THEME, items)
+    def action_page_up(self) -> None:
+        self._stick = False
+        self._transcript.scroll_page_up(animate=False)
 
-    async def _theme_chosen(self, preset_id: str) -> None:
-        self._theme.set_preset(preset_id)
-        self._apply_theme()
-        self._theme.save()
-        await self._post(SystemMessage(f"theme → {self._theme.label}"))
+    def action_page_down(self) -> None:
+        self._transcript.scroll_page_down(animate=False)
+        self._follow_after_scroll()
 
-    def _open_picker(self, mode: PickerMode, items: list[PickerItem]) -> None:
-        self.query_one(Picker).open(mode, items)
+    def action_follow(self) -> None:
+        self._stick = True
+        self._transcript.call_after_refresh(self._follow_output)
 
-    # -- commands ----------------------------------------------------------
+    def _at_bottom(self) -> bool:
+        return self._transcript.scroll_y >= self._transcript.max_scroll_y - 1
 
-    async def _run_command(self, text: str) -> None:
-        from kalash.tui.commands import run_command
+    def _follow_after_scroll(self) -> None:
+        self._stick = False
+        revision = self._follow_revision
 
-        return await run_command(self, text)
+        def resume() -> None:
+            # Trackpads can reverse direction many times in one input batch.
+            # An older downward gesture must never re-enable follow after Up.
+            if revision == self._follow_revision:
+                self._stick = self._at_bottom()
 
-    # -- command helpers ---------------------------------------------------
+        self.call_after_refresh(resume)
 
-    async def _show_plan_widget(self) -> None:
-        from kalash.tui.commands import show_plan_widget
+    def _transcript_scrolled(self, up: bool) -> None:
+        if up:
+            self._stick = False
+        else:
+            self._follow_after_scroll()
 
-        return await show_plan_widget(self)
-
-    def _status_lines(self) -> list[str]:
-        from kalash.tui.commands import status_lines
-
-        return status_lines(self)
-
-    # -- copying out -------------------------------------------------------
-
-    def _transcript_text(self) -> str:
-        """Plain text of everything currently in the transcript."""
-        from kalash.tui.messages import AssistantMessage, SystemMessage, UserMessage
-
-        transcript = self._transcript()
-        archived = transcript.archived_text.rstrip()
-        parts: list[str] = [archived] if archived else []
-        if transcript.archive_error:
-            parts.append(transcript.archive_error)
-        for widget in self._transcript().children:
-            if hasattr(widget, "plain_text") and widget.plain_text:
-                parts.append(str(widget.plain_text))
-            elif isinstance(widget, (UserMessage, AssistantMessage, SystemMessage)):
-                with contextlib.suppress(Exception):
-                    rendered = widget.renderable
-                    text = getattr(rendered, "plain", None) or str(rendered)
-                    prefix = "> " if isinstance(widget, UserMessage) else ""
-                    if text.strip():
-                        parts.append(f"{prefix}{text.rstrip()}")
-        return "\n\n".join(parts)
-
-    def _last_reply_text(self) -> str:
-        """Plain text of the most recent assistant reply."""
-        from kalash.tui.messages import AssistantMessage
-
-        for widget in reversed(list(self._transcript().children)):
-            if isinstance(widget, AssistantMessage):
-                if hasattr(widget, "plain_text") and widget.plain_text:
-                    return widget.plain_text
-                with contextlib.suppress(Exception):
-                    rendered = widget.renderable
-                    return (getattr(rendered, "plain", None) or str(rendered)).strip()
-        return ""
-
-    def _set_clipboard(self, text: str) -> bool:
-        """Copy via universal clipboard engine (Textual + OSC 52 + Desktop tools)."""
-        from kalash.tui.clipboard import copy_text
-
-        success, _ = copy_text(text, app=self)
-        return success
-
-    def action_copy_reply(self) -> None:
-        self._say(self._copy_last_reply())
-
-    def action_copy_code(self) -> None:
-        self._say(self._copy_last_code())
-
-    def action_copy_transcript(self) -> None:
-        self._say(self._copy_full_transcript())
-
-    def _copy_last_reply(self) -> str:
-        text = self._last_reply_text()
-        if not text:
-            return "nothing to copy yet"
-        if self._set_clipboard(text):
-            return f"✓ Copied assistant reply to clipboard ({len(text)} chars)"
-        return "could not reach the clipboard — use /export instead"
-
-    def _copy_last_code(self) -> str:
-        from kalash.tui.clipboard import extract_last_code_block
-
-        text = self._last_reply_text()
-        code = extract_last_code_block(text)
-        if not code:
-            return "no code block found in last reply"
-        if self._set_clipboard(code):
-            return f"✓ Copied code block to clipboard ({len(code)} chars)"
-        return "could not reach the clipboard — use /export instead"
-
-    def _copy_full_transcript(self) -> str:
-        text = self._transcript_text()
-        if not text.strip():
-            return "nothing to copy yet"
-        if self._set_clipboard(text):
-            return f"✓ Copied full transcript to clipboard ({len(text)} chars)"
-        return "could not reach the clipboard — use /export instead"
-
-    def _export_transcript(self) -> str:
-        """Write the transcript to a file, for terminals that block OSC 52."""
-        from datetime import datetime
-        from pathlib import Path
-
-        text = self._transcript_text()
-        if not text.strip():
-            return "nothing to export yet"
-
-        stamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
-        target = Path.cwd() / f"kalash-transcript-{stamp}.txt"
-        try:
-            target.write_text(text, encoding="utf-8")
-        except OSError as exc:
-            return f"could not write the transcript: {exc}"
-        return f"wrote {target}  ({len(text)} chars)"
-
-    def _plan_text(self) -> str:
-        """Current plan, or an explanation of why there isn't one."""
-        agent = self._agent
-        if agent is None:
-            return "no session yet — send a message to begin"
-        plan = agent.plan()
-        if not plan:
-            return (
-                "no plan recorded yet. The agent writes one with the todo tool "
-                "before multi-step work; it survives restarts and /resume."
-            )
-        return plan
-
-    def _tool_lines(self) -> list[str]:
-        from kalash.tui.commands import tool_lines
-
-        return tool_lines(self)
-
-    def _mcp_lines(self) -> list[str]:
-        from kalash.tui.commands import mcp_lines
-
-        return mcp_lines(self)
-
-    def _skill_lines(self) -> list[str]:
-        from kalash.tui.commands import skill_lines
-
-        return skill_lines(self)
-
-    def _scratch_text(self, *, notes: bool) -> str:
-        from kalash.tui.commands import scratch_text
-
-        return scratch_text(self, notes=notes)
-
-    def _cost_lines(self) -> list[str]:
-        from kalash.tui.commands import cost_lines
-
-        return cost_lines(self)
-
-    def _write_starter_instructions(self) -> str:
-        from kalash.tui.commands import write_starter_instructions
-
-        return write_starter_instructions(self)
-
-    async def _start_sessions(self) -> None:
-        from kalash.runtime.session import SessionManager
-
-        try:
-            sessions = SessionManager().list_sessions(limit=20)
-        except Exception as exc:
-            await self._post(SystemMessage(f"could not list sessions: {exc}", error=True))
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp) -> None:
+        if self.screen.is_modal or event.ctrl or event.shift:
             return
-
-        if not sessions:
-            await self._post(SystemMessage("no saved sessions yet"))
-            return
-
-        items = [
-            PickerItem(
-                value=str(s["id"]),
-                label=str(s["id"]),
-                detail=f"{str(s.get('updated_at', ''))[:16]}  {s.get('project_dir', '')}",
-            )
-            for s in sessions
-        ]
-        self._open_picker(PickerMode.SESSION, items)
-        self.query_one("#prompt", Input).placeholder = "pick a session — ↑↓ then enter"
-
-    async def _replay_history(self, history: list[Message]) -> None:
-        """Mount restored session conversation messages into the transcript."""
-        from kalash.models.normalize import (
-            Role,
-            TextBlock,
-            ToolUseBlock,
-        )
-        from kalash.tui.messages import (
-            AssistantMessage,
-            ToolCallLine,
-            UserMessage,
-            WelcomeBanner,
+        # A non-scrolling prompt/footer bubbles its wheel events to the app. The
+        # transcript consumes its own wheel events while scrolling.
+        self._stick = False
+        self._transcript.scroll_relative(
+            y=-self.scroll_sensitivity_y, animate=False, immediate=True
         )
 
-        try:
-            banner = self.query_one(WelcomeBanner)
-            await banner.remove()
-            self._banner_removed = True
-        except NoMatches:
-            self._banner_removed = True
-
-        for msg in history:
-            role = getattr(msg, "role", None)
-            content = getattr(msg, "content", []) or []
-
-            if role == Role.USER or str(role).lower() == "user":
-                user_texts = [b.text for b in content if isinstance(b, TextBlock)]
-                if user_texts:
-                    await self._post(UserMessage("\n".join(user_texts)))
-            elif role == Role.ASSISTANT or str(role).lower() == "assistant":
-                for block in content:
-                    if isinstance(block, TextBlock) and block.text.strip():
-                        asst_msg = AssistantMessage()
-                        asst_msg.append(block.text)
-                        asst_msg.finish()
-                        await self._post(asst_msg)
-                    elif isinstance(block, ToolUseBlock):
-                        headline = summarize_tool_call(block.name, block.input)
-                        tool_line = ToolCallLine(headline, tool_name=block.name)
-                        tool_line.finish()
-                        await self._post(tool_line)
-
-    async def _session_chosen(self, session_id: str) -> None:
-        """Resume a stored session, replacing the live agent."""
-        from kalash.runtime.agent import build_agent, load_history_async
-
-        self._reset_intent()
-        agent, reason = build_agent(
-            provider_id=self.provider_id,
-            model_id=self.model_id,
-            mode=self._agent_mode(),
-            session_id=session_id,
-            resume=True,
-            interactive=True,
-        )
-        if agent is None:
-            await self._post(SystemMessage(reason, error=True))
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown) -> None:
+        if self.screen.is_modal or event.ctrl or event.shift:
             return
+        self._transcript.scroll_relative(y=self.scroll_sensitivity_y, animate=False, immediate=True)
+        self._follow_after_scroll()
 
-        # Load history asynchronously — the sync _load_history inside
-        # build_agent uses asyncio.run() which returns [] when called from
-        # inside the TUI's already-running event loop.
-        if agent.loop.session_repo is not None:
-            loaded = await load_history_async(agent.loop.session_repo, session_id)
-            agent.history = loaded
+    def action_help(self) -> None:
+        self._command_task = asyncio.create_task(self._run_command("/help"))
 
-        self._agent = agent
-        self._agent_signature = f"{self.provider_id}:{self.model_id}"
-        await self._prepare_agent(agent)
-        if agent.history:
-            await self._replay_history(agent.history)
-        await self._post(
-            SystemMessage(f"resumed {session_id} — {len(agent.history)} message(s) restored")
-        )
+    async def _release(self) -> None:
+        for task in (self._turn, self._command_task):
+            if task is not None and not task.done() and task is not asyncio.current_task():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await task
+        others = [t for t in self._bg if t is not asyncio.current_task()]
+        if others:  # never wait on ourselves: Ctrl+C twice quits from inside a background task
+            await asyncio.gather(*others, return_exceptions=True)
+        if self.runtime is not None:
+            runtime, self.runtime = self.runtime, None
+            await runtime.aclose()
 
-    async def _start_connect(self) -> None:
-        from kalash.models.catalog import PROVIDERS
-
-        items = [
-            PickerItem(
-                value=p.id,
-                label=p.name,
-                detail="no key needed" if not p.requires_key else "",
-            )
-            for p in PROVIDERS
-        ]
-        self._open_picker(PickerMode.PROVIDER, items)
-        self.query_one("#prompt", Input).placeholder = "select a provider — ↑↓ then enter"
-
-    async def _provider_chosen(self, provider_id: str) -> None:
-        from kalash.models.auth_store import get_credential, save_credential
-        from kalash.models.catalog import get_provider
-
-        provider = get_provider(provider_id)
-        if provider is None:
-            return
-
-        self._pending_provider = provider_id
-
-        if provider_id == "custom":
-            self._ask_for(InputIntent.BASE_URL, "base URL, e.g. http://localhost:8000/v1")
-            return
-
-        if not provider.requires_key:
-            save_credential(provider_id, "")
-            self.provider_id = provider_id
-            self._reset_intent()
-            await self._start_models()
-            return
-
-        # If a key is already saved, skip re-asking and go straight to models.
-        existing_key = get_credential(provider_id)
-        if not existing_key:
-            # Also check the environment variable as a fallback.
-            existing_key = os.environ.get(provider.env_key, "")
-        if existing_key:
-            save_credential(provider_id, existing_key)
-            self.provider_id = provider_id
-            self._reset_intent()
-            await self._post(
-                SystemMessage(
-                    f"using saved key for {provider.name} — run /key to update it if needed"
-                )
-            )
-            await self._start_models()
-            return
-
-        self._ask_for(InputIntent.API_KEY, f"paste your {provider.name} API key")
-
-    async def _store_base_url(self, url: str) -> None:
-        self._pending_base_url = url
-        self._ask_for(InputIntent.API_KEY, "API key (enter to skip)")
-
-    async def _store_api_key(self, api_key: str) -> None:
-        from kalash.models.auth_store import save_credential
-
-        provider_id = self._pending_provider
-        if provider_id is None:
-            self._reset_intent()
-            return
-
-        save_credential(provider_id, api_key)
-        if self._pending_base_url:
-            save_credential(f"{provider_id}:base_url", self._pending_base_url)
-        self.provider_id = provider_id
-        self._reset_intent()
-        await self._start_models()
-
-    async def _start_models(self) -> None:
-        if self.provider_id is None:
-            await self._start_connect()
-            return
-        self.query_one(Picker).show_status("fetching models…")
-        self._fetch_models()
-
-    @work(exclusive=True, group="models")
-    async def _fetch_models(self) -> None:
-        from kalash.models.auth_store import get_credential
-        from kalash.models.catalog import fetch_models, get_provider
-
-        assert self.provider_id is not None
-        provider = get_provider(self.provider_id)
-        api_key = get_credential(self.provider_id) or (
-            os.environ.get(provider.env_key, "") if provider else ""
-        )
-
-        models = await fetch_models(self.provider_id, api_key)
-        picker = self.query_one(Picker)
-
-        if not models:
-            picker.close()
-            await self._post(
-                SystemMessage(
-                    "could not list models — check the API key and network",
-                    error=True,
-                )
-            )
-            return
-
-        self._open_picker(PickerMode.MODEL, [PickerItem(value=m, label=m) for m in models])
-        self.query_one("#prompt", Input).placeholder = "select a model — ↑↓ then enter"
-
-    async def _model_chosen(self, model_id: str) -> None:
-        from kalash.models.auth_store import set_active_provider
-
-        assert self.provider_id is not None
-        self.model_id = model_id
-        set_active_provider(self.provider_id, model_id)
-        self._reset_intent()
-        self._refresh_statusline()
-        await self._post(SystemMessage(f"using {model_id}"))
-
-    # -- sending -----------------------------------------------------------
-
-    async def _send(self, text: str) -> None:
-        self._transcript().follow_output = True
-        await self._post(UserMessage(text))
-        if self.provider_id is None or self.model_id is None:
-            await self._post(SystemMessage("no provider connected — run /connect", error=True))
-            return
-        message = AssistantMessage()
-        self._current_assistant = message
-        await self._post(message)
-        self.busy = True
-        self._stream_worker = self._stream(text, message)
-
-    @work(exclusive=True, group="stream")
-    async def _stream(self, text: str, sink: AssistantMessage) -> None:
-        """Run one agentic turn.
-
-        This used to stream a bare text completion with no tools attached, which
-        is why the model answered "I cannot access your filesystem" while sitting
-        in the user's repository. It now drives the full loop: tools, permission
-        gate, and conversation history that survives across turns.
-        """
-        from kalash.runtime.loop import TerminationReason
-
-        try:
-            agent = await self._ensure_agent()
-            if agent is None:
-                sink.set_error(self._resolution_error or "provider could not be initialised")
-                return
-
-            result = await agent.send(text, on_text_delta=self._make_sink(sink))
-            self._finish_assistant()
-
-            match result.termination_reason:
-                case TerminationReason.ERROR:
-                    await self._post(SystemMessage(result.error or "run failed", error=True))
-                case TerminationReason.BUDGET_EXHAUSTED:
-                    detail = f" ({result.error})" if result.error else ""
-                    await self._post(
-                        SystemMessage(
-                            f"budget ceiling reached after {result.iterations} turns{detail} — "
-                            f"work may be incomplete",
-                            error=True,
-                        )
-                    )
-                case TerminationReason.MAX_ITERATIONS:
-                    await self._post(
-                        SystemMessage(
-                            f"stopped at the {result.iterations}-turn limit — "
-                            f"work may be incomplete",
-                            error=True,
-                        )
-                    )
-        except Exception as exc:  # surfaced in the transcript, never a crash
-            from kalash.models.diagnose import explain
-
-            (self._current_assistant or sink).set_error(explain(str(exc), self.model_id or ""))
-        finally:
-            self._finish_assistant()
-            for line in self._active_tools.values():
-                line.finish(failed=True)
-            self._active_tools.clear()
-            self._active_tool_started.clear()
-            self._active_tool = None
-            self.busy = False
-            self._current_assistant = None
-            self._react_step = 0
-            self._refresh_statusline()
-
-    def _make_sink(self, sink: AssistantMessage) -> Callable[[str], None]:
-        """Route each response to its own entry, after the preceding tools."""
-
-        def emit(delta: str) -> None:
-            (self._current_assistant or sink).append(delta)
-
-        return emit
-
-    async def _prepare_agent(self, agent: Agent) -> None:
-        """Wire MCP, tool-event handlers, and approval UI for an agent."""
-        from kalash.runtime.bootstrap import prepare_agent
-        from kalash.tui.approval import TuiApprovalAdapter
-
-        if agent.host.approval is not None:
-            agent.host.approval.ui = TuiApprovalAdapter(self)
-            agent.host.approval.non_interactive = False
-
-        bus = agent.loop.event_bus
-        if self._tool_event_bus is not bus:
-            self._subscribe_tool_events(bus)
-            self._tool_event_bus = bus
-
-        await prepare_agent(agent)
-        await self._report_model_constraints(agent)
-
-    async def _ensure_agent(self) -> Agent | None:
-        """Build the agent on first use, rebuilding if the model changed."""
-        signature = f"{self.provider_id}:{self.model_id}"
-        if self._agent is not None and self._agent_signature == signature:
-            self._agent.set_mode(self._agent_mode())
-            await self._prepare_agent(self._agent)
-            return self._agent
-
-        from kalash.core.events import EventBus
-        from kalash.runtime.agent import build_agent
-
-        bus = EventBus()
-        agent, reason = build_agent(
-            provider_id=self.provider_id,
-            model_id=self.model_id,
-            mode=self._agent_mode(),
-            event_bus=bus,
-            interactive=True,
-        )
-        if agent is None:
-            self._resolution_error = reason
-            return None
-
-        if self._agent is not None:
-            await self._agent.close()
-        self._agent = agent
-        self._agent_signature = signature
-        await self._prepare_agent(agent)
-        return agent
-
-    async def _report_model_constraints(self, agent: Agent) -> None:
-        """Surface model limits once — in the status line, not the transcript."""
-        capabilities = getattr(agent.loop.gateway.primary, "capabilities", None)
-        if capabilities is not None and not capabilities.tool_use:
-            if not self._constraints_announced:
-                self._constraints_announced = True
-                await self._post(
-                    SystemMessage(
-                        "This model cannot call tools. Select a coding model with /models.",
-                        error=True,
-                    )
-                )
-            return
-        count = len(agent.host.schemas())
-        self._model_profile = f"{count} tools"
-        self._refresh_statusline()
-
-    def _agent_mode(self) -> str:
-        """Current mode as the agent layer spells it.
-
-        Deliberately not named ``_current_mode``: Textual's ``App.__init__``
-        assigns ``self._current_mode`` for its screen-modes feature, and an
-        instance attribute shadows a method of the same name, so the call site
-        silently resolved to the string ``"_default"`` and raised
-        ``TypeError: 'str' object is not callable``.
-        """
-        return "plan" if self.mode == Mode.PLAN.value else "build"
-
-    def _subscribe_tool_events(self, bus: Any) -> None:
-        from kalash.tui.events import subscribe_tool_events
-
-        if self._event_unsubscribe is not None:
-            self._event_unsubscribe()
-        self._event_unsubscribe = subscribe_tool_events(self, bus)
+    async def action_quit_app(self) -> None:
+        await self._release()
+        self.exit(0)
 
     async def on_unmount(self) -> None:
-        if self._event_unsubscribe is not None:
-            self._event_unsubscribe()
-            self._event_unsubscribe = None
-        if self._agent is not None:
-            self._agent.cancel()
-            await self._agent.close()
+        await self._release()
 
-    def _tick_active_tool(self) -> None:
-        """Refresh the elapsed counter on still-running tool calls."""
-        if not self._active_tools:
-            return
-        now = time.monotonic()
-        for tool_id, line in self._active_tools.items():
-            if not line.is_done:
-                started = self._active_tool_started.get(tool_id)
-                if started is not None:
-                    with contextlib.suppress(Exception):
-                        line.tick(now - started)
+
+def run_tui(
+    *,
+    cwd: Path,
+    settings: Settings,
+    model: str | None,
+    session_ref: str | None,
+    continue_latest: bool,
+) -> int:
+    app = KalashApp(
+        cwd=cwd,
+        settings=settings,
+        model=model,
+        session_ref=session_ref,
+        continue_latest=continue_latest,
+    )
+    return int(app.run() or 0)
+
+
+__all__ = ["KalashApp", "run_tui"]

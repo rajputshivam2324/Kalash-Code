@@ -1,272 +1,213 @@
-"""Tool protocol, schema generation, and result envelope.
+"""Tool definitions, execution context and the registry.
 
-Every tool returns a ToolEnvelope — never raises to the caller.
-Side effects are declared statically and recorded at runtime.
+A tool declares a pydantic parameter model (unknown arguments are rejected with the list
+of valid ones), whether it only reads (``read_only``: may run concurrently with other
+read-only calls) and a ``run`` coroutine. Policy (permissions, sandbox mode) is applied
+by the agent *before* ``run``; tools never decide whether they are allowed.
 """
 
 from __future__ import annotations
 
-import enum
+from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, ClassVar
+
+from pydantic import BaseModel, ConfigDict, ValidationError
+
+from kalash.llm.types import ToolSpec
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-    from pathlib import Path
-
-    from pydantic import BaseModel
-
-    from kalash.core.config import KalashConfig
-
-# ---------------------------------------------------------------------------
-# Enums
-# ---------------------------------------------------------------------------
+    from kalash.tools.jobs import JobManager
+    from kalash.tools.observe import ObservationTracker
 
 
-class SideEffect(enum.Enum):
-    """Declared side-effect level of a tool invocation."""
-
-    NONE = "none"
-    READ = "read"
-    WRITE = "write"
-    EXEC = "exec"
+class Params(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
 
-# ---------------------------------------------------------------------------
-# Supporting dataclasses
-# ---------------------------------------------------------------------------
+@dataclass
+class ToolResult:
+    """What the model sees. ``is_error`` marks failures so the model (and logs) can tell."""
 
-
-@dataclass(frozen=True, slots=True)
-class TruncationInfo:
-    """Metadata about output truncation."""
-
-    total_lines: int
-    shown_lines: int
-    total_bytes: int
-    retrieval_hint: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class ToolError:
-    """Structured error within a ToolEnvelope."""
-
-    code: str
-    message: str
-    recoverable: bool = False
-    remediation: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class SideEffectRecord:
-    """Record of a side effect that occurred during execution."""
-
-    kind: str  # created | modified | deleted | executed
-    path: str
-    digest: str = ""
-
-
-@dataclass(frozen=True, slots=True)
-class ToolContext:
-    """Contextual information passed to every tool execution."""
-
-    session_id: str
-    run_id: str
-    cwd: Path
-    writable_roots: tuple[Path, ...] = ()
-    capabilities: frozenset[str] = frozenset()
-
-    # Delegation bounds. An agent that can spawn agents can spend money
-    # exponentially, so depth is carried in the context and decremented on the
-    # way down rather than tracked in a global.
-    spawn_depth: int = 0
-    max_spawn_depth: int = 3
-    model_id: str = ""
-    """Model the parent is running on, so a child can inherit it."""
-
-    allow_network: bool = False
-    require_sandbox: bool = True
-    """Whether this specific call may reach the network.
-
-    Set per-call from the risk classification and the user's answer, not
-    globally. A sandbox that denies network unconditionally makes every package
-    manager hang until timeout, which is indistinguishable from a freeze."""
-
-    tool_use_id: str = ""
-    """Provider tool-use id for correlating live output events."""
-
-    event_bus: Any | None = None
-    """Optional bus for streaming tool output to the TUI / headless sink."""
-
-    cancel_event: Any | None = None
-    """When set, cooperative tools should abort in-flight work."""
-
-    delegate: Callable[..., Awaitable[dict[str, Any]]] | None = None
-    hooks: Any | None = None
-    """Optional HookRunner for tools to dispatch fine-grained events."""
-
-    config: KalashConfig | None = None
-    """The owning agent's configuration, including memory policy."""
-
-    discover_tools: Callable[..., ToolEnvelope] | None = None
-    """Session-local, permission-filtered extension discovery; no execution."""
-
-    @property
-    def can_spawn(self) -> bool:
-        """Whether this context is allowed to create another child."""
-        return self.spawn_depth < self.max_spawn_depth
-
-
-# ---------------------------------------------------------------------------
-# Result envelope
-# ---------------------------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class ToolEnvelope:
-    """Immutable result from any tool execution.
-
-    Tools never raise to the caller — they return an envelope with
-    ok=False and a populated error field on failure.
-    """
-
-    ok: bool
-    content: str = ""
+    text: str
+    is_error: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
-    truncated: bool = False
-    truncation: TruncationInfo | None = None
-    error: ToolError | None = None
-    side_effects: tuple[SideEffectRecord, ...] = ()
-
-    @staticmethod
-    def success(
-        content: str = "",
-        *,
-        metadata: dict[str, Any] | None = None,
-        truncated: bool = False,
-        truncation: TruncationInfo | None = None,
-        side_effects: tuple[SideEffectRecord, ...] = (),
-    ) -> ToolEnvelope:
-        """Convenience constructor for successful results."""
-        return ToolEnvelope(
-            ok=True,
-            content=content,
-            metadata=metadata or {},
-            truncated=truncated,
-            truncation=truncation,
-            side_effects=side_effects,
-        )
-
-    @staticmethod
-    def fail(
-        code: str,
-        message: str,
-        *,
-        recoverable: bool = False,
-        remediation: str = "",
-    ) -> ToolEnvelope:
-        """Convenience constructor for failures."""
-        return ToolEnvelope(
-            ok=False,
-            error=ToolError(
-                code=code,
-                message=message,
-                recoverable=recoverable,
-                remediation=remediation,
-            ),
-        )
 
 
-# ---------------------------------------------------------------------------
-# Tool protocol
-# ---------------------------------------------------------------------------
+@dataclass
+class Effects:
+    """What a call would touch, declared up front so policy can decide before it runs."""
+
+    reads: list[Path] = field(default_factory=list)
+    writes: list[Path] = field(default_factory=list)
+    network: bool = False
+    execute: bool = False  # runs a command (confined by the OS sandbox)
+    escalate: bool = False  # asks to run outside the sandbox
+    url: str | None = None
 
 
-@runtime_checkable
-class Tool(Protocol):
-    """Protocol that all tools must satisfy.
+@dataclass
+class ToolContext:
+    cwd: Path
+    root: Path
+    session_id: str
+    observations: ObservationTracker
+    jobs: JobManager
+    sandbox_mode: str
+    network: bool
+    writable_roots: list[Path]
+    spill_dir: Path
+    emit_output: Callable[[str], None] = lambda _text: None  # live output for UIs
+    ask_user: Callable[[str], Awaitable[str]] | None = None
+    extras: dict[str, Any] = field(default_factory=dict)
+    call_id: str = ""
 
-    Tools declare their metadata as class-level attributes and implement
-    an async execute() method that returns a ToolEnvelope.
-    """
+    def resolve(self, raw: str, base: Path | None = None) -> Path:
+        path = Path(raw).expanduser()
+        if not path.is_absolute():
+            path = (base or self.cwd) / path
+        return Path(_normalize(path))
 
-    @property
-    def name(self) -> str:
-        """Unique tool name (e.g. 'read', 'shell')."""
-        ...
+    def display(self, path: Path) -> str:
+        """Workspace-relative spelling when inside the project root, absolute otherwise."""
+        try:
+            return str(path.relative_to(self.root))
+        except ValueError:
+            return str(path)
+
+
+def _normalize(path: Path) -> str:
+    import os
+
+    return os.path.normpath(str(path))
+
+
+class Tool(ABC):
+    name: ClassVar[str]
+    description: ClassVar[str]
+    params: ClassVar[type[Params]]
+    read_only: ClassVar[bool] = False
+    needs_approval: ClassVar[bool] = False  # always ask first (e.g. untrusted MCP tools)
+    concurrent_safe: ClassVar[bool | None] = None  # None: same as read_only
 
     @property
-    def version(self) -> str:
-        """SemVer tool version."""
-        ...
+    def can_run_concurrently(self) -> bool:
+        return self.read_only if self.concurrent_safe is None else self.concurrent_safe
 
-    @property
-    def description(self) -> str:
-        """Human-readable description for LLM schema."""
-        ...
+    def spec(self) -> ToolSpec:
+        return ToolSpec(self.name, self.description, json_schema(self.params))
 
-    @property
-    def params(self) -> type[BaseModel]:
-        """Pydantic model describing accepted parameters."""
-        ...
+    def parse(self, arguments: dict[str, Any]) -> Params:
+        return self.params.model_validate(arguments)
 
-    @property
-    def side_effect(self) -> SideEffect:
-        """Declared static side-effect level."""
-        ...
+    def permission_key(self, params: Params, ctx: ToolContext) -> str:
+        """A short string describing this call to permission rules and approval prompts."""
+        return self.name
 
-    @property
-    def capabilities(self) -> frozenset[str]:
-        """Static capabilities required to use this tool."""
-        ...
+    def effects(self, params: Params, ctx: ToolContext) -> Effects:
+        return Effects()
 
-    @property
-    def timeout_s(self) -> float:
-        """Default timeout in seconds."""
-        ...
+    def describe(self, params: Params, ctx: ToolContext) -> str:
+        """Human-readable detail for approval prompts (a diff, the full command...)."""
+        return ""
 
-    @property
-    def max_output_bytes(self) -> int:
-        """Maximum output size before truncation."""
-        ...
-
-    @property
-    def idempotent(self) -> bool:
-        """Whether repeated calls with same args are safe."""
-        ...
-
-    @property
-    def cancellable(self) -> bool:
-        """Whether the tool supports cooperative cancellation."""
-        ...
-
-    def dynamic_capabilities(self, args: BaseModel) -> frozenset[str]:
-        """Capabilities needed based on specific arguments (runtime)."""
-        ...
-
-    async def execute(self, args: BaseModel, ctx: ToolContext) -> ToolEnvelope:
-        """Execute the tool and return a result envelope.
-
-        Must never raise — all errors go into ToolEnvelope.error.
-        """
-        ...
+    @abstractmethod
+    async def run(self, params: Any, ctx: ToolContext) -> ToolResult: ...
 
 
-# ---------------------------------------------------------------------------
-# Schema generation helpers
-# ---------------------------------------------------------------------------
+def json_schema(model: type[BaseModel]) -> dict[str, Any]:
+    """Compact JSON schema: no titles, defaults dropped, ``$ref`` inlined."""
+    schema = model.model_json_schema()
+    defs = schema.pop("$defs", {})
+
+    def clean(node: Any) -> Any:
+        if isinstance(node, dict):
+            if "$ref" in node:
+                return clean(defs[node["$ref"].rsplit("/", 1)[-1]])
+            out = {k: clean(v) for k, v in node.items() if k not in ("title", "default")}
+            if "anyOf" in out:  # Optional[X] -> X (the field is simply not required)
+                options = [o for o in out["anyOf"] if o.get("type") != "null"]
+                if len(options) == 1:
+                    merged = {k: v for k, v in out.items() if k != "anyOf"}
+                    merged.update(options[0])
+                    return merged
+            return out
+        if isinstance(node, list):
+            return [clean(v) for v in node]
+        return node
+
+    result: dict[str, Any] = clean(schema)
+    result.setdefault("properties", {})
+    result["additionalProperties"] = False
+    return result
 
 
-def tool_json_schema(tool: Tool) -> dict[str, Any]:
-    """Generate JSON Schema for a tool's parameters (for LLM function calling)."""
-    schema = tool.params.model_json_schema()
-    return {
-        "name": tool.name,
-        "description": tool.description,
-        "parameters": schema,
-    }
+def validation_message(tool: Tool, error: ValidationError) -> str:
+    """An actionable argument error naming the problem fields and the valid parameters."""
+    lines = []
+    for item in error.errors():
+        where = ".".join(str(p) for p in item["loc"]) or "arguments"
+        if item["type"] == "extra_forbidden":
+            lines.append(f"unknown parameter '{where}'")
+        elif item["type"] == "missing":
+            lines.append(f"missing required parameter '{where}'")
+        else:
+            lines.append(f"'{where}': {item['msg']}")
+    props = ", ".join(tool.params.model_json_schema().get("properties", {}))
+    return f"Invalid arguments for {tool.name}: {'; '.join(lines)}. Valid parameters: {props}."
 
 
-def tools_manifest(tools: list[Tool]) -> list[dict[str, Any]]:
-    """Generate a complete tools manifest for schema negotiation."""
-    return [tool_json_schema(t) for t in tools]
+class Registry:
+    def __init__(self, tools: list[Tool] | None = None) -> None:
+        self._tools: dict[str, Tool] = {}
+        for tool in tools or []:
+            self.add(tool)
+
+    def add(self, tool: Tool) -> None:
+        if tool.name in self._tools:
+            raise ValueError(f"duplicate tool name {tool.name!r}")
+        self._tools[tool.name] = tool
+
+    def get(self, name: str) -> Tool | None:
+        return self._tools.get(name)
+
+    def names(self) -> list[str]:
+        return list(self._tools)
+
+    def specs(self) -> list[ToolSpec]:
+        return [t.spec() for t in self._tools.values()]
+
+    def subset(self, names: set[str]) -> Registry:
+        return Registry([t for t in self._tools.values() if t.name in names])
+
+    def without(self, names: set[str]) -> Registry:
+        return Registry([t for t in self._tools.values() if t.name not in names])
+
+    def __len__(self) -> int:
+        return len(self._tools)
+
+
+def compact_tool_spec(spec: ToolSpec) -> ToolSpec:
+    """Shorten documentation for small windows; keep the complete callable schema."""
+
+    def compact(node: Any) -> Any:
+        if isinstance(node, dict):
+            result = {}
+            for key, value in node.items():
+                if key == "description":
+                    continue
+                if key in ("properties", "$defs", "definitions", "patternProperties"):
+                    result[key] = {name: compact(schema) for name, schema in value.items()}
+                else:
+                    result[key] = compact(value)
+            return result
+        if isinstance(node, list):
+            return [compact(item) for item in node]
+        return node
+
+    description = spec.description.split(". ", 1)[0]
+    if len(description) > 200:
+        description = description[:197] + "..."
+    return ToolSpec(spec.name, description, compact(spec.parameters))

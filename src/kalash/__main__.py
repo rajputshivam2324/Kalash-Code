@@ -1,6 +1,4 @@
-"""Entry point for `python -m kalash`."""
-
-from kalash.cli.main import app
+from kalash.cli.main import main
 
 if __name__ == "__main__":
-    app()
+    main()

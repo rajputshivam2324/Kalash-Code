@@ -1,1 +1,0 @@
-"""Storage layer — SQLite persistence."""

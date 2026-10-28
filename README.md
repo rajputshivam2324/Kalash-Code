@@ -1,234 +1,313 @@
-<div align="center">
-
 # Kalash Code
 
-**A Python coding-agent runtime with a terminal UI, headless CLI and SDK.**
-
-The runtime owns permissions, tools, session history, context and run limits, so the model never has to.
-
-![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
-![Package manager: uv](https://img.shields.io/badge/package%20manager-uv-purple)
-![Linting: ruff](https://img.shields.io/badge/lint-ruff-orange)
-![Types: mypy](https://img.shields.io/badge/types-mypy-informational)
-
-[Quick Start](#quick-start) · [Providers](#providers) · [Runtime](#runtime-behavior) · [MCP & Hooks](#mcp-and-hooks) · [Development](#development)
-
-</div>
-
----
-
-## Overview
-
-Kalash Code is a coding-agent harness: the runtime that surrounds a model and turns it into a dependable agent. It runs one loop (assemble context, request the model, execute tools, append results) and enforces permissions, sandboxing, budgets and persistence around it.
-
-| Interface | Description |
-| --- | --- |
-| **Terminal UI** | Interactive session with a model picker (`kalash`) |
-| **Headless CLI** | Scriptable single-shot runs (`kalash -p "..."`) |
-| **SDK** | Embed the runtime in your own Python code |
-
-## Quick Start
+A terminal coding agent: one loop, a durable session log, and tools that run inside an OS sandbox.
 
 ```bash
-uv sync --all-extras
-uv run kalash doctor
-uv run kalash
-uv run kalash -p "Inspect this repository and fix the failing test"
+uv sync --extra dev
+uv run kalash doctor                      # checks Python, sandbox, ripgrep, keys
+uv run kalash provider anthropic          # store a key (or set ANTHROPIC_API_KEY etc.)
+uv run kalash models                      # what each provider offers, with context and price
+uv run kalash model anthropic/claude-sonnet-5-5
+uv run kalash                             # interactive UI
+uv run kalash -p "fix the failing test"   # one-shot, scriptable
 ```
 
-Configure a provider with `kalash provider add` or through its environment variable.
+Python 3.12+ (tested on 3.12, 3.13 and 3.14). On Linux install `bubblewrap` (and `ripgrep` for
+faster search); without a working sandbox Kalash refuses to run shell commands in confined modes
+instead of running them unconfined. To use the command on your PATH from a checkout:
+`pip install --user -U -e .` (the UI needs Textual 8, which this pulls in).
 
-| Location | Contents |
-| --- | --- |
-| `~/.kalash/` | Provider credentials and user settings |
-| `.kalash/` | Project guidance and definitions |
+## Providers
 
-## Runtime Behavior
+Plain HTTP, no vendor SDKs. A model is `provider/model`; keys come from the environment first,
+then `kalash provider ID` / `/provider` (encrypted in `~/.kalash/auth.json`). Each provider speaks the
+wire format its current API requires - not a lowest-common-denominator one:
 
-**Loop and tools**
+| Provider | Wire format | Key variable |
+| --- | --- | --- |
+| anthropic | Messages API: adaptive thinking + `effort`, prompt caching | `ANTHROPIC_API_KEY` |
+| openai | Responses API (tools + reasoning; Chat Completions can't do both on current models) | `OPENAI_API_KEY` |
+| google | native Gemini API with thought signatures | `GEMINI_API_KEY` / `GOOGLE_API_KEY` |
+| deepseek | Messages-compatible `/anthropic` endpoint, thinking replayed | `DEEPSEEK_API_KEY` |
+| xai | Responses API | `XAI_API_KEY` |
+| moonshot, zai, sarvam | Chat Completions (reasoning fields handled per provider) | `MOONSHOT_API_KEY`, `ZAI_API_KEY`, `SARVAM_API_KEY` |
+| minimax | Messages-compatible | `MINIMAX_API_KEY` |
+| openrouter, groq, together, fireworks, cerebras | Chat Completions | `<NAME>_API_KEY` |
+| ollama | Chat Completions, local | none (`OLLAMA_HOST`) |
 
-- One loop: assemble context, request the model, execute tools, append results.
-- The full permitted tool set stays available. TPM policies and tool profiles do not rewrite prompts or shorten replies.
-- Independent reads can overlap; writes and execution form ordering barriers.
-- Plan mode and child capability/tool restrictions are enforced at dispatch time.
+`kalash models [provider]` lists the built-in catalog (context window, output limit, price, notes,
+supported reasoning efforts); `kalash models --refresh` asks providers for their live lists and
+caches them for a day. Retired ids are refused with the replacement named instead of failing with a
+provider 404. Reasoning effort (`/effort`, `reasoning_effort`) is mapped to what each model accepts;
+parameters a model rejects (sampling on reasoning models, for example) are never sent.
 
-**Run limits**
+Any other OpenAI- or Anthropic-compatible endpoint: add it under `providers` in settings
+(`kind`, `base_url`, `models`, `api_key_env`, `context_window`).
 
-Token and cost ceilings are **opt-in**. Usage is still recorded, including summary
-calls and child agents. Kalash keeps the selected model and output allowance; an
-explicit spending cap that cannot fit the next request produces an actionable
-stop instead of silently shrinking the response. Cost estimates require provider
-prices and are not a billing guarantee.
+Errors are classified by HTTP status, never by digits in message text. Rate limits, 5xx and dropped
+connections retry with backoff (honouring `Retry-After`); auth, quota, bad-request and
+malformed-response errors do not. A context-overflow error triggers compaction and one retry. An
+empty completion is retried once; if the model then stays silent *after a tool result*, it is asked
+once, in words, for a summary - and only then reported as `EMPTY_RESPONSE`.
 
-Set your own session ceilings in user settings (omit these keys or use `null` for
-no spending cap):
+**Reasoning effort.** `/effort` opens a picker of exactly the levels the current model accepts
+(`Ctrl+T` cycles them; `kalash --effort high` or `reasoning_effort` in settings sets it up front;
+`/effort default` returns to the model's own default). `/effort auto` is opt-in: it sends the model's
+lowest level for plain tool-result steps and its full level for the first step of a turn, after a
+failed tool call and after an empty-reply nudge (changing the level between requests can cost cache
+hits on providers that cache by request shape; the effect on cost is not measured). A
+model with no reasoning control says so instead of pretending. The choice is saved with the session
+and restored on resume.
+
+> **Verification status.** Adapters are tested against wire payloads and a loopback server.
+> Live trials have exercised Sarvam 105B, Sarvam GLM 5.3 Flash and Groq GPT-OSS 20B,
+> including tools, context compaction and memory retrieval. Some trials failed; successful
+> repairs used feedback and independent artifact checks. These runs do not establish a
+> reliability rate or verify every provider/model combination.
+
+## How a turn works
+
+1. The user message is appended to the **session log** (`~/.kalash/sessions/<project>/<id>.jsonl`).
+   Model history is derived from that log and nothing else. The message may start with
+   `<system-reminder>` blocks - workspace instructions, the skill list, a runtime snapshot (working
+   directory, permission mode, sandbox, date) - each sent only when it changed since last time. The
+   **system prompt itself is static**, so a provider's prompt cache survives mode changes, edits to
+   `AGENTS.md` and new days.
+2. The model streams a response; it is committed to the log only when complete. A response cut
+   off by the output limit never executes its half-written tool calls.
+3. Tool calls run in model order. Read-only tools run concurrently. Every call gets exactly one
+   result - if the process dies mid-call, resume writes "outcome unknown" for it.
+4. The turn ends with an honest reason: `completed`, `max_tokens`, `stuck`, `cancelled`,
+   `error` or `refused`. `completed` means the model stopped, not that the task is verified.
+
+Guard rails against the failure shapes seen on real models (they live in `agent/guards.py` and
+`tools/matching.py`, and are plain text appended to tool results, so they are logged):
+
+- **Repeated failure.** The same command (or edits to the same file) failing with the same error
+  - whatever else happens in between - draws a "that is not the cause" note on the 3rd failure and
+  a "stop and report" note on the 5th; on the 6th identical failure the turn ends as `stuck`
+  so the user can steer a genuinely unchanging failure. A failure that changes is never
+  counted as a repeat, and a success resets the count.
+- **Stale task list.** If the `todo_write` list still has open items after 8 tool calls, a reminder
+  is appended so the visible progress stays honest.
+- **Edit feedback.** A missed `edit` names the cause (copied `N: ` prefixes, indentation) and shows
+  the closest text with line numbers; a successful one shows the changed region, so neither needs a
+  re-read.
+
+Context is measured from the provider's own token usage plus an estimate for what was added since.
+At 80% of the window older messages are summarised into a checkpoint (the originals stay in the
+log); the newest ~16% is kept verbatim and a tool call is never separated from its results.
+Long histories are summarized incrementally, with each summary request sized for the current
+context window. Oversized exchanges are reduced only in the summary copy; the exact originals
+remain retrievable. Checkpoints also carry the original and latest user requests, current task
+list and working notes independently of what the summarizer remembers to include.
+When verbose tool documentation crowds a small window, Kalash shortens that documentation while
+keeping all tool names, parameters and validation rules available. The selected schemas are logged.
+
+## Tools
+
+`read`, `write`, `edit`, `glob`, `grep`, `bash` (+ `job_output`, `job_kill`), `todo_write`,
+`web_fetch`, `skill`, `task` (subagent), `memory`, `session_search`, and tools from MCP servers.
+
+- Files: `read` returns `N: text` lines. Editing or overwriting an existing file requires having
+  read it, and fails if it changed on disk since - tracked by Kalash, the model never echoes hashes.
+  Your own consecutive edits need no re-read.
+- `bash` returns combined output and `[exit code: N]`. Long output keeps head and tail and is saved
+  to a file. A command that outlives its timeout keeps running as a background job.
+- `web_fetch` blocks private, loopback and link-local addresses (re-checked on every redirect).
+- `memory` remembers, recalls or forgets named notes. Session notes survive compaction and resume;
+  project notes carry stable facts into new sessions in the same project. Notes include their
+  source session and event number and remain model-authored data, not instructions or proof.
+  Forget removes a note from active memory; the append-only source events remain in the log.
+- `session_search` searches original messages, tool calls and tool results, including compacted
+  history. It supports literal queries, event-number ranges and character pagination, so a smaller
+  context window can recover exact evidence when a summary omits it.
+
+## MCP servers
+
+Local (stdio) and remote (Streamable HTTP) servers; their tools appear as `mcp__NAME__tool`.
 
 ```bash
-kalash config set budget.max_tokens 500000 --scope global
-kalash config set budget.max_cost_usd 2.00 --scope global
-# Remove a previously configured ceiling:
-kalash config set budget.max_tokens null --scope global
-kalash config set budget.max_cost_usd null --scope global
+kalash mcp add deepwiki https://mcp.deepwiki.com/mcp
+kalash mcp add docs https://example.com/mcp -H "Authorization: Bearer ${DOCS_TOKEN}"
+kalash mcp add time -- uvx mcp-server-time
+kalash mcp test deepwiki        # connect and list tools: the quickest "does it work"
+kalash mcp list | trust NAME [--off] | remove NAME
 ```
 
-Project overrides still take precedence over user defaults; existing configured
-limits are preserved. Restart the session after changing settings. Operational
-limits remain: 50 iterations per send, 100 model requests, 500 attempted tools,
-3600 seconds of session execution, and spawn depth 3. Explicit evaluation budgets
-remain mandatory for the evaluation runners.
+A remote server is probed for the current stateless protocol (`server/discover`, 2026-07-28) and
+falls back to the earlier `initialize` + session-id handshake, so both kinds of public server work;
+replies may be JSON or an event stream. HTTPS is required except for loopback, redirects are not
+followed (they would carry your headers elsewhere), responses are capped at 16 MiB, and `${VAR}` in a
+header is read from the environment so the token is not written to settings. Stdio servers get a
+scrubbed environment (`--env NAME=value` adds to it). `mcp_servers` is honoured from user and local
+settings only, never from a committed project file.
 
-Efficiency comes from bounded tool observations, lazy extension schemas, context
-compaction when needed, and a stable prompt prefix. Changing workspace facts now
-follow conversation history so they do not invalidate cached instructions. Savings
-depend on provider caching and task behavior; cheapest successful completion has
-not been established by the current live evaluations.
+MCP tools **ask first** until you trust the server: `--trust` when adding, `kalash mcp trust NAME`,
+or `/mcp trust NAME` for the current session. In *Auto* mode an untrusted MCP tool is denied and
+the denial says which command to run. `/mcp` shows each server, its transport and its tools.
 
-**Streaming transcript**
+## Safety model
 
-Responses appear in order with their tool calls. Incoming text is coalesced into
-50 ms updates, including the last chunk before a pause. Text stays literal while
-arriving and becomes Markdown when the response ends, preventing unfinished
-formatting from repeatedly changing the transcript height. Tool progress keeps its
-output visible, and errors retain partial responses. Scroll up to read history;
-press End to follow live output again. Ctrl+O expands the most recent tool details.
+| Layer | What it does |
+| --- | --- |
+| Sandbox (`bwrap` / Seatbelt) | Commands see the filesystem read-only; only the workspace, temp and `sandbox.writable_roots` are writable. PID namespace, secrets masked, optional no-network. `.git/hooks`, `.git/config`, `.kalash` are read-only inside it. |
+| Permissions | allow / ask / deny per tool call from declared effects. Writes outside the workspace are denied; protected paths ask; credentials are never readable. |
+| Approval | `ask` prompts you in the UI; headless it is denied (or `--approval never`). Denials are reported in the result and exit code. |
+| Environment | Secret-looking variables are removed from commands and hooks unless listed in `sandbox.pass_env`. |
+| Settings trust | Committed `.kalash/settings.json` can only set model and behaviour keys; permissions, hooks, MCP and provider endpoints are ignored there (use `~/.kalash/settings.json` or `.kalash/settings.local.json`). |
 
-**Safety**
+Commands are deliberately **not** classified by parsing shell text. Add your own rules:
+`permissions.deny` / `permissions.ask`, e.g. `["bash git push*", "write secrets/*"]`.
 
-- Shell commands require a working OS sandbox unless full access is explicitly configured.
-- Subprocess environments exclude API keys by default.
+Not covered: the sandbox does not stop network exfiltration while `sandbox.network` is true;
+`web_fetch` resolves DNS before connecting (a rebinding race is theoretically possible); MCP
+servers and hooks run unsandboxed with your privileges (MCP tools ask first unless `trust: true`).
+The macOS Seatbelt profile is generated and unit-tested but has not been run on a Mac here.
 
-**Durability**
+## Headless
 
-- Each settled tool result is saved before the next dependent write starts.
-- SQLite operations own their transaction connections.
-- Interrupted tool calls retain their intent and receive an unknown-outcome result on resume. **Inspect the workspace before retrying a mutation.**
-- Journal admission stops at 8 MiB per record, 128 MiB or 100,000 records per session. Existing evidence is preserved; start a new session when a limit is reached.
+```bash
+kalash -p "task" [-m provider/model] [--output-format text|json|stream-json]
+      [-c | -r SESSION] [--sandbox MODE] [--approval ask|never] [--cwd DIR]
+echo "task" | kalash -m openai/gpt-5.6-sol
+```
 
-## Instructions, Skills and Context
+| Exit | Meaning |
+| --- | --- |
+| 0 | completed |
+| 1 | provider or runtime error |
+| 2 | usage or configuration error |
+| 3 | completed, but some actions were denied |
+| 4 | a configured limit stopped the run |
+| 5 | stopped early (output limit, refusal, or `stuck`: one command failed 6 times with the same output) |
+| 130 | cancelled (Ctrl+C) |
 
-### Instructions
+`json` prints one object: `ok`, `exit_code`, `reason`, `result`, `error`, `session_id`, `model`,
+`steps`, `tool_calls`, `denials`, `usage`, `cost_usd`. `stream-json` emits one event per line and
+ends with the same object. Cost is `null` unless you configure `pricing`.
 
-The static system prompt is separate from instruction discovery. Both `AGENTS.md` and `KALASH.md` load from user and ancestor directories, broadest first. Within the same directory, native `KALASH.md` comes last. Scoped guidance is loaded before the first change under a subdirectory.
+## Interactive UI
 
-### Skills
+A Textual 8 terminal UI: streamed Markdown answers, collapsible tool blocks with coloured diffs,
+a status bar (mode, model, context meter, git branch, cost), and a themeable palette (`/theme`;
+`kalash-dark` and `kalash-light` plus Textual's built-in schemes; the terminal's own colours with
+`ansi-dark`).
 
-Skills are folders containing a `SKILL.md` with YAML `name` and `description`.
+| Input | Does |
+| --- | --- |
+| `Enter` / `Ctrl+J` | send (queued while the agent works) / new line |
+| `Esc` | interrupt the turn; queued messages return to the prompt instead of being sent |
+| `Shift+Tab` | cycle mode: **Ask** -> **Auto** -> **Plan** |
+| `/` | the complete, scrollable command menu in sections (modes first); keep typing to filter |
+| `Tab` / `Enter` in the menu | `Tab` completes the command word; `Enter` runs it |
+| `@` | file-path completion (`Tab` or `Enter` inserts) |
+| `!cmd` | run a shell command yourself, in the same sandbox |
+| `Ctrl+O` | show or hide tool output, reasoning and folded "Explored" rows |
+| `Ctrl+T` | cycle reasoning effort (levels the model accepts) |
+| `Up` / `Down` | prompt history (persisted across sessions) |
+| `PgUp` / `PgDn` / `Ctrl+End` | scroll / jump back to the newest output |
+| `Ctrl+C` | copy selection, else interrupt, else clear; twice to quit |
+| `?` or `F1` | help |
 
-- Only metadata loads initially; the `skill` tool loads a body and optional bounded references.
-- Precedence: project definitions, then user definitions, then plugins, then the 12 bundled workflow skills.
-- Bodies and individual resources load on demand.
-- Loaded skill bodies and scoped guidance survive history compaction.
+Large pastes collapse to `[Pasted text #1 +40 lines]` and expand when sent.
 
-### Extension tools
+The transcript shows paths relative to the project, folds a run of finished reads/searches into one
+"Explored N files" row (click it or `Ctrl+O` to open), flags a write that only changed whitespace,
+shows the first line of the model's reasoning while it thinks, and ends a substantial turn with a
+footer such as `✓ 31s · 19 tool calls · 181.0k in · 4.4k out · edited 1 file +61 −21`. When you
+have scrolled up while output keeps arriving, a "new output" marker offers `Ctrl+End`.
 
-Extension tools are discovered with `tool_search`; only selected MCP/plugin schemas enter requests. Optional artifact workflows cover PDF, DOCX, XLSX, PPTX, images, archives and structured data. See [capability support and loading](docs/CAPABILITIES.md) for execution paths, installation commands and format limits.
+**Modes** (`/permissions`, `Shift+Tab`): *Ask* edits inside the workspace and asks before risky
+actions; *Auto* never prompts (protected paths and escalations are denied); *Plan* is read-only
+research that ends with a plan you approve, optionally switching to Auto; *Read-only* refuses every
+change; *Full access* disables the sandbox and prompts - choose it explicitly with `/full`
+(it asks you to confirm). The model is told about a mode change at the start of the next message, never mid-turn.
 
-### Context assembly
+**Undo.** `/undo` restores the files the agent wrote or edited in its last turn, but only those
+unchanged since the agent touched them. Changes made through `bash` are not tracked.
 
-- Identity, catalog and root guidance stay stable.
-- Environment and bounded memory are labeled separately from conversation.
-- Near the actual model window, the runtime first shortens older observations by reference. If necessary, it summarizes complete older exchanges using a charged model request, with a labeled extractive fallback.
-- User instructions remain verbatim; recent tool exchanges stay paired.
-- Oversized observations can be retrieved through `expand`.
-- Runtime command/file receipts survive summaries as bounded structured facts.
-- Ordinary observations are scrubbed before retention and before outgoing requests.
-- Notes and observation indexes have bounded prompt projections; `expand` retrieves omitted originals. Its `grep` parameter now matches literal text, case-insensitively. Use `search` for regular expressions.
-- A request that cannot fit its output allowance after reduction is refused with a context breakdown. It does not silently lower the chosen allowance.
+Each mode has its own command - `/ask`, `/auto`, `/plan`, `/read-only`, `/full` - and the menu marks
+the current one. `/full` asks you to confirm first. Other commands: `/permissions`, `/model`, `/new`, `/resume`, `/compact`, `/undo`, `/diff`,
+`/init`, `/effort`, `/cost`, `/context`, `/status`, `/todos`, `/copy`, `/export`, `/rename`,
+`/theme`, `/provider`, `/memory`, `/mcp` (`/mcp trust NAME`), `/skills`, `/verbose`, `/doctor`, `/help`, `/quit`.
+Your own live in `.kalash/commands/<name>.md` (front matter `description`, body with
+`$ARGUMENTS`).
 
-See [the design and acceptance gates](docs/HARNESS_DESIGN.md) for remaining security, context and evaluation work.
+## Settings
 
-## Memory
-
-The default backend is SQLite with FTS keyword retrieval.
-
-- Records carry scope, provenance and confidence; scope filtering happens before retrieval limits.
-- Exact deduplication, updates, history and FTS changes are transactional.
-- Turn capture saves bounded explicit preferences.
-- Agent-written memories carry low-trust inferred provenance. Recall includes source, scope and time; saved data cannot grant permissions. Automatic preference extraction excludes common quotation, code-fence and negation cases and is still a heuristic.
-- Recall has a rendered token limit and is labeled as data.
-- Existing database records are kept.
-
-The `task` tool delegates read-only analysis with separate conversation context.
-Children share the workspace and skip hooks and extensions; they cannot apply edits.
-Writing agents need a caller-owned separate workspace and a reviewed integration step.
-Durable parent sessions retain child IDs, partial outcomes and charged usage.
-
-Filesystem reads acquire at most 16 MiB and return at most 1 MiB. Search bounds
-aggregate output and reaps its process group on cancellation. Fetch accepts bounded,
-uncompressed HTTPS text and same-origin redirects; a destination change requires an
-explicit fetch. These limits do not establish DNS/private-address isolation.
-- Custom providers can implement the memory protocol and register an entry point.
-
-> **Not included:** vector search, graph retrieval, a mem0 adapter and a background extraction queue.
-
-## MCP and Hooks
-
-### MCP configuration
-
-Settings merge from `~/.kalash/settings/mcp.json` and `.kalash/settings/mcp.json`, with project entries taking precedence.
+Order (later wins): defaults, `~/.kalash/settings.json`, `<project>/.kalash/settings.json`,
+`<project>/.kalash/settings.local.json`, `KALASH_MODEL`, command line. Invalid values fail with the
+file and key. `kalash config show` prints the effective result; `kalash config set KEY VALUE
+[--scope user|project|local]` validates before saving.
 
 ```json
 {
-  "servers": {
-    "local": {
-      "transport": "stdio",
-      "command": "python",
-      "args": ["server.py"],
-      "env": {"TOKEN": "${env:MY_SERVER_TOKEN}"}
-    },
-    "remote": {
-      "transport": "streamable-http",
-      "url": "https://example.com/mcp",
-      "headers": {"Authorization": "Bearer ${env:MY_SERVER_TOKEN}"}
-    }
+  "model": "anthropic/claude-sonnet-5-5",
+  "permissions": {"sandbox": "workspace-write", "approval": "ask", "deny": ["bash git push*"]},
+  "pricing": {"anthropic/claude-sonnet-5-5": {"input_per_mtok": 3, "output_per_mtok": 15}},
+  "hooks": {"PreToolUse": [{"matcher": "^bash$", "command": "./scripts/check-command.sh"}]},
+  "mcp_servers": {
+    "git": {"command": "uvx", "args": ["mcp-server-git"], "trust": false},
+    "deepwiki": {"url": "https://mcp.deepwiki.com/mcp"}
   }
 }
 ```
 
-| Command | Purpose |
-| --- | --- |
-| `kalash mcp trust` | Authorize manually reviewed project configuration |
-| `kalash mcp add` | Add a server and authorize the configuration it writes |
-| `kalash mcp test NAME` | Explicitly check a selected server |
+Sessions have no harness-imposed token, dollar or step caps. Old `limits` and `budget` settings
+are ignored, including settings inherited from earlier installs. Usage and known cost remain
+visible as telemetry. Context-window and per-response output sizes describe actual request
+capacity; they do not end a session because it has spent too much or taken too many steps.
+Hooks (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`) get JSON on stdin; exit 2 blocks.
+Skills are `<project>/.kalash/skills/<name>/SKILL.md` (or `~/.kalash/skills`) with `name` and
+`description` frontmatter; run one with `/skill-name [task]`. Project guidance is read from
+`AGENTS.md`, `CLAUDE.md` and `KALASH.md` (plus `*.local.md` overlays) in every directory from the
+project root down to where you started, and from `~/.kalash/AGENTS.md`; identical files are read once.
+It is delivered as guidance that does not override you or the system prompt, and an `AGENTS.md` in a
+subfolder is picked up when the model reads or edits a file there.
 
-Changing the file invalidates its trust. HTTP connections initialize the protocol and retain session headers. Legacy SSE is also supported but lacks the same transport regression coverage.
+## Python API
 
-### Hooks
+```python
+from kalash.sdk import Kalash
+from kalash.agent.events import TextChunk
 
-Review project hooks, then authorize their current contents with `kalash hooks trust`. Changed files stop running until authorized again.
+async with Kalash(".", model="anthropic/claude-sonnet-5-5") as agent:
+    result = await agent.run("fix the failing test")        # TurnResult
+    async for event in agent.stream("explain this repo"):   # ends with TurnEnd
+        if isinstance(event, TextChunk):
+            print(event.text, end="")
+```
 
-### Security notes
+## Layout
 
-- Network permissions come from user settings; project configuration cannot widen security settings.
-- OAuth login is not implemented; token and header configuration is.
+```
+src/kalash/
+  llm/       types, errors, SSE transport, adapters (Anthropic, OpenAI Responses, Gemini, Chat
+             Completions), model catalog, providers, discovery, retry
+  session/   append-only JSONL log, crash repair
+  agent/     loop, compaction, prompt, runtime builder, subagent task tool
+  tools/     read/write/edit/glob/grep, bash + jobs, web_fetch/todo/skill, file observation
+  permissions.py  sandbox.py  hooks.py  mcp.py  skills.py  config.py  credentials.py  sdk.py
+  modes.py  checkpoints.py  commands.py  history.py  gitinfo.py
+  cli/  tui/ (app, widgets, screens, theme, app.tcss)
+tests/
+  harness/    ScriptedAdapter (raises when the script runs out), loopback model server, wire helpers
+  unit/       adapters over raw wire payloads, tools, sandbox, permissions, MCP, session, config
+  contract/   the real loop + tools + permissions + log over a scripted model
+  integration/  SDK       process/  the real `kalash` command and the built wheel
+  tui/        Textual pilot tests       live/  real providers (opt-in, costs money)
+```
 
 ## Development
 
-See [architecture](docs/ARCHITECTURE.md) for module responsibilities and [review](docs/HARNESS_REVIEW.md) for findings, fixes and remaining gates.
-
 ```bash
-uv run pytest -q
-uv run mypy src
-uv run ruff check src tests
-uv build
+uv run pytest -q                 # everything except live and wheel tests
+uv run ruff check src tests && uv run ruff format --check src tests && uv run mypy src
+uv build && KALASH_WHEEL="$PWD"/dist/*.whl uv run pytest tests/process/test_wheel.py
+KALASH_LIVE=1 ANTHROPIC_API_KEY=... uv run pytest tests/live    # real model, opt-in
+uv run python scripts/tui_screenshots.py conversation approval   # render the real UI to PNG
 ```
 
-## Evaluation
-
-Regression tests validate runtime contracts. Scripted evaluations validate runner mechanics. **Neither establishes a public coding benchmark score.**
-
-The [fresh compact suite](docs/EVALS.md) uses independent hidden checks and one shared token allowance. The [2026-10-03 live results](docs/COMPACT_EVAL_RESULTS.md) record failed repairs and the fixes they exposed, within 205,069 conservatively charged tokens.
-
-The performance reference is the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness). Public comparison requires matched trials and an independent official grader.
-
-## Documentation
-
-| Document | Covers |
-| --- | --- |
-| [Architecture](docs/ARCHITECTURE.md) | Module responsibilities |
-| [Capabilities](docs/CAPABILITIES.md) | Execution paths, installation commands, format limits |
-| [Harness design](docs/HARNESS_DESIGN.md) | Design and acceptance gates |
-| [Harness review](docs/HARNESS_REVIEW.md) | Findings, fixes and remaining gates |
-| [Evaluations](docs/EVALS.md) | Fresh tasks, grading and shared token accounting |
-| [Live results](docs/COMPACT_EVAL_RESULTS.md) | Measured outcomes, costs and failure analysis |
-| [Codex build judge](docs/BUILD_JUDGE.md) | Build task, independent checks and actual Codex scorecards |
+Tests mock only the model (at the adapter boundary or over loopback HTTP); the loop, tools,
+permissions, sandbox, storage and CLI are real. The suite blocks non-loopback sockets.
