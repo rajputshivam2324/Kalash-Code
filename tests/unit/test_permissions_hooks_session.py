@@ -2,8 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
+import os
+import shlex
+import signal
 import stat
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -210,6 +217,74 @@ async def test_failed_or_timed_out_pre_hook_fails_closed(work: Path):
     gone = runner(work, PreToolUse=[{"command": "echo hi"}])
     gone.cwd = work / "does-not-exist"
     assert (await gone.run("PreToolUse", {}, match="x")).blocked
+
+
+def hook_child(work: Path) -> tuple[str, Path]:
+    pids = work / "hook-pids.json"
+    script = work / "hook-child.py"
+    script.write_text(
+        "import json, os, time\n"
+        "from pathlib import Path\n"
+        f"pids = Path({str(pids)!r})\n"
+        "pids.with_suffix('.tmp').write_text(json.dumps([os.getppid(), os.getpid()]))\n"
+        "pids.with_suffix('.tmp').replace(pids)\n"
+        "time.sleep(30)\n"
+    )
+    # A trailing command keeps the shell alive alongside its child.
+    return f"{shlex.quote(sys.executable)} {shlex.quote(str(script))}; :", pids
+
+
+def process_is_running(pid: int) -> bool:
+    state = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False
+    ).stdout.strip()
+    return bool(state) and not state.startswith("Z")
+
+
+async def clean_hook_children(pids: Path) -> None:
+    if pids.exists():
+        for pid in json.loads(pids.read_text()):
+            assert pid > 1 and pid != os.getpid()
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+        await asyncio.sleep(0.1)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell descendants")
+async def test_hook_timeout_reaps_descendants_and_drains_their_pipes(work: Path):
+    command, pids = hook_child(work)
+    try:
+        outcome = await asyncio.wait_for(
+            runner(work, PreToolUse=[{"command": command, "timeout": 1}]).run("PreToolUse", {}),
+            5,
+        )
+        assert outcome.blocked and "timed out" in outcome.message
+        assert pids.exists(), "the child started before the hook timed out"
+        assert not any(process_is_running(pid) for pid in json.loads(pids.read_text()))
+    finally:
+        await clean_hook_children(pids)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX shell descendants")
+async def test_hook_cancellation_reaps_descendants_before_returning(work: Path):
+    command, pids = hook_child(work)
+    task = asyncio.create_task(
+        runner(work, PreToolUse=[{"command": command, "timeout": 30}]).run("PreToolUse", {})
+    )
+    try:
+        async with asyncio.timeout(5):
+            while not pids.exists():
+                await asyncio.sleep(0.01)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not any(process_is_running(pid) for pid in json.loads(pids.read_text()))
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        await clean_hook_children(pids)
 
 
 async def test_user_prompt_hook_stdout_becomes_context(work: Path):

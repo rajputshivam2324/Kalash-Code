@@ -14,8 +14,11 @@ guard, so failing open would silently remove the guard.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
+import os
 import re
+import signal
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -76,18 +79,37 @@ class HookRunner:
                 stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                start_new_session=os.name == "posix",
             )
         except OSError as error:
             return guard, f"{label} could not start: {error}", ""
+        communication = asyncio.create_task(process.communicate(body))
         try:
-            out, err = await asyncio.wait_for(process.communicate(body), spec.timeout)
+            out, err = await asyncio.wait_for(asyncio.shield(communication), spec.timeout)
         except TimeoutError:
-            process.kill()
-            await process.wait()
+            await self._stop(process, communication)
             return guard, f"{label} timed out after {spec.timeout:.0f}s", ""
+        except asyncio.CancelledError:
+            await self._stop(process, communication)
+            raise
         text = err.decode("utf-8", "replace").strip()
         if process.returncode == 0:
             return False, "", out.decode("utf-8", "replace")
         if process.returncode == 2:
             return True, text or f"{label} blocked this action", ""
         return False, f"{label} exited {process.returncode}: {text[:300]}", ""
+
+    @staticmethod
+    async def _stop(
+        process: asyncio.subprocess.Process, communication: asyncio.Task[tuple[bytes, bytes]]
+    ) -> None:
+        # A shell's descendants inherit its pipes. Killing only the shell leaves
+        # those pipes open and can hang wait() beyond the hook's timeout.
+        with contextlib.suppress(ProcessLookupError):
+            if os.name == "posix":
+                os.killpg(process.pid, signal.SIGKILL)
+            elif process.returncode is None:
+                process.kill()
+        # Keep communicate alive through timeout/cancellation so it drains and
+        # closes every pipe and reaps the shell before the hook returns.
+        await communication

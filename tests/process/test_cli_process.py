@@ -12,6 +12,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from rich.text import Text
 
 from kalash.paths import kalash_home
 from tests.harness.mock_server import MockLLMServer, text_response, tool_call_response
@@ -225,9 +226,16 @@ def test_sigint_cancels_the_run_closes_the_session_and_exits_130(server: MockLLM
 # ----------------------------------------------------------------------------- other commands
 
 
-def test_version_and_help(work: Path):
+@pytest.mark.parametrize("terminal_env", [None, "GITHUB_ACTIONS", "FORCE_COLOR"])
+def test_version_and_help(work: Path, monkeypatch: pytest.MonkeyPatch, terminal_env: str | None):
+    for name in ("GITHUB_ACTIONS", "FORCE_COLOR", "PY_COLORS", "_TYPER_FORCE_DISABLE_TERMINAL"):
+        monkeypatch.delenv(name, raising=False)
+    if terminal_env:
+        monkeypatch.setenv(terminal_env, "1")
     assert run("--version", work=work).stdout.startswith("kalash 0.2")
-    assert "--output-format" in run("--help", work=work).stdout
+    help_result = run("--help", work=work)
+    assert help_result.returncode == 0, help_result.stderr
+    assert "--output-format" in Text.from_ansi(help_result.stdout).plain
 
 
 def test_auth_login_list_and_logout_never_echo_the_key(work: Path):
